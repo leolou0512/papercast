@@ -1,0 +1,14 @@
+# The orchestrator's venv (joins, loudness, encoding, tags). Resolved with
+# `uv pip compile -p 3.11` on 2026-09-26; the same versions the three-voice samples used,
+# plus mutagen for tags. imageio-ffmpeg carries the static ffmpeg 7.0.2 (libmp3lame, libopus).
+cffi==2.1.1
+imageio-ffmpeg==0.6.0
+mutagen==1.48.1
+numpy==2.4.6
+# NVML, for measure-gpu only (the job itself reads nvidia-smi, like everything else here)
+nvidia-ml-py==13.615.71
+pycparser==3.0
+pyloudnorm==0.2.0
+scipy==1.17.1
+soundfile==0.14.0
+typing-extensions==4.16.0

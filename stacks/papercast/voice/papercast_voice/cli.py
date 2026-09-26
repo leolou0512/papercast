@@ -1,0 +1,94 @@
+"""Command line. The runner uses `info` and `run <dir>` (INTERFACE.md §10.1); the rest is for people.
+
+    papercast-voice info                   one JSON line, < 2 s, never touches the GPU
+    papercast-voice run <job dir>          voice one episode (exit 0 = status.json phase done)
+    papercast-voice check <script.md>      how a script would be chunked, or why it is refused
+    papercast-voice measure-cpu [...]      time the CPU voice at several worker/thread splits
+    papercast-voice measure-episode <dir>  words per minute and speed from a finished episode
+    papercast-voice measure-gpu [...]      peak GPU memory and speed of the configured GPU voice
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+
+# Before numpy is imported anywhere: its BLAS would otherwise start one spinning thread per CPU
+# (measured: 5.8 s of CPU in a 0.4 s run on stibnite's 64). The orchestrator needs one.
+for _v in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_v, "1")
+
+from . import VERSION  # noqa: E402
+from .config import engine_spec, gpu_need_mib, load
+
+INTERFACE = "1.4"   # this document version (INTERFACE.md); readers compare the major
+
+
+def _engine_installed(spec: dict) -> bool:
+    if not os.path.isfile(spec.get("python", "")) or not os.path.isfile(spec.get("worker", "")):
+        return False
+    md = spec.get("model_dir")
+    return all(os.path.isfile(os.path.join(md, f)) for f in spec.get("files", [])) if md else True
+
+
+def info() -> dict:
+    try:
+        cfg = load()
+        cpu = engine_spec(cfg, cfg["cpu_engine"])
+        ok = _engine_installed(cpu) and os.access(cfg["ffmpeg"], os.X_OK)
+        g = None
+        wpm = cpu.get("words_per_min")
+        if cfg.get("gpu_engine"):
+            spec = engine_spec(cfg, cfg["gpu_engine"])
+            g = {"model": spec.get("label", spec["name"]), "need_mib": gpu_need_mib(cfg),
+                 "installed": _engine_installed(spec)}
+            wpm = spec.get("words_per_min") or wpm
+        return {"interface": INTERFACE, "installed": bool(ok), "gpu": g,
+                "cpu": {"model": cpu.get("label", cpu["name"]), "voice": cpu.get("voice")},
+                "words_per_min": wpm, "version": VERSION}
+    except Exception as e:  # noqa: BLE001  (info must answer, not crash: installed false)
+        return {"interface": INTERFACE, "installed": False, "gpu": None, "cpu": None,
+                "words_per_min": None, "version": VERSION, "error": f"{e.__class__.__name__}: {e}"}
+
+
+def check(path: str) -> int:
+    from . import textprep
+    cfg = load()
+    with open(path, encoding="utf-8") as fh:
+        script = fh.read()
+    names = [cfg["cpu_engine"]] + ([cfg["gpu_engine"]] if cfg.get("gpu_engine") else [])
+    out = {}
+    try:
+        for n in names:
+            spec = engine_spec(cfg, n)
+            chunks = textprep.plan(script, int(spec["max_words"]), cfg["audio"])
+            out[n] = {"chunks": len(chunks), "words": sum(c.words for c in chunks),
+                      "max_chunk_words": max(c.words for c in chunks),
+                      "headings": sum(1 for c in chunks if c.kind == "heading")}
+    except textprep.ScriptInvalid as e:
+        print(json.dumps({"ok": False, "problem": str(e)}))
+        return 2
+    print(json.dumps({"ok": True, **out}))
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    if argv[:1] == ["info"]:
+        print(json.dumps(info()))
+        return 0
+    if argv[:1] == ["run"] and len(argv) == 2:
+        from .job import Job
+        return Job(argv[1], load()).run()
+    if argv[:1] == ["check"] and len(argv) == 2:
+        return check(argv[1])
+    if argv[:1] == ["measure-cpu"]:
+        from .measure import measure_cpu
+        return measure_cpu(argv[1:])
+    if argv[:1] == ["measure-episode"]:
+        from .measure import measure_episode
+        return measure_episode(argv[1:])
+    if argv[:1] == ["measure-gpu"]:
+        from .measure import measure_gpu
+        return measure_gpu(argv[1:])
+    print(__doc__, file=sys.stderr)
+    return 2

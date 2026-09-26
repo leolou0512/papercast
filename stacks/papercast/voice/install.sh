@@ -14,6 +14,7 @@ set -euo pipefail
 SRC=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 H=${PAPERCAST_VOICE_HOME:-/home/leo/papercast/voice}
 CACHE=${PAPERCAST_VOICE_CACHE:-/home/leo/papercast-voice-cache}
+STATE=${PAPERCAST_STATE:-/home/leo/papercast/state}
 GPU=""
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -26,6 +27,12 @@ die() { echo "install.sh: $*" >&2; exit 1; }
 [ "$(id -u)" != 0 ] || die "run as leo, not root: this is a per-user install"
 command -v uv >/dev/null || die "uv not on PATH (expected /home/leo/.local/bin/uv)"
 [ -d "$CACHE/uv-cache" ] && export UV_CACHE_DIR=${UV_CACHE_DIR:-$CACHE/uv-cache}
+
+# Never replace code, venvs or weights underneath a voice job (its engines load them).
+if ! busy=$(python3 "$SRC/papercast_voice/busy.py" "$STATE" "$H"); then
+    die "a voice job is running; not installing now (try again when it is done):
+$busy"
+fi
 
 echo "== disk before"; df -h /
 umask 077

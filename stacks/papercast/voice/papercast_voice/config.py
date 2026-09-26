@@ -44,6 +44,58 @@ DEFAULTS: dict = {
             "sec_per_word": None,
             "measured": None,
         },
+        # The GPU voice Leo picked (clip A, choice page 2026-09-26_papercast-voice): Breeze TTS 2,
+        # set up exactly as the clip was made (samples/gen_breeze.py; README "GPU voice").
+        "breeze": {
+            "kind": "gpu",
+            "label": "breeze-tts-2",
+            "python": "{home}/engines/breeze/venv/bin/python",
+            "worker": "breeze_worker.py",
+            "code_dir": "{home}/engines/breeze/src",
+            "model_dir": "{home}/models/breeze-tts-2",
+            "files": ["config.json", "model-00001-of-00002.safetensors",
+                      "model-00002-of-00002.safetensors", "tokenizer.json",
+                      "audio_tokenizer/model.safetensors"],
+            # Breeze has no preset voices: the narrator is described in words and generated from
+            # a fixed seed. `voice` names that pair (it is part of the chunk cache key, so a
+            # changed description never reuses old chunks).
+            "instruction": ("A warm, clear woman in her thirties with a neutral American accent, "
+                            "narrating a science podcast: measured pace, natural and engaged, "
+                            "explaining a technical idea to a curious listener."),
+            "seed": 42,
+            "voice": "described-narrator-a-seed42",
+            "speaker": "S0",
+            "cfg_scale": 4.0,
+            "repetition_penalty": 1.1,
+            # The two CUDA-graph stages of clip A: RTF 0.83 at 9.5 GiB (all eager: 3.56, 8.1 GiB).
+            "fast_stages": ["depth_decoder", "backbone_decode"],
+            # 12.5 codec frames a second: 1,500 frames = 120 s, far above any chunk (a 75-word
+            # chunk is about 36 s); prompt + frames must fit the backbone's 2,048 positions.
+            "max_new_tokens": 1500,
+            "max_seq_len": 2048,
+            # Clip A's paragraph was 74 words; chunks stay at or under that size.
+            "max_words": 75,
+            # Length check per chunk (breeze_worker.length_problem), retried with the next seed.
+            "expected_s_per_word": 0.48,
+            "min_s_per_word": 0.15,
+            "max_s_per_word": 1.2,
+            "attempts": 3,
+            "threads": 2,
+            "sample_rate": 24000,
+            # Model load plus CUDA-graph capture took 89 s for the sample (warm compiler caches).
+            "load_timeout_s": 900,
+            "chunk_timeout_s": 600,
+            "env": {
+                "CC": "{home}/engines/breeze/bin/cc",
+                "TRITON_CACHE_DIR": "{home}/engines/breeze/cache/triton",
+                "TORCHINDUCTOR_CACHE_DIR": "{home}/engines/breeze/cache/inductor",
+            },
+            # Written by install.sh (provisional, from the sample) and then by measure-gpu.
+            "peak_mib": None,
+            "words_per_min": None,
+            "sec_per_word": None,
+            "measured": None,
+        },
     },
     # CPU fallback parallelism: `workers` processes, each with `threads` torch threads.
     # Chosen by measurement (README "CPU voice"); overwritten by measure-cpu --apply.

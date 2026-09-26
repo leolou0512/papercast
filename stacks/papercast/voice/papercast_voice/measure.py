@@ -163,6 +163,9 @@ def measure_gpu(argv: list[str]) -> int:
     ap.add_argument("--need-mib", type=int, required=True,
                     help="admission threshold for this run (the previous, provisional figure)")
     ap.add_argument("--keep", help="keep the job directory here")
+    ap.add_argument("--gpu-lock", default="/home/leo/papercast/state/voice-gpu.lock",
+                    help="the GPU slot the runner's jobs use (INTERFACE §10.4), so a measurement "
+                         "and a real episode never share the card")
     ap.add_argument("--apply", action="store_true")
     a = ap.parse_args(argv)
     import pynvml
@@ -183,7 +186,8 @@ def measure_gpu(argv: list[str]) -> int:
     # this run's config: the provisional peak, so admission uses --need-mib
     over = json.load(open(cfg["config_file"])) if os.path.exists(cfg["config_file"]) else {}
     over.setdefault("engines", {}).setdefault(name, {})["peak_mib"] = a.need_mib - int(cfg["gpu"]["headroom_mib"])
-    over["gpu_lock"] = os.path.join(root, "state", "voice-gpu.lock")
+    over["gpu_lock"] = (a.gpu_lock if os.path.isdir(os.path.dirname(a.gpu_lock))
+                        else os.path.join(root, "state", "voice-gpu.lock"))
     tmpcfg = os.path.join(root, "voice.json")
     with open(tmpcfg, "w") as fh:
         json.dump(over, fh)
@@ -194,7 +198,7 @@ def measure_gpu(argv: list[str]) -> int:
     p = subprocess.Popen([sys.executable, "-I", "-m", "papercast_voice", "run", vdir], env=env,
                          cwd=vdir, stdout=open(os.path.join(vdir, "voice.log"), "ab"),
                          stderr=subprocess.STDOUT)
-    peak_tree, peak_dev, samples, series = 0.0, before, 0, []
+    peak_tree, peak_dev, samples, series, peak_at = 0.0, before, 0, [], None
     t0 = time.time()
     while p.poll() is None:
         tree = procs.descendants(p.pid)
@@ -204,7 +208,9 @@ def measure_gpu(argv: list[str]) -> int:
             dev = pynvml.nvmlDeviceGetMemoryInfo(h).used / 2**20
         except pynvml.NVMLError:
             used, dev = 0.0, 0.0
-        peak_tree, peak_dev = max(peak_tree, used), max(peak_dev, dev)
+        if used > peak_tree:
+            peak_tree, peak_at = used, round(time.time() - t0, 1)
+        peak_dev = max(peak_dev, dev)
         samples += 1
         if samples % 100 == 0:
             series.append((round(time.time() - t0, 1), round(used)))
@@ -212,7 +218,9 @@ def measure_gpu(argv: list[str]) -> int:
     st = json.load(open(os.path.join(vdir, "status.json")))
     mt = json.load(open(os.path.join(vdir, "metrics.json")))["runs"][-1]
     out = {"engine": name, "rc": p.returncode, "phase": st.get("phase"), "error": st.get("error"),
-           "peak_process_tree_mib": round(peak_tree), "peak_device_used_mib": round(peak_dev),
+           "peak_process_tree_mib": round(peak_tree), "peak_at_s": peak_at,
+           "peak_device_used_mib": round(peak_dev), "gpu_lock": over["gpu_lock"],
+           "retried_chunks": mt.get("retried_chunks", []),
            "device_used_before_mib": round(before), "samples": samples, "poll_s": 0.05,
            "wall_s": round(time.time() - t0, 1), "wait_s": mt.get("wait_s"),
            "encode_s": mt.get("encode_s"), "workers": mt.get("workers"),

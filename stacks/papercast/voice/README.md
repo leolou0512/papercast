@@ -6,9 +6,11 @@ day it was made). It runs on stibnite as `leo`, started by papercast-runner once
 (INTERFACE.md §10). It waits for free GPU memory by default, voices on the CPU with Kokoro when
 Leo presses **Use CPU voice (Kokoro)**, and never slows or crashes anyone else's GPU job.
 
-**State today (2026-09-26):** built, tested, installed on stibnite. Leo has **not picked the GPU
-voice yet**, so every episode is voiced by Kokoro on the CPU, at once (there is nothing to wait
-for). When he picks, one adapter is added and measured (section "GPU voice").
+**State today (2026-09-26):** built, tested, installed on stibnite. The GPU voice is **Breeze
+TTS 2** (Leo's pick, clip A on the choice page), measured on a full-length episode: peak
+**9,690 MiB** of GPU memory, so a paper waits for **10,714 MiB** free (peak + 1 GiB) and an idle
+card; it speaks at 0.83 × real time (a twenty-minute episode takes about seventeen minutes).
+Kokoro stays the CPU voice behind **Use CPU voice (Kokoro)** (section "GPU voice").
 
 ## How it fits
 
@@ -30,8 +32,8 @@ directory: each finished chunk is a WAV under `chunks/`, and a re-run on the sam
 ## What it does, and why
 
 **Chunks for the ear** (`textprep.py`). The script is cut into chunks of at most about sixty
-words (Kokoro infers 510 phoneme tokens at a time; the GPU models have a few thousand tokens of
-context). A chunk ends at a sentence end; only a sentence over the limit is cut, at a comma,
+words for Kokoro (it infers 510 phoneme tokens at a time) and 75 for Breeze (clip A's paragraph
+was 74 words; a chunk's prompt plus its audio frames must fit Breeze's 2,048 positions). A chunk ends at a sentence end; only a sentence over the limit is cut, at a comma,
 semicolon, colon or dash, and only a clause over the limit is cut between words. A `#` heading
 is its own chunk, said as a section title. After each chunk comes a pause chosen by what follows:
 0.3 s before the next sentence, 0.75 s before a new paragraph, 1.2 s before a heading, 0.6 s after
@@ -59,7 +61,7 @@ checks in a row (`nvidia-smi pmon`, its own processes excluded), or free memory 
 256 MiB. A CUDA out-of-memory also sends it back to waiting with its chunks; the third in one
 run is `failed/gpu_oom`. It never signals a process it did not start. `status.json` carries,
 besides INTERFACE §10.3's fields, `wait_reason` and `wait_text`, the sentence for the page
-("waiting for GPU: 3.0 GB free, needs 8.8 GB", or "memory is free but the card is busy …",
+("waiting for GPU: 3.0 GB free, needs 10.5 GB", or "memory is free but the card is busy …",
 or "another paper is being voiced on it"), and `note`, the last event worth showing.
 
 **Use CPU voice (Kokoro).** The runner creates `use-cpu`; the voice checks it every half second
@@ -111,6 +113,20 @@ protocol (`engines/_proto.py`: ready / synth / done / error with an `oom` flag) 
 worker runs in the engine's own venv, never the orchestrator's, and dies with the job even if the
 job is SIGKILLed (it watches its parent; see RISKS for why not `PR_SET_PDEATHSIG`).
 
+**The GPU voice: Breeze TTS 2** (`engines/breeze_worker.py`, block `engines.breeze` in
+`config.py`). Set up exactly as clip A was made (`samples/gen_breeze.py`; a test reads that file
+and pins the two together): no reference audio, the narrator described in words ("A warm, clear
+woman in her thirties with a neutral American accent, narrating a science podcast …"),
+classifier-free guidance 4, seed 42 for every chunk, bf16, eager attention, and two of upstream's
+five fast stages as CUDA graphs (`depth_decoder`, `backbone_decode`: 0.83 × real time at 9.5 GiB,
+against 3.56 × all eager at 8.1 GiB; all five are quoted at 14.4 GiB, which leaves a shared card
+no room). The model runs inside the worker process: no server, no port. Each chunk's length is
+checked against its word count (0.15–1.2 s a word, plus 2 s): a chunk that stops early or runs on
+is generated again with seed 43, then 44; if none passes, the nearest is kept and logged
+(`metrics.json` `retried_chunks`). A CUDA out-of-memory, at load or mid-chunk, ends the worker
+with `oom`, so the job frees the card and waits again (§10.4). Triton needs a C compiler and
+stibnite has none: `engines/breeze/bin/cc` is zig's clang from the venv's `ziglang` wheel.
+
 **No systemd unit** (a deliberate deviation from the brief; RISKS.md says why). The voice is a
 command, not a service: the runner's user unit supervises it, re-adopts it after its own restart,
 and restarts an interrupted voice step once after a reboot (INTERFACE §3).
@@ -125,37 +141,47 @@ and restarts an interrupted voice step once after a reboot (INTERFACE §3).
 | MP3 overshoot | true peak +1.8 to +2.0 dB at 64 kbit/s, +0.0 to +0.2 dB at 96; loudness -0.4 to -0.5 LU at both | the full episode's audio, loudnorm to -16 LUFS / -2 and -2.5 dBTP, then encoded |
 | short episode, real | 135 words → 50.2 s in 24.9 s, -16.21 LUFS, -2.2 dBTP, Whisper word error rate 0.7 % | `test_real.py` |
 | orchestrator | 1.4 GB peak, during the final check (decoding the whole episode) | `metrics.json` of the full run |
-| GPU voice | not measured: no pick yet | the sample step's one-paragraph figures are in `samples/README.md` (Voxtral 10,388 MiB, Breeze 9,696 / 8,330 MiB) and are **not** an admission threshold |
+| full-length Breeze episode (GPU) | 2,934 words → 1,117 s (18.6 min) of audio in 1,071 s: admission 20 s, load and CUDA-graph capture 46 s, synthesis 928 s (**real-time factor 0.831**), encoding 66 s; **peak 9,690 MiB** of GPU memory (reached 97 s in, flat after), device peak 10,358 MiB; **157.6 words per minute** with pauses; no chunk needed a second seed; Whisper small.en (CPU) heard 2,934 of 2,934 words, 12 errors, **0.4 % word error rate**, no digits; median pitch per chunk 157–240 Hz across the 60 paragraph chunks (median 188, 10th–90th percentile 169–213): one female narrator throughout, but not a fixed timbre (RISKS) | `measure-gpu --script tests/fixtures/long_script.md --need-mib 10720 --apply` (the sample's peak + 1 GiB as the provisional threshold), nice 10, load average 2, the card holding only Leo's 158 MiB `facecv` process and the desktop; NVML every 50 ms, summed over every process the job started; worker RSS 5.7 GB. `/home/leo/papercast/voice/measure/breeze-episode-2026-09-26.*` |
+| short Breeze episode, real | 135 words → 56.5 s of audio in 126 s (20 s admission, about 46 s load), -16.44 LUFS, -2.4 dBTP, Whisper word error rate 2.2 % ("plane" for "plain", "It turns" for "Turn") | `test_real_gpu.py`, through the runner's `launch.sh` and GPU slot |
 
 ## Install (on stibnite, as leo, no sudo)
 
 ```bash
 cd /home/leo/NAS_setup/stacks/papercast/voice
-bash install.sh            # [run 2026-09-26]  ~4 s with the uv cache; prints PAPERCAST_VOICE_CMD
+bash install.sh --gpu breeze   # [run 2026-09-26] ~45 s with the uv cache; prints PAPERCAST_VOICE_CMD
 ```
+It refuses to run while a voice job is working or holds a slot (`papercast_voice/busy.py`): it
+replaces files a job's engines load.
 It installs into `/home/leo/papercast/voice/` (0700): `app/` (a copy of `papercast_voice/`, with
 the git commit in `VERSION`), `venv/` (orchestrator: numpy, soundfile, pyloudnorm, mutagen,
 static ffmpeg 7.0.2 from `imageio-ffmpeg`), `engines/kokoro/venv/` (the exact pins that made the
 samples, `requirements/kokoro.txt`), `models/kokoro-82m/` (checksums verified), `bin/`,
-`voice.json` (measurements; kept across re-installs). Re-run it after every code change: the
+`voice.json` (measurements; kept across re-installs). With `--gpu breeze` (`engines/breeze/install.sh`):
+`engines/breeze/venv/` (`requirements/breeze.txt`: the sample's exact pins plus `ziglang`),
+`engines/breeze/src/` (breeze-tts at upstream commit 008f769), `engines/breeze/bin/cc`,
+compiler caches, and `models/breeze-tts-2/` (revision 3e28c51, every file checksummed; hard links
+to the sample step's copy, so no extra space); it sets `gpu_engine: breeze` in `voice.json` and,
+until `measure-gpu` has run, the sample's peak as a provisional threshold. Re-run it after every code change: the
 installed copy does not follow the repo by itself.
 
 Then the runner needs, in `/home/leo/papercast/runner.env` (Part B's file):
 ```
 PAPERCAST_VOICE_CMD=/home/leo/papercast/voice/bin/papercast-voice
-PAPERCAST_WPM=172        # Kokoro's measured rate; the GPU voice's once it is picked (info)
+PAPERCAST_WPM=158        # Breeze's measured rate, pauses included (info "words_per_min")
 ```
 
 ## First run and verify
 
 ```bash
 V=/home/leo/papercast/voice
-$V/bin/papercast-voice info                       # [run] "installed": true, "gpu": null until a pick
+$V/bin/papercast-voice info                       # [run] "installed": true, "gpu": {"model": "breeze-tts-2", "need_mib": 10714, ...}
 $V/bin/papercast-voice check some/script.md       # [run] chunk counts, or the reason it is refused
 cd /home/leo/NAS_setup/stacks/papercast/voice
-$V/venv/bin/python -m unittest discover -s tests  # [run] 60 tests, about 2 min, fakes only
+$V/venv/bin/python -m unittest discover -s tests  # [run] 74 tests (2 real ones skipped), about 2 min
 PAPERCAST_VOICE_REAL=1 $V/venv/bin/python -m unittest discover -s tests -p test_real.py
                                                   # [run] real Kokoro through the runner's launch.sh
+PAPERCAST_VOICE_REAL_GPU=1 $V/venv/bin/python -m unittest discover -s tests -p test_real_gpu.py
+                                                  # [run] real Breeze; skips if the GPU is not free
 ```
 A single episode by hand (what the runner does):
 ```bash
@@ -188,19 +214,20 @@ rm -rf /home/leo/papercast/voice            # [unrun] the install; job directori
 Nothing else was changed: no system files, no user units, no crontab. Episodes already made are
 on the NAS.
 
-## GPU voice (after Leo's pick)
+## GPU voice
 
-Leo's answer lands in `~/lab/review/2026-09-26_papercast-voice.choices.json` (`voice`: breeze,
-voxtral, kokoro or none). For breeze or voxtral: an adapter `engines/<name>/` (worker script,
-`install.sh`, the sample step's pins: vllm 0.18.0 + vllm-omni 0.18.0 for Voxtral with the zig
-`cc` wrapper; no driver change), then
+Leo picked Breeze TTS 2 (`~/lab/review/2026-09-26_papercast-voice.choices.json`). Install and
+measure (each `[run 2026-09-26]`):
 ```bash
-bash install.sh --gpu <name>
-$V/bin/papercast-voice measure-gpu --script tests/fixtures/long_script.md --need-mib <sample peak + 1024> --apply
+bash install.sh --gpu breeze
+nvidia-smi                        # measure only with room: the job waits for it anyway
+$V/bin/papercast-voice measure-gpu --script tests/fixtures/long_script.md --need-mib 10720 --apply
 ```
-which runs a full episode as a real job while sampling NVML every 50 ms over the job's whole
-process tree and stores the measured peak, words per minute and speed; admission then uses peak
-+ 1 GiB. For kokoro or none, the GPU path stays unbuilt and every episode stays on the CPU.
+`measure-gpu` runs a full episode as a real job, in the runner's GPU slot (`state/voice-gpu.lock`,
+so it never runs beside a real episode), samples NVML every 50 ms over every process the job
+starts, and stores the peak, words per minute and seconds per word; admission then uses peak +
+1 GiB. Re-measure after any change to the model, its fast stages or `max_words`. Voxtral, the
+other candidate, was not built.
 
 ## Files
 
@@ -210,8 +237,10 @@ process tree and stores the measured peak, words per minute and speed; admission
 | `papercast_voice/job.py` | one episode: states, controls, resume, GPU and CPU passes, encode |
 | `papercast_voice/textprep.py` | chunking and the speakable-text guard |
 | `papercast_voice/gpu.py` | nvidia-smi readings, admission rule, give-back rule |
-| `papercast_voice/workers.py`, `engines/` | engine processes and their protocol; the Kokoro worker |
+| `papercast_voice/workers.py`, `engines/` | engine processes and their protocol; the Kokoro and Breeze workers |
+| `engines/breeze/` | the Breeze install step and its C compiler wrapper |
+| `papercast_voice/busy.py` | install.sh's check that no voice job is running |
 | `papercast_voice/audio.py`, `tags.py` | join, loudness, MP3, verification; ID3 |
 | `papercast_voice/measure.py` | the measurements above |
-| `tests/` | unit and job tests with a fake engine and a fake `nvidia-smi`; `test_real.py` |
+| `tests/` | unit and job tests with fake engines (the Breeze worker with its model faked) and a fake `nvidia-smi`; `test_real.py`, `test_real_gpu.py` |
 | `samples/` | the earlier three-voice choice for Leo (not the pipeline) |

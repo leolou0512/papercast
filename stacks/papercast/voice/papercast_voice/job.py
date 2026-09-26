@@ -267,6 +267,13 @@ class Job:
                 self.run_t0 = time.time() - float(msg.get("gen_s") or 0)
             self.done[ch.idx] = float(msg.get("audio_s") or 0)
             self.run_words += ch.words
+            if int(msg.get("attempts") or 1) > 1 or msg.get("warning"):
+                self.m.setdefault("retried_chunks", []).append(
+                    {"idx": ch.idx, "words": ch.words, "attempts": msg.get("attempts"),
+                     "seed": msg.get("seed"), "warning": msg.get("warning"),
+                     "tries": msg.get("tries")})
+                if msg.get("warning"):
+                    self.event(f"chunk {ch.idx}: {msg['warning']}")
             self._progress()
 
     def _stop_workers(self) -> None:

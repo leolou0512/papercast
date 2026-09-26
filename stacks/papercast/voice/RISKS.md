@@ -3,18 +3,43 @@
 Read with `README.md`. "Measured" = run on stibnite on 2026-09-26 with the command named in the
 README; everything else is an assumption or untested, and says so.
 
-## Not built yet
+## The GPU voice (Breeze TTS 2)
 
-- **The GPU voice.** Leo has not picked one on the choice page
-  (`~/lab/review/2026-09-26_papercast-voice.html`). Until an adapter is installed,
-  `engine: auto` voices every episode with Kokoro on the CPU at once, because there is nothing
-  to wait for; status says so in `note`. The GPU path (waiting, admission, yielding, the one-slot
-  lock, out-of-memory recovery) is built and tested against a fake engine and a fake
-  `nvidia-smi`, but no real GPU model has run through it.
-- **No GPU peak measured through the pipeline.** The sample step measured one 74-word paragraph
-  per model (README "Measured"). The admission threshold must come from a full-length run of the
-  picked model (`measure-gpu`); until then there is no threshold, and a GPU engine without a
-  measured `peak_mib` refuses to run (`engine_failed`, "no measured peak") rather than guess.
+- **One narrator, described in words, not a fixed recording.** Breeze has no preset voices. Every
+  chunk is generated from clip A's description, CFG 4 and seed 42, so the same text always gives
+  the same audio and every episode starts from the same settings. But the seed does not pin a
+  timbre: each chunk's text differs, so each chunk is a fresh draw from the description. The
+  voice can therefore shift between chunks (pitch, brightness, pace). Measured on the full
+  episode, with median pitch (librosa pYIN) as a rough proxy, not a speaker-identity test: the
+  60 paragraph chunks range from 157 to 240 Hz (median 188; 10th–90th percentile 169–213), with
+  one chunk 27 % above the median and 17 more than 10 % off it. That stays within one female
+  voice; whether it is more than one narrator's natural variation, and audible, has not been
+  checked by ear. `measure/breeze-episode-2026-09-26.pitch.json` has the per-chunk figures.
+  If Leo hears it wander, the fix is voice cloning from clip A (upstream's `ref_clone_tata`
+  template; the fast path refuses only dual-CFG modes, so it should run there) — not built, not
+  measured.
+- **A chunk can come out wrong.** Such a model can stop early (words missing) or run on (babble,
+  or the 1,500-frame cap). The adapter checks every chunk's length against its word count (0.15
+  to 1.2 s a word, plus 2 s) and retries with seed 43, then 44. If no attempt passes it keeps
+  the one nearest the expected length and logs a warning (`metrics.json` `retried_chunks`)
+  rather than failing an episode that Retry would only fail again. The check cannot hear a
+  wrong word said at the right length; only Whisper (a test) or Leo's ear can.
+- **The admission threshold is measured on one 20-minute script** (`tests/fixtures/long_script.md`,
+  README "Measured"). Memory is set at load (weights, a static 2,048-position cache, CUDA
+  graphs): on that run it reached 9,690 MiB 97 s in and stayed there to the end, so another
+  script's length should not move it; not tested on other scripts. Between install and that measurement the threshold was provisional: the one-paragraph
+  sample's 9,696 MiB + 1 GiB.
+- **torch 2.9.1 is the CUDA 12.8 build; stibnite's driver is 535 (CUDA 12.2).** It runs by CUDA's
+  minor-version compatibility (measured: the sample, the short real test, the full episode). A
+  kernel that needs a newer driver's PTX JIT would fail with a CUDA error (`engine_failed`, then
+  Use CPU voice); none has. No driver change was made or is needed.
+- **Compiling needs zig.** Triton and inductor build C stubs and there is no gcc on stibnite;
+  `engines/breeze/bin/cc` wraps zig's clang from the `ziglang` wheel in the engine's venv. Its
+  caches live in `engines/breeze/cache/`; a cold cache adds compile time to the first load.
+- **The engine runs in-process**: no model server, no port. Besides the GPU it uses 2 torch
+  threads and 5.7 GB of RAM (peak resident size on the full episode).
+- **Pronunciation** of jargon and names is the model's own; it can misread. Nothing checks it
+  but the ear.
 
 ## Deliberate deviation from the brief
 
@@ -86,10 +111,12 @@ README; everything else is an assumption or untested, and says so.
 - Engines die with their job by watching their parent process (checked every second), not by
   `PR_SET_PDEATHSIG`: the kernel sends that signal when the spawning *thread* exits, and the CPU
   pool starts workers from threads. Found by measurement (it killed a working Kokoro engine
-  mid-sweep); tested since: engines asleep mid-chunk die within a second of a SIGKILLed job. A GPU
-  adapter's model server, spawned from the worker's main thread, may use `PR_SET_PDEATHSIG`.
-- A GPU adapter that runs a model server (Voxtral runs vLLM-Omni) would listen on a loopback
-  port for the length of one episode; any local user could send it text meanwhile. Not built.
+  mid-sweep); tested since: engines asleep mid-chunk die within a second of a SIGKILLed job. The
+  Breeze engine uses the same mechanism (it is the same protocol module).
+- **Reinstalling underneath a job.** `install.sh` replaces the code, venvs and weights that a
+  running job's engines load, so it refuses while any job is preparing, waiting, speaking or
+  encoding (a live voice pid in `state/*/voice/status.json`) or either slot lock is held
+  (`papercast_voice/busy.py`, tested). It cannot see a job started in the seconds it runs.
 
 ## Input handling
 
@@ -102,8 +129,10 @@ README; everything else is an assumption or untested, and says so.
 
 ## Where things live, and what depends on what
 
-- Install: `/home/leo/papercast/voice/` (0700): code copy, two venvs, Kokoro weights (checksums
-  verified), `voice.json` with the measurements. The installed code is a copy: editing the repo
-  changes nothing until `install.sh` runs again (`info` prints the installed git commit).
-- `~/papercast-voice-cache/` (27 GB, the sample step's venvs and weights) is no longer needed by
-  the CPU voice. The GPU adapter's install will copy what it needs from it; after that it can go.
+- Install: `/home/leo/papercast/voice/` (0700): code copy, three venvs, Kokoro and Breeze
+  weights (checksums verified), the breeze-tts code at upstream commit 008f769, `voice.json`
+  with the measurements. The installed code is a copy: editing the repo changes nothing until
+  `install.sh` runs again (`info` prints the installed git commit).
+- `~/papercast-voice-cache/` (27 GB, the sample step's venvs, weights and uv cache) is no longer
+  needed. The install's Breeze weights and venv files are hard links into it (same pool, no extra
+  space; link counts checked), so deleting the cache breaks nothing and frees less than 27 GB.

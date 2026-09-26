@@ -167,7 +167,8 @@ installed copy does not follow the repo by itself.
 Then the runner needs, in `/home/leo/papercast/runner.env` (Part B's file):
 ```
 PAPERCAST_VOICE_CMD=/home/leo/papercast/voice/bin/papercast-voice
-PAPERCAST_WPM=158        # Breeze's measured rate, pauses included (info "words_per_min")
+# No PAPERCAST_WPM needed: the runner reads "words_per_min" from `papercast-voice info`
+# (Breeze 157.6, pauses included) and keeps 172 only as a fallback.
 ```
 
 ## First run and verify

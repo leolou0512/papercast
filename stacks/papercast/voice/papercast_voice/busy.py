@@ -3,12 +3,17 @@
 
     python3 busy.py <runner state dir> <voice home>     exit 0 = idle, 1 = busy (says which)
 
-Standard library only (it runs before any venv exists). Busy when:
-  - a job's status.json (state/<id>/voice/status.json) is in preparing / waiting-for-gpu /
-    speaking / encoding and its pid is a live papercast_voice process;
-  - the GPU slot (state/voice-gpu.lock) or the CPU slot (<home>/run/voice-cpu.lock) is held.
-A lock is probed with a non-blocking flock that is released at once; a job trying it in that
-instant simply tries again at its next poll.
+Standard library only (it runs before any venv exists). Busy when an engine may be loading
+what the install replaces:
+  - a job's status.json (state/<id>/voice/status.json) is speaking or encoding and its pid is a
+    live papercast_voice process;
+  - the CPU slot (<home>/run/voice-cpu.lock) or a remote GPU slot (<home>/run/slots/*.lock) is
+    held.
+Waiting jobs do not count: they hold no engine, and a waiting job re-executes itself on the new
+code once it is installed (job.py `_maybe_reexec`). stibnite's GPU slot lock is not probed
+either: the job at the front of the line holds it while it checks the card is free, and a job
+speaking on it says so in its status. A lock is probed with a non-blocking flock that is
+released at once; a job trying it in that instant simply tries again at its next poll.
 """
 from __future__ import annotations
 
@@ -18,7 +23,7 @@ import json
 import os
 import sys
 
-ACTIVE = {"preparing", "waiting-for-gpu", "speaking", "encoding"}
+ACTIVE = {"speaking", "encoding"}
 
 
 def _voice_pid(pid) -> bool:
@@ -53,7 +58,9 @@ def reasons(state: str, home: str) -> list[str]:
             continue
         if st.get("phase") in ACTIVE and _voice_pid(st.get("pid")):
             out.append(f"{p}: {st.get('phase')} (pid {st.get('pid')})")
-    for lock in (os.path.join(state, "voice-gpu.lock"), os.path.join(home, "run", "voice-cpu.lock")):
+    locks = [os.path.join(home, "run", "voice-cpu.lock")]
+    locks += sorted(glob.glob(os.path.join(home, "run", "slots", "*.lock")))
+    for lock in locks:
         if _held(lock):
             out.append(f"{lock} is held")
     return out

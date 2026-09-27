@@ -6,6 +6,7 @@ it is.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import queue
@@ -35,8 +36,11 @@ def _log(msg: str) -> None:
 
 
 class Worker:
-    def __init__(self, spec: dict, *, threads: int, gpu_index: int | None, cfg: dict, tag: str):
+    def __init__(self, spec: dict, *, threads: int, gpu_index: int | None, cfg: dict, tag: str,
+                 host=None):
         self.spec = spec
+        self.host = host              # hosts.Host for an engine on another machine, else None
+        self.remote_pid: int | None = None
         self.threads = max(1, int(threads))
         self.gpu_index = gpu_index
         self.cfg = cfg
@@ -83,9 +87,12 @@ class Worker:
         self.q.put({"event": "eof"})
 
     def start(self, cancel: threading.Event) -> dict:
-        argv = [self.spec["python"], self.spec["worker"], "--spec", json.dumps(self.spec),
-                "--threads", str(self.threads)]
-        if not os.path.exists(self.spec["python"]):
+        if self.host is not None:
+            argv = self.host.worker_argv(self.spec, self.threads, int(self.gpu_index))
+        else:
+            argv = [self.spec["python"], self.spec["worker"], "--spec", json.dumps(self.spec),
+                    "--threads", str(self.threads)]
+        if self.host is None and not os.path.exists(self.spec["python"]):
             raise EngineError(f"engine {self.spec['name']} is not installed "
                               f"({self.spec['python']} missing)")
         self.proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -100,6 +107,8 @@ class Worker:
             raise EngineError(f"engine {self.spec['name']} did not start: "
                               f"{msg.get('message') or msg.get('event')}")
         self.ready = msg
+        if self.host is not None and msg.get("pid"):
+            self.remote_pid = int(msg["pid"])
         self.maxrss_mib = max(self.maxrss_mib, int(msg.get("maxrss_mib") or 0))
         _log(f"{self.tag}: {self.spec['name']} ready in {msg.get('load_s')} s (pid {self.pid}, "
              f"{self.threads} thread(s))")
@@ -137,14 +146,27 @@ class Worker:
         if not self.proc or self.proc.poll() is not None:
             raise EngineError(f"engine {self.spec['name']} is not running")
         try:
-            self.proc.stdin.write(json.dumps({"op": "synth", "id": rid, "text": text,
-                                              "out": out}) + "\n")
+            req = {"op": "synth", "id": rid, "text": text, "out": out}
+            if self.host is not None:
+                req.update(inline=True, out=os.path.basename(out))
+            self.proc.stdin.write(json.dumps(req) + "\n")
             self.proc.stdin.flush()
         except (BrokenPipeError, OSError) as e:
             raise EngineError(f"engine {self.spec['name']} went away: {e}") from e
         msg = self._wait(rid, float(self.spec.get("chunk_timeout_s", 600)), cancel)
         self.maxrss_mib = max(self.maxrss_mib, int(msg.get("maxrss_mib") or 0))
         self.gen_s += float(msg.get("gen_s") or 0)
+        if self.host is not None:
+            try:
+                data = base64.b64decode(msg.pop("wav_b64", "") or "", validate=True)
+            except ValueError as e:
+                raise EngineError(f"engine on {self.host.name} sent chunk {rid} garbled: {e}") from e
+            if len(data) <= 44:
+                raise EngineError(f"engine on {self.host.name} sent no audio for chunk {rid}")
+            tmp = f"{out}.{os.getpid()}.tmp"
+            with open(tmp, "wb") as fh:
+                fh.write(data)
+            os.replace(tmp, out)
         if not os.path.isfile(out) or os.path.getsize(out) <= 44:
             raise EngineError(f"engine {self.spec['name']} reported chunk {rid} done but wrote no audio")
         return msg
@@ -170,6 +192,11 @@ class Worker:
         if p.poll() is None:
             procs.kill_tree(p.pid, grace_s=grace_s)
         procs.kill_set(children, grace_s=grace_s)
+        if self.host is not None and self.remote_pid and p.returncode not in (0,):
+            # The session did not end cleanly (or we cut it): make sure the engine on the other
+            # machine is gone too. It would end by itself (end of input, idle_exit_s), but a
+            # chunk in progress would hold that GPU until it finished.
+            self.host.kill(self.remote_pid, self.spec["worker"])
         try:
             p.wait(timeout=5)
         except subprocess.TimeoutExpired:

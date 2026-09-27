@@ -6,11 +6,14 @@ day it was made). It runs on stibnite as `leo`, started by papercast-runner once
 (INTERFACE.md §10). It waits for free GPU memory by default, voices on the CPU with Kokoro when
 Leo presses **Use CPU voice (Kokoro)**, and never slows or crashes anyone else's GPU job.
 
-**State today (2026-09-26):** built, tested, installed on stibnite. The GPU voice is **Breeze
+**State today (2026-09-27):** built, tested, installed on stibnite. The GPU voice is **Breeze
 TTS 2** (Leo's pick, clip A on the choice page), measured on a full-length episode: peak
 **9,690 MiB** of GPU memory, so a paper waits for **10,714 MiB** free (peak + 1 GiB) and an idle
 card; it speaks at 0.83 × real time (a twenty-minute episode takes about seventeen minutes).
 Kokoro stays the CPU voice behind **Use CPU voice (Kokoro)** (section "GPU voice").
+Since 1.1 the same voice (same narrator description and seed) also runs on the idle GPUs of
+Leo's server **bs1** (Quadro RTX 6000, fp32: 16,138 MiB, 1.15 × real time), one paper per GPU,
+papers taking GPUs in the order they were handed over (section "GPU slots").
 
 ## How it fits
 
@@ -63,6 +66,40 @@ run is `failed/gpu_oom`. It never signals a process it did not start. `status.js
 besides INTERFACE §10.3's fields, `wait_reason` and `wait_text`, the sentence for the page
 ("waiting for GPU: 3.0 GB free, needs 10.5 GB", or "memory is free but the card is busy …",
 or "another paper is being voiced on it"), and `note`, the last event worth showing.
+
+**GPU slots: stibnite and bs1** (`hosts.py`, `sched.py`, 1.1). A *slot* is one GPU that one
+paper may hold: stibnite's card (its lock is still `state/voice-gpu.lock`, and the rule above
+still decides when it is free) and each bs1 GPU in `hosts.bs1.gpus` (a lock under `run/slots/`).
+- **The line.** A waiting paper holds a ticket in `run/queue/`, named by when it was handed over
+  (job.json's time; a run that continues an interrupted one keeps the time it had, recorded as
+  `queued_at` in status.json; a Retry joins at the back). Only the oldest waiting paper looks
+  at the GPUs (one nvidia-smi, one ssh per poll): it takes the first free slot, stibnite's first
+  when both are, and the next paper moves up within two seconds. The others only count the
+  papers ahead of them ("waiting for a GPU: 11 papers ahead of it in line"), so 260 waiting
+  papers cost what one does. A paper that comes back from a GPU it lost keeps its place.
+- **A bs1 GPU is taken** only when no compute process at all is on it and it has the measured
+  peak + 1 GiB free, checked right before it is taken and again right before the first chunk.
+- **The engine runs on bs1**, as leo (the ssh alias logs in as root: `runuser -u leo`), niced 10,
+  pinned with `CUDA_VISIBLE_DEVICES`, speaking the engine protocol over the ssh session. The
+  chunks come back in the replies (base64 WAV) and are joined, normalised and tagged on
+  stibnite, so **no job file is ever written on bs1**: nothing to copy there or delete after,
+  and a lost connection costs at most the chunk being spoken. (A deviation from "copy the script
+  and job.json there, copy the MP3 back": running the whole job there needs the orchestrator's
+  venv and ffmpeg on bs1, and its disk is full.) The worker script goes over with the job,
+  content-addressed (`app/v-<hash>/`, 17 KB, newest three kept), so bs1 always runs the code
+  of the orchestrator talking to it; the engine ends itself when its session closes or after
+  180 s without a request.
+- **It gives bs1 back between chunks** when a process that was not there when it started, and
+  is not one of our engines (told apart by executable: bs1's voice venv python), appears on
+  *any* of the configured bs1 GPUs, not only its own: Leo's chat model spans cards 0-6, and a
+  card held by the voice makes it fail. Then every voice job on bs1 yields and none starts for
+  30 minutes (`run/holdoff-bs1.json`), so its owner's retry finds the cards free. Also when free
+  memory on its GPU falls under 256 MiB.
+- **bs1 unreachable**: skipped for 60 s at a time; papers keep using stibnite. A bs1 engine that
+  fails (lost connection, crash, out of memory) sends the paper back to its place in line with
+  its chunks; after three failures on bs1 in one run it waits for stibnite only.
+- **The page** says where it speaks: `note` "Speaking on bs1 GPU 3, about 12 min to go." (the
+  page shows it under "Speaking N%"); waiting, `wait_text` names each host's state.
 
 **Use CPU voice (Kokoro).** The runner creates `use-cpu`; the voice checks it every half second
 while waiting and switches at once. It is honoured whenever the job is in `waiting-for-gpu`,
@@ -143,6 +180,9 @@ and restarts an interrupted voice step once after a reboot (INTERFACE §3).
 | orchestrator | 1.4 GB peak, during the final check (decoding the whole episode) | `metrics.json` of the full run |
 | full-length Breeze episode (GPU) | 2,934 words → 1,117 s (18.6 min) of audio in 1,071 s: admission 20 s, load and CUDA-graph capture 46 s, synthesis 928 s (**real-time factor 0.831**), encoding 66 s; **peak 9,690 MiB** of GPU memory (reached 97 s in, flat after), device peak 10,358 MiB; **157.6 words per minute** with pauses; no chunk needed a second seed; Whisper small.en (CPU) heard 2,934 of 2,934 words, 12 errors, **0.4 % word error rate**, no digits; median pitch per chunk 157–240 Hz across the 60 paragraph chunks (median 188, 10th–90th percentile 169–213): one female narrator throughout, but not a fixed timbre (RISKS) | `measure-gpu --script tests/fixtures/long_script.md --need-mib 10720 --apply` (the sample's peak + 1 GiB as the provisional threshold), nice 10, load average 2, the card holding only Leo's 158 MiB `facecv` process and the desktop; NVML every 50 ms, summed over every process the job started; worker RSS 5.7 GB. `/home/leo/papercast/voice/measure/breeze-episode-2026-09-26.*` |
 | short Breeze episode, real | 135 words → 56.5 s of audio in 126 s (20 s admission, about 46 s load), -16.44 LUFS, -2.4 dBTP, Whisper word error rate 2.2 % ("plane" for "plain", "It turns" for "Turn") | `test_real_gpu.py`, through the runner's `launch.sh` and GPU slot |
+| bs1, fp16 (2026-09-27) | fails on the first chunk: `probability tensor contains either inf, nan or element < 0` (device-side assert in sampling) | the sample paragraph, bs1 GPU 0 (Quadro RTX 6000, Turing: no bf16), the pipeline's remote path (`hosts.Host` + `Worker`) |
+| bs1, fp32: quality gate against stibnite's bf16 (2026-09-27) | same text, narrator description and seed; the two precisions sample different audio, so these compare distributions. **Whisper small.en (CPU) word errors**: sample paragraph 5 of 74 on bs1, 7 of 74 on stibnite (both mostly Whisper writing "200" and "1" for the spoken numbers, which a word-only score counts, and "plane" for "plain"); 1,000-word excerpt 2 errors (0.2 %) on bs1, 4 (0.4 %) on stibnite. **Seconds per word** (raw chunk audio): 0.488 vs 0.482 (paragraph), 0.358 vs 0.354 (excerpt). **Median pitch** (pYIN, voiced frames): 194.9 vs 185.1 Hz (paragraph), 190.5 vs 186.1 Hz (excerpt); bs1's excerpt chunks 166-215 Hz, stibnite's full episode 157-240 Hz. **Raw loudness** before normalisation: -21.2 vs -22.6 LUFS (paragraph); bs1 excerpt -21.6 (chunks -23.5 to -19.4); the pipeline normalises both to -16. No NaN or silent chunk, no chunk retried. **Peak GPU memory 16,138 MiB** (engine process; device 16,141), flat after load; load 48 s; **real-time factor 1.15** (excerpt: 412.8 s of synthesis for 357.8 s of audio; paragraph 1.18) | sample paragraph + the first 15 paragraphs (1,000 words, 24 chunks) of `tests/fixtures/long_script.md`, bs1 GPU 0, nice 10, nvidia-smi every 1 s over ssh. stibnite's reference: `~/papercast-voice-cache/narrators-2026-09-27/now_s42.wav` (the installed engine, seed 42) and the same chunks of the 2026-09-26 full episode (`measure/breeze-episode-2026-09-26.*`; its raw chunks were deleted, so its excerpt loudness is not comparable) |
+| short episode on bs1, real | 137 words → 58.9 s of audio in 115 s (engine load 44 s), -16.09 LUFS, -2.4 dBTP, Whisper word error rate 0.7 %, tags read back; afterwards no new file under bs1's install and its engine gone | `test_real_remote.py`: the installed voice through the runner's `launch.sh`, stibnite's card switched off for the job |
 
 ## Install (on stibnite, as leo, no sudo)
 
@@ -150,8 +190,28 @@ and restarts an interrupted voice step once after a reboot (INTERFACE §3).
 cd /home/leo/NAS_setup/stacks/papercast/voice
 bash install.sh --gpu breeze   # [run 2026-09-26] ~45 s with the uv cache; prints PAPERCAST_VOICE_CMD
 ```
-It refuses to run while a voice job is working or holds a slot (`papercast_voice/busy.py`): it
-replaces files a job's engines load.
+It refuses to run while a voice job is speaking or encoding, or holds the CPU slot or a bs1 slot
+(`papercast_voice/busy.py`): it replaces venvs and weights a job's engines load. Waiting jobs do
+not stop it: a waiting job checks `VERSION` every 10 s and, when the install replaced it,
+re-executes itself on the new code in place (same pid, so the runner still sees its process;
+same place in line). `app` is a symlink to `app-<time>/`, swapped in one rename, so a job never
+finds no code.
+
+Code-only changes install while jobs speak:
+```bash
+bash install.sh --code-only    # [run 2026-09-27] app/ and the wrapper only; refused if requirements/
+                               # or engines/ differ from the installed commit (then: full install, idle)
+```
+Speaking jobs keep the code they loaded; their engines keep theirs.
+
+**From 1.0 (once).** 1.0 cannot re-execute itself, so papers already waiting under it stay on 1.0
+(stibnite's card only, one at a time) until restarted. `tools/restart-waiting-1.0.py --apply`
+does that through the runner's own path: it stops each such voice process group (launch.sh then
+writes no rc), and the runner, which adopted these processes after its own restart, treats it as
+interrupted and restarts the voice step once, on 1.1, at the paper's old place in line. It uses
+up that paper's one "interrupted" restart (a second interruption fails it with Retry), and skips
+any paper already interrupted once or whose voice is the runner's own child (a kill there would
+fail it). [run 2026-09-27 on one paper; the other 263 were not restarted: that needs Leo's go.]
 It installs into `/home/leo/papercast/voice/` (0700): `app/` (a copy of `papercast_voice/`, with
 the git commit in `VERSION`), `venv/` (orchestrator: numpy, soundfile, pyloudnorm, mutagen,
 static ffmpeg 7.0.2 from `imageio-ffmpeg`), `engines/kokoro/venv/` (the exact pins that made the
@@ -178,11 +238,14 @@ V=/home/leo/papercast/voice
 $V/bin/papercast-voice info                       # [run] "installed": true, "gpu": {"model": "breeze-tts-2", "need_mib": 10714, ...}
 $V/bin/papercast-voice check some/script.md       # [run] chunk counts, or the reason it is refused
 cd /home/leo/NAS_setup/stacks/papercast/voice
-$V/venv/bin/python -m unittest discover -s tests  # [run] 74 tests (2 real ones skipped), about 2 min
+$V/venv/bin/python -m unittest discover -s tests  # [run] 87 tests (3 real ones skipped), about 4 min
 PAPERCAST_VOICE_REAL=1 $V/venv/bin/python -m unittest discover -s tests -p test_real.py
                                                   # [run] real Kokoro through the runner's launch.sh
 PAPERCAST_VOICE_REAL_GPU=1 $V/venv/bin/python -m unittest discover -s tests -p test_real_gpu.py
                                                   # [run] real Breeze; skips if the GPU is not free
+PAPERCAST_VOICE_REAL_REMOTE=1 $V/venv/bin/python -m unittest discover -s tests -p test_real_remote.py
+                                                  # [run] real Breeze on bs1; skips if no bs1 GPU is free
+$V/bin/papercast-voice slots                      # [run] the line, and who holds each GPU slot
 ```
 A single episode by hand (what the runner does):
 ```bash
@@ -200,6 +263,13 @@ stopped within a second):
 ```bash
 touch /home/leo/papercast/state/<id>/voice/cancel                  # [run in tests]
 ```
+To free bs1 for other work now (every voice job there gives its GPU back after the chunk it is
+on, keeping its chunks, and none starts there until the file is removed):
+```bash
+touch /home/leo/papercast/voice/run/pause-bs1       # [run in tests]  rm it to let them back
+```
+To stop using bs1 for good: `"hosts": {"bs1": {"enabled": false}}` in `voice.json` (new papers;
+a waiting one picks it up when it next re-executes, or at its next run).
 To kill it hard (the runner's own record of the group leader is `voice/pid`):
 ```bash
 kill -TERM -- -"$(cat /home/leo/papercast/state/<id>/voice/pid)"    # [run: 6 processes gone in 3 s, chunks kept]
@@ -230,18 +300,37 @@ starts, and stores the peak, words per minute and seconds per word; admission th
 1 GiB. Re-measure after any change to the model, its fast stages or `max_words`. Voxtral, the
 other candidate, was not built.
 
+## Remote GPUs (bs1)
+
+bs1 (`ssh bs1`, boomerserver1, 8 × Quadro RTX 6000 24 GB, driver 610) holds a lean install at
+`/home/leo/papercast-voice/`, made by hand on 2026-09-27: `venv/` (`requirements/breeze.txt`,
+built with uv; its files share their blocks with uv's cache in `~/.cache/uv`, so removing them
+frees nothing), `models/breeze-tts-2/` (7.3 GB, the same revision), `src/` (breeze-tts 008f769),
+`cache/` (Triton and inductor, 46 MB), `app/v-<hash>/` (the worker, put there by jobs). Its C
+compiler is the system gcc; `ziglang`, `ruff` and `pytest` were removed from its venv (unused
+there; 10 MB freed). `/home` there is full (2.5 GB free): nothing else is written there.
+
+Leo's own GPU services there are left alone: the speech model (stt, card 6, always loaded) and,
+on demand, the image generator and a second model (card 7) and the chat model (cards 0-6, about
+142 GiB across them). Card 7 is not in `hosts.bs1.gpus`: its services check for 15-16 GB free
+on it before they start, and would refuse while a voice held it. Cards 0-6 are; card 6 is never
+taken while stt is on it. RISKS.md "bs1" says what that means for the chat model.
+
 ## Files
 
 | path | what |
 |---|---|
-| `papercast_voice/cli.py` | `info`, `run`, `check`, `measure-*` |
+| `papercast_voice/cli.py` | `info`, `run`, `check`, `slots` (the line and who holds each slot), `measure-*` |
 | `papercast_voice/job.py` | one episode: states, controls, resume, GPU and CPU passes, encode |
 | `papercast_voice/textprep.py` | chunking and the speakable-text guard |
-| `papercast_voice/gpu.py` | nvidia-smi readings, admission rule, give-back rule |
+| `papercast_voice/gpu.py` | nvidia-smi readings, admission rule, give-back rule (stibnite) |
+| `papercast_voice/hosts.py` | GPU slots on stibnite and bs1: ssh, remote readings, remote admission and give-back, the engine command there |
+| `papercast_voice/sched.py` | the line for GPU slots (tickets in `run/queue/`) |
+| `tools/restart-waiting-1.0.py` | the one-off move of papers waiting under 1.0 onto the installed code (Install) |
 | `papercast_voice/workers.py`, `engines/` | engine processes and their protocol; the Kokoro and Breeze workers |
 | `engines/breeze/` | the Breeze install step and its C compiler wrapper |
 | `papercast_voice/busy.py` | install.sh's check that no voice job is running |
 | `papercast_voice/audio.py`, `tags.py` | join, loudness, MP3, verification; ID3 |
 | `papercast_voice/measure.py` | the measurements above |
-| `tests/` | unit and job tests with fake engines (the Breeze worker with its model faked) and a fake `nvidia-smi`; `test_real.py`, `test_real_gpu.py` |
+| `tests/` | unit and job tests with fake engines (the Breeze worker with its model faked), a fake `nvidia-smi`, and a fake remote host (`fake_ssh.py`, `fake_remote_smi.py`; `test_slots.py`); `test_real.py`, `test_real_gpu.py`, `test_real_remote.py` |
 | `samples/` | the earlier three-voice choice for Leo (not the pipeline) |

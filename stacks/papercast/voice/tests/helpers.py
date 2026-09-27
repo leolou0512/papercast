@@ -15,6 +15,8 @@ SRC = os.path.dirname(HERE)
 PY = sys.executable
 FAKE_WORKER = os.path.join(HERE, "fake_worker.py")
 FAKE_NVSMI = os.path.join(HERE, "fake_nvidia_smi.py")
+FAKE_SSH = os.path.join(HERE, "fake_ssh.py")
+FAKE_RSMI = os.path.join(HERE, "fake_remote_smi.py")
 PAPER = "2026-09-26-abcdefgh"
 
 
@@ -47,7 +49,9 @@ TAGS = {"title": "Guidance for Materials: A Test Paper", "album": "Papers", "art
 
 
 class Rig:
-    def __init__(self, gpu: bool = True, **over):
+    """remote_gpus=N adds a fake remote host "bs1" (fake_ssh.py) with N GPUs, all free."""
+
+    def __init__(self, gpu: bool = True, remote_gpus: int = 0, **over):
         self._td = tempfile.TemporaryDirectory(prefix="pcv-test-")
         self.tmp = self._td.name
         self.home = os.path.join(self.tmp, "home")
@@ -71,17 +75,54 @@ class Rig:
             "cpu": {"workers": 2, "threads": 1},
             "gpu": {"poll_s": 0.2, "stable_polls": 2, "yield_polls": 2, "headroom_mib": 1024,
                     "util_max_pct": 20, "yield_other_sm_pct": 20, "yield_free_floor_mib": 256,
-                    "max_ooms": 3},
+                    "max_ooms": 3, "line_poll_s": 0.2, "upgrade_check_s": 0.5},
+            # Never the real remote host from a test.
+            "hosts": {"stibnite": {"kind": "local"}, "bs1": {"enabled": False}},
             "ffmpeg": ffmpeg(),
             "nvidia_smi": FAKE_NVSMI,
             "heartbeat_s": 0.5,
             "cpu_lock": os.path.join(self.home, "run", "voice-cpu.lock"),
         }
+        self.rhost = os.path.join(self.tmp, "bs1")          # the fake remote host
+        self.rhome = os.path.join(self.tmp, "bs1-home")     # its lean install
+        if remote_gpus:
+            os.makedirs(os.path.join(self.rhome, "venv", "bin"))
+            os.makedirs(self.rhost)
+            os.symlink(PY, os.path.join(self.rhome, "venv", "bin", "python"))
+            self.cfg["hosts"]["bs1"] = {
+                "kind": "ssh", "enabled": True, "ssh": self.rhost, "ssh_cmd": FAKE_SSH,
+                "run_as": None, "home": self.rhome, "gpus": list(range(remote_gpus)),
+                "dtype": "fp32", "cc": None, "nice": 10, "peak_mib": 16000,
+                "nvidia_smi": FAKE_RSMI, "control_dir": None, "timeout_s": 10,
+                "down_backoff_s": 1, "idle_exit_s": 60, "max_failures": 3, "holdoff_s": 2,
+                "path": os.environ.get("PATH", "/usr/bin:/bin"),
+                "engine": {"env": {**self.fake_env,
+                                   "FAKE_PIDFILE": os.path.join(self.tmp, "pid-remote"),
+                                   "FAKE_GPU_PIDDIR": os.path.join(self.rhost, "procs")}}}
+            self.set_remote([{} for _ in range(remote_gpus)])
         for k, v in over.items():
             self.cfg[k] = v
         self.write_cfg()
         self.set_gpu(free=12000, util=0)
         self.procs: list[subprocess.Popen] = []
+
+    def set_remote(self, gpus: list[dict]) -> None:
+        """The fake remote host's GPUs: [{"free", "total", "util", "apps": [[pid, mib]]}]."""
+        path = os.path.join(self.rhost, "gpus.json")
+        with open(path + ".tmp", "w") as fh:
+            json.dump({"gpus": gpus}, fh)
+        os.replace(path + ".tmp", path)
+
+    def remote_env(self, **env) -> None:
+        self.cfg["hosts"]["bs1"]["engine"]["env"].update({k: str(v) for k, v in env.items()})
+        self.write_cfg()
+
+    def remote_down(self, down: bool) -> None:
+        path = os.path.join(self.rhost, "down")
+        if down:
+            open(path, "w").close()
+        elif os.path.exists(path):
+            os.unlink(path)
 
     def _spec(self, kind: str, label: str, voice: str) -> dict:
         return {"kind": kind, "label": label, "python": PY, "worker": FAKE_WORKER,
@@ -130,7 +171,7 @@ class Rig:
         return e
 
     def job(self, script: str = SCRIPT, engine: str = "auto", paper: str = PAPER,
-            tags: dict | None = None) -> str:
+            tags: dict | None = None, handed_over: float | None = None) -> str:
         vdir = os.path.join(self.state, paper, "voice")
         os.makedirs(vdir, exist_ok=True)
         with open(os.path.join(vdir, "script.md"), "w") as fh:
@@ -138,6 +179,8 @@ class Rig:
         with open(os.path.join(vdir, "job.json"), "w") as fh:
             json.dump({"interface": "1.0", "paper_id": paper, "script": "script.md",
                        "output_dir": "out", "engine": engine, "tags": tags or TAGS}, fh)
+        if handed_over is not None:
+            os.utime(os.path.join(vdir, "job.json"), (handed_over, handed_over))
         return vdir
 
     def start(self, vdir: str) -> subprocess.Popen:

@@ -5,6 +5,9 @@
 #
 #   bash install.sh                  code, the orchestrator venv, the Kokoro CPU voice
 #   bash install.sh --gpu <name>     the same, plus the GPU voice Leo picked (README "GPU voice")
+#   bash install.sh --code-only      only the code and the wrapper, allowed while jobs speak:
+#                                    refused if requirements/ or engines/ changed since the
+#                                    installed commit (those need a full install, when idle)
 #
 # Installs into $PAPERCAST_VOICE_HOME (default /home/leo/papercast/voice, mode 0700) and prints
 # the PAPERCAST_VOICE_CMD value for the runner's runner.env. Nothing system-wide, no units.
@@ -16,22 +19,38 @@ H=${PAPERCAST_VOICE_HOME:-/home/leo/papercast/voice}
 CACHE=${PAPERCAST_VOICE_CACHE:-/home/leo/papercast-voice-cache}
 STATE=${PAPERCAST_STATE:-/home/leo/papercast/state}
 GPU=""
+CODE_ONLY=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --gpu) GPU=${2:?--gpu needs an engine name}; shift 2 ;;
-        *) echo "usage: install.sh [--gpu <name>]" >&2; exit 2 ;;
+        --code-only) CODE_ONLY=1; shift ;;
+        *) echo "usage: install.sh [--gpu <name> | --code-only]" >&2; exit 2 ;;
     esac
 done
+[ -z "$GPU" ] || [ -z "$CODE_ONLY" ] || { echo "install.sh: --gpu and --code-only exclude each other" >&2; exit 2; }
 
 die() { echo "install.sh: $*" >&2; exit 1; }
 [ "$(id -u)" != 0 ] || die "run as leo, not root: this is a per-user install"
 command -v uv >/dev/null || die "uv not on PATH (expected /home/leo/.local/bin/uv)"
 [ -d "$CACHE/uv-cache" ] && export UV_CACHE_DIR=${UV_CACHE_DIR:-$CACHE/uv-cache}
 
-# Never replace code, venvs or weights underneath a voice job (its engines load them).
-if ! busy=$(python3 "$SRC/papercast_voice/busy.py" "$STATE" "$H"); then
-    die "a voice job is running; not installing now (try again when it is done):
+if [ -n "$CODE_ONLY" ]; then
+    # Code only: waiting jobs re-execute onto it, speaking ones keep what they loaded, and their
+    # engines keep theirs (README "Install"). Venvs, weights and engine installers must be what
+    # the installed commit had, or this would pair new code with old dependencies.
+    [ -x "$H/venv/bin/python" ] && [ -f "$H/app/papercast_voice/VERSION" ] ||
+        die "--code-only needs a full install first"
+    old=$(sed -n 's/.*(git \([0-9a-f]\{7,40\}\).*/\1/p' "$H/app/papercast_voice/VERSION")
+    [ -n "$old" ] || die "--code-only: the installed VERSION names no commit"
+    git -C "$SRC" diff --quiet "$old" -- requirements engines ||
+        die "requirements/ or engines/ changed since the installed $old: run a full install"
+else
+    # Never replace venvs or weights underneath a speaking job (its engines load them).
+    if ! busy=$(python3 "$SRC/papercast_voice/busy.py" "$STATE" "$H"); then
+        die "a voice job is speaking; not installing now (try again when it is done, or use
+--code-only if only code changed):
 $busy"
+    fi
 fi
 
 echo "== disk before"; df -h /
@@ -40,19 +59,27 @@ mkdir -p "$H" "$H/bin" "$H/run" "$H/engines" "$H/models"
 chmod 0700 "$H"
 
 echo "== code -> $H/app"
-rm -rf "$H/app.new"
-mkdir -p "$H/app.new"
-cp -a "$SRC/papercast_voice" "$H/app.new/"
-find "$H/app.new" -name __pycache__ -prune -exec rm -rf {} +
+# app is a symlink to app-<time>; rename(2) replaces it in one step, so a job starting, or a
+# waiting job re-executing onto the new code (it watches VERSION), never finds no code. The
+# two previous copies stay (nothing loads them; they are small).
+stamp=$(date -u +%Y%m%dT%H%M%SZ)
+new="$H/app-$stamp"
+rm -rf "$new"
+mkdir -p "$new"
+cp -a "$SRC/papercast_voice" "$new/"
+find "$new" -name __pycache__ -prune -exec rm -rf {} +
 rev=$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo unknown)
 dirty=$(git -C "$SRC" status --porcelain -- . 2>/dev/null | head -1 || true)
-echo "1.0 (git $rev${dirty:+ + uncommitted edits}, installed $(date -u +%Y-%m-%dT%H:%M:%SZ))" \
-    > "$H/app.new/papercast_voice/VERSION"
-rm -rf "$H/app.old"
-[ -d "$H/app" ] && mv "$H/app" "$H/app.old"
-mv "$H/app.new" "$H/app"
-rm -rf "$H/app.old"
+echo "1.1 (git $rev${dirty:+ + uncommitted edits}, installed $(date -u +%Y-%m-%dT%H:%M:%SZ))" \
+    > "$new/papercast_voice/VERSION"
+if [ -d "$H/app" ] && [ ! -L "$H/app" ]; then
+    mv "$H/app" "$H/app-1.0"        # once: 1.0 installed a directory here
+fi
+ln -sfn "app-$stamp" "$H/app.link"
+mv -T "$H/app.link" "$H/app"
+ls -1dt "$H"/app-2* 2>/dev/null | tail -n +4 | xargs -r rm -rf
 
+if [ -z "$CODE_ONLY" ]; then
 echo "== orchestrator venv"
 [ -x "$H/venv/bin/python" ] || uv venv -q -p 3.11 "$H/venv"
 VIRTUAL_ENV="$H/venv" uv pip sync -q "$SRC/requirements/voice.txt"
@@ -95,6 +122,7 @@ fi
 
 echo "== config"
 [ -f "$H/voice.json" ] || echo '{}' > "$H/voice.json"
+fi   # the full install
 
 echo "== wrapper $H/bin/papercast-voice"
 cat > "$H/bin/papercast-voice.new" <<EOF

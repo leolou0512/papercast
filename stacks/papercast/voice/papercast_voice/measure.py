@@ -188,6 +188,10 @@ def measure_gpu(argv: list[str]) -> int:
     over.setdefault("engines", {}).setdefault(name, {})["peak_mib"] = a.need_mib - int(cfg["gpu"]["headroom_mib"])
     over["gpu_lock"] = (a.gpu_lock if os.path.isdir(os.path.dirname(a.gpu_lock))
                         else os.path.join(root, "state", "voice-gpu.lock"))
+    # stibnite's card only, and its own line: it measures this GPU, not a remote one.
+    over["hosts"] = {n: {"enabled": n == "stibnite" or (h or {}).get("kind", "local") == "local"}
+                     for n, h in (cfg.get("hosts") or {}).items()}
+    over["queue_dir"] = os.path.join(root, "queue")
     tmpcfg = os.path.join(root, "voice.json")
     with open(tmpcfg, "w") as fh:
         json.dump(over, fh)

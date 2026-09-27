@@ -1,7 +1,8 @@
 """Chunking for the ear, and the guard that keeps digits, symbols and LaTeX from any engine."""
-import importlib.util
+import importlib
 import os
 import re
+import sys
 import unittest
 
 from helpers import SCRIPT, SRC
@@ -18,12 +19,13 @@ def words(s: str) -> list[str]:
 
 
 def runner_check():
+    """The runner's own check, imported as part of its package (it imports its siblings)."""
     if not os.path.exists(RUNNER_CHECK):
         return None
-    spec = importlib.util.spec_from_file_location("runner_script_check", RUNNER_CHECK)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    root = os.path.dirname(os.path.dirname(RUNNER_CHECK))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    return importlib.import_module("papercast_runner.script_check")
 
 
 class Chunking(unittest.TestCase):

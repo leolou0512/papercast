@@ -120,6 +120,10 @@ DEFAULTS: dict = {
         # in one run fails it (INTERFACE §10.4).
         "max_ooms": 3,
         "nvidia_smi_timeout_s": 15,
+        # A waiting job counts the tickets ahead of it every line_poll_s (sched.py), and checks
+        # every upgrade_check_s whether install.sh replaced the code (then it re-executes).
+        "line_poll_s": 2.0,
+        "upgrade_check_s": 10.0,
     },
     "audio": {
         # Podcast loudness: -16 LUFS integrated (within lufs_tolerance), true peak at most
@@ -156,11 +160,50 @@ DEFAULTS: dict = {
     # Written at most this often by the heartbeat (INTERFACE §10.3: the runner calls a job
     # dead when its pid is gone and updated_at is older than 120 s).
     "heartbeat_s": 10.0,
+    # Where the GPU voice may run (hosts.py): stibnite's own card (index gpu.index, its slot is
+    # the lock below) and each idle GPU of the remote hosts, preferred in this order when more
+    # than one is free at once.
+    "host_order": ["stibnite", "bs1"],
+    "hosts": {
+        "stibnite": {"kind": "local", "dtype": "bf16"},
+        # Leo's server boomerserver1, 8 x Quadro RTX 6000 (24 GB, Turing: no native bf16).
+        # Measured 2026-09-27 (README "Measured"): fp16 fails on the first chunk (NaN
+        # probabilities in sampling, a device-side assert), so fp32, which is clean. The engine
+        # runs as leo (the ssh alias logs in as root) in the lean install at `home`: the Breeze
+        # venv (requirements/breeze.txt), weights and upstream code only (README "Remote GPUs");
+        # the worker script goes over with each job (hosts.Host.ensure_code).
+        "bs1": {
+            "kind": "ssh", "enabled": True, "ssh": "bs1", "run_as": "leo",
+            # Card 7 is left out: Leo's own on-demand image generator and speech model load
+            # there (their control services check for 15-16 GB free on it, and would refuse
+            # while a voice held it). Cards 0-6 are his chat model's, also on demand: see
+            # holdoff_s and README "Remote GPUs".
+            "home": "/home/leo/papercast-voice", "gpus": [0, 1, 2, 3, 4, 5, 6],
+            "dtype": "fp32", "cc": "/usr/bin/gcc", "nice": 10,
+            # fp32 on one card, the 1,000-word excerpt of tests/fixtures/long_script.md plus the
+            # sample paragraph: the engine process's GPU memory (nvidia-smi every 1 s) peaked at
+            # 16,138 MiB (flat after load); admission adds gpu.headroom_mib. Synthesis 0.413 s
+            # a word (real-time factor 1.15; stibnite's bf16: 0.83).
+            "peak_mib": 16138, "sec_per_word": 0.413,
+            "measured": "2026-09-27T13:02-13:10Z, Quadro RTX 6000, fp32, 25 chunks, 1,074 words",
+            "connect_timeout_s": 10, "timeout_s": 20, "down_backoff_s": 60,
+            "idle_exit_s": 180, "max_failures": 3,
+            # A stranger's process appearing on any of `gpus` holds the whole host back this
+            # long (hosts.py "yield"), so its owner's retry finds the cards free.
+            "holdoff_s": 1800,
+            "control_dir": "{home}/run/ssh",
+        },
+    },
     # The GPU slot lock is INTERFACE §10.4's `state/voice-gpu.lock`: derived from the job
     # directory (state/<id>/voice -> state/voice-gpu.lock) unless set here.
     "gpu_lock": None,
     # One CPU job at a time across all papers (the voice's own lock, under its home).
     "cpu_lock": "{home}/run/voice-cpu.lock",
+    # The line of jobs waiting for a GPU slot (sched.py); remote slots' locks are run/slots/.
+    "queue_dir": "{home}/run/queue",
+    # A waiting job whose installed code changed re-executes itself (same pid, same place in
+    # line), so an install reaches papers that are already waiting.
+    "reexec_when_upgraded": True,
     # Minimum niceness of everything the voice runs (the runner already starts it at 10).
     "nice": 10,
 }

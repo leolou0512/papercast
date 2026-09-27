@@ -33,7 +33,7 @@ README; everything else is an assumption or untested, and says so.
   minor-version compatibility (measured: the sample, the short real test, the full episode). A
   kernel that needs a newer driver's PTX JIT would fail with a CUDA error (`engine_failed`, then
   Use CPU voice); none has. No driver change was made or is needed.
-- **Compiling needs zig.** Triton and inductor build C stubs and there is no gcc on stibnite;
+- **Compiling needs zig on stibnite** (bs1 uses its system gcc). Triton and inductor build C stubs and there is no gcc on stibnite;
   `engines/breeze/bin/cc` wraps zig's clang from the `ziglang` wheel in the engine's venv. Its
   caches live in `engines/breeze/cache/`; a cold cache adds compile time to the first load.
 - **The engine runs in-process**: no model server, no port. Besides the GPU it uses 2 torch
@@ -113,10 +113,55 @@ README; everything else is an assumption or untested, and says so.
   pool starts workers from threads. Found by measurement (it killed a working Kokoro engine
   mid-sweep); tested since: engines asleep mid-chunk die within a second of a SIGKILLed job. The
   Breeze engine uses the same mechanism (it is the same protocol module).
-- **Reinstalling underneath a job.** `install.sh` replaces the code, venvs and weights that a
-  running job's engines load, so it refuses while any job is preparing, waiting, speaking or
-  encoding (a live voice pid in `state/*/voice/status.json`) or either slot lock is held
-  (`papercast_voice/busy.py`, tested). It cannot see a job started in the seconds it runs.
+- **Reinstalling underneath a job.** A full `install.sh` replaces venvs and weights a running
+  engine loads, so it refuses while a job is speaking or encoding, or the CPU slot or a bs1
+  slot is held (`papercast_voice/busy.py`, tested). It cannot see a job admitted in the seconds
+  it runs. Waiting jobs do not block it: they re-execute onto the new code (tested with a fake
+  install: same pid, same place in line). `--code-only` replaces only the code, while jobs
+  speak: a speaking job keeps the modules it loaded, and a new engine it starts (after giving a
+  GPU back) is the new worker file, which speaks the same protocol. **Not tested: a code change
+  that breaks the protocol between the two**; such a change needs a full install when idle.
+- **Voice 1.0 jobs cannot re-execute.** Papers already waiting under 1.0 when 1.1 was installed
+  stay on 1.0 (stibnite's card only) until restarted; the restart (README "Install") uses up
+  the runner's one "interrupted" restart of that paper's speaking step. On 2026-09-27 one paper
+  was moved; 263 were still waiting under 1.0 (not moved: that needs Leo's go-ahead). 1.0 jobs
+  and 1.1 jobs share stibnite's slot lock, so they never share the card, but 1.0 jobs are not
+  in the line: a 1.1 paper can take stibnite's card ahead of an older 1.0 one.
+
+## bs1 (remote GPUs)
+
+- **Leo's chat model and the voice cannot share bs1 cards 0-6.** The chat model (started on
+  demand from his dashboard, `nas-gpu-control` on bs1) spreads about 142 GiB over cards 0-6 and
+  refuses to start with under 150,000 MiB free across them. Two or more voice jobs on those
+  cards (16 GB each) make it refuse ("not enough VRAM"); with exactly one it would start and
+  run out of memory on that card. The voice cannot see a refusal, only a process that appears:
+  when one does, on any of cards 0-6, every voice job on bs1 gives its card back after its
+  chunk and bs1 is left alone for 30 minutes, so a second press of Start works (tested with the
+  fake host; not tested with the real chat model). While the backlog is being voiced, pressing
+  Start will usually be refused. **The lever**: `touch ~/papercast/voice/run/pause-bs1` frees
+  bs1 within one chunk (about 30 s) and keeps the voice off it until the file is removed.
+  Card 7 (image generator, second model) is not used at all for the same reason.
+- **One narrator in two precisions.** stibnite speaks bf16, bs1 fp32 (fp16 fails there). Same
+  description, seed and settings; measured on the same texts, word error rate, pace and median
+  pitch match within what one precision varies from chunk to chunk (README "Measured"). A paper
+  that moves between hosts mid-episode (it gave a GPU back) mixes chunks of both; not checked
+  by ear.
+- **Speed**: fp32 on a Quadro RTX 6000 speaks at 1.15 × real time (stibnite 0.83), and an engine
+  takes about 45 s to load, per paper. 6 bs1 cards (0-5; 6 while stt is on it is not taken) and
+  stibnite voice about 5.9 × as fast as stibnite alone, not 7 ×.
+- **Each paper's engine is one ssh session for its whole episode** (about 25 minutes). A dropped
+  connection costs the chunk being spoken; the paper goes back to its place in line, and after
+  three bs1 failures in one run it waits for stibnite only. bs1 not answering: it is skipped for
+  60 s at a time and stibnite goes on alone.
+- **Our engines are recognised by executable** (bs1's `papercast-voice/venv/bin/python`, as
+  nvidia-smi names a process by its command: measured). Anyone else starting that exact python
+  would be mistaken for the voice.
+- **bs1's disk is full** (2.5 GB free on /home). The voice writes nothing per job there; the
+  compiler caches (46 MB) can grow a little with a new kernel shape. The venv's 7.4 GB share
+  blocks with uv's cache outside the install (reflinks), so they cannot be freed from inside it.
+- **Clock**: bs1's clock runs about 2 minutes behind stibnite's; nothing depends on it.
+- The page's order follows **hand-over order** (when a script was finished), which differs from
+  upload order when scripts finish out of order (10 % of pairs in the 2026-09-27 backlog).
 
 ## Input handling
 

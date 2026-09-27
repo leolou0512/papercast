@@ -3,6 +3,7 @@
     papercast-voice info                   one JSON line, < 2 s, never touches the GPU
     papercast-voice run <job dir>          voice one episode (exit 0 = status.json phase done)
     papercast-voice check <script.md>      how a script would be chunked, or why it is refused
+    papercast-voice slots [<state dir>]    the line for GPU slots and who holds each slot (read only)
     papercast-voice measure-cpu [...]      time the CPU voice at several worker/thread splits
     papercast-voice measure-episode <dir>  words per minute and speed from a finished episode
     papercast-voice measure-gpu [...]      peak GPU memory and speed of the configured GPU voice
@@ -72,6 +73,31 @@ def check(path: str) -> int:
     return 0
 
 
+def slots(state_dir: str) -> dict:
+    """The line and the slots, read only: ticket names, and each slot's lock holder (the pid a
+    FileLock writes into its file) when it is held."""
+    from . import hosts, sched
+    from .locks import FileLock
+    cfg = load()
+    line = sched.line(cfg.get("queue_dir") or os.path.join(cfg["home"], "run", "queue"))
+    out = {"line": {"live": sum(1 for _n, live in line if live),
+                    "stale": sum(1 for _n, live in line if not live),
+                    "front": [n for n, live in line if live][:3]},
+           "slots": {}}
+    for s in hosts.build(cfg, state_dir, gpu_need_mib(cfg) or 0):
+        lk = FileLock(s.lock_path)
+        if lk.try_acquire():
+            lk.release()
+            out["slots"][s.label] = None
+        else:
+            try:
+                with open(s.lock_path, encoding="ascii") as fh:
+                    out["slots"][s.label] = {"pid": int(fh.read().strip() or 0)}
+            except (OSError, ValueError):
+                out["slots"][s.label] = {"pid": None}
+    return out
+
+
 def main(argv: list[str]) -> int:
     if argv[:1] == ["info"]:
         print(json.dumps(info()))
@@ -81,6 +107,9 @@ def main(argv: list[str]) -> int:
         return Job(argv[1], load()).run()
     if argv[:1] == ["check"] and len(argv) == 2:
         return check(argv[1])
+    if argv[:1] == ["slots"] and len(argv) <= 2:
+        print(json.dumps(slots(argv[1] if len(argv) == 2 else "/home/leo/papercast/state")))
+        return 0
     if argv[:1] == ["measure-cpu"]:
         from .measure import measure_cpu
         return measure_cpu(argv[1:])

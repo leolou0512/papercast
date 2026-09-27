@@ -244,15 +244,19 @@ class InstallGuard(unittest.TestCase):
         voice = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)",
                                   "papercast_voice", "run"])
         self.addCleanup(voice.kill)
+        # waiting is not busy: a waiting job holds no engine and re-executes on the new code
         self.job("2026-09-26-dddddddd", "waiting-for-gpu", voice.pid)
+        self.assertEqual(self.cli().returncode, 0, self.cli().stdout)
+        self.job("2026-09-26-dddddddd", "speaking", voice.pid)
         r = self.cli()
         self.assertEqual(r.returncode, 1)
         self.assertIn("dddddddd", r.stdout)
 
     def test_held_locks_are_busy(self):
         os.makedirs(self.state)
-        for path in (os.path.join(self.state, "voice-gpu.lock"),
-                     os.path.join(self.home, "run", "voice-cpu.lock")):
+        os.makedirs(os.path.join(self.home, "run", "slots"))
+        for path in (os.path.join(self.home, "run", "voice-cpu.lock"),
+                     os.path.join(self.home, "run", "slots", "bs1-gpu3.lock")):
             with self.subTest(path):
                 fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
                 self.assertEqual(busy.reasons(self.state, self.home), [])

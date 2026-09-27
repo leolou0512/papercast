@@ -10,23 +10,26 @@ reboot or a Retry. Everything that must survive is on disk in <dir>:
   out/episode.mp3       the result; status.json `output` carries its sha256
   metrics.json          timings, memory, rates of every run (voice-internal)
 
-One process per directory (flock on .voice.lock). At most one GPU job on the machine (flock on
-state/voice-gpu.lock, held from admission to the end of GPU synthesis) and one CPU job (the
-voice's own run/voice-cpu.lock).
+One process per directory (flock on .voice.lock). One job per GPU slot (hosts.py): stibnite's card
+is state/voice-gpu.lock, each remote GPU a lock under run/slots/, held from admission to the end
+of synthesis on it; waiting jobs take slots in the order they were handed over (sched.py). One
+CPU job at a time (the voice's own run/voice-cpu.lock).
 """
 from __future__ import annotations
 
+import calendar
 import hashlib
 import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
 import traceback
 
-from . import VERSION, audio, gpu, procs, tags, textprep
+from . import VERSION, audio, gpu, hosts, procs, sched, tags, textprep
 from .config import engine_spec, gpu_need_mib
 from .locks import FileLock
 from .textprep import ScriptInvalid
@@ -48,6 +51,26 @@ class GpuOOMFailed(Exception):
 
 class Yielded(Exception):
     pass
+
+
+ACTIVE = ("preparing", "waiting-for-gpu", "speaking", "encoding")
+
+
+def parse_iso(s) -> float | None:
+    try:
+        return float(calendar.timegm(time.strptime(str(s), "%Y-%m-%dT%H:%M:%SZ")))
+    except (ValueError, OverflowError):
+        return None
+
+
+def installed_version() -> str:
+    """VERSION as the installed files say now (install.sh replaces them underneath us)."""
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION"),
+                  encoding="utf-8") as fh:
+            return fh.read().strip() or "dev"
+    except OSError:
+        return "dev"
 
 
 def now_iso() -> str:
@@ -89,12 +112,14 @@ class Status:
                   "need_mib": None, "free_mib": None, "chunks_done": 0, "chunks_total": 0,
                   "audio_s": 0, "eta_s": None, "pid": os.getpid(), "since": t, "updated_at": t,
                   "error": None, "output": None, "wait_reason": None, "wait_text": None,
-                  "note": None, "voice_version": VERSION}
+                  "note": None, "voice_version": VERSION, "host": None, "queued_at": None}
 
     def set(self, **kw) -> None:
         with self.lock:
             if "phase" in kw and kw["phase"] != self.d["phase"]:
                 self.d["since"] = now_iso()
+            elif all(self.d.get(k) == v for k, v in kw.items()):
+                return          # nothing changed: the heartbeat writes the file anyway
             self.d.update(kw)
             self._write()
 
@@ -118,6 +143,10 @@ class Status:
     def start(self) -> None:
         threading.Thread(target=self._beat, daemon=True).start()
 
+    def flush(self) -> None:
+        with self.lock:
+            self._write()
+
     def stop(self) -> None:
         self.stop_evt.set()
 
@@ -130,8 +159,13 @@ class Job:
         self.status = Status(self.vdir, cfg["heartbeat_s"])
         self.cancel = threading.Event()
         self.done_evt = threading.Event()
-        state_dir = os.path.dirname(os.path.dirname(self.vdir))
-        self.gpu_lock = FileLock(cfg.get("gpu_lock") or os.path.join(state_dir, "voice-gpu.lock"))
+        self.state_dir = os.path.dirname(os.path.dirname(self.vdir))
+        self.gpu_lock = FileLock(cfg.get("gpu_lock") or os.path.join(self.state_dir,
+                                                                     "voice-gpu.lock"))
+        self.ticket: sched.Ticket | None = None
+        self.slot_lock: FileLock | None = None
+        self.where: str | None = None       # "stibnite GPU 0", "bs1 GPU 3" while speaking there
+        self.host_spw: float | None = None  # that host's measured synthesis seconds per word
         self.cpu_lock = FileLock(cfg["cpu_lock"])
         self.workers: list[Worker] = []
         self.plock = threading.Lock()
@@ -253,12 +287,18 @@ class Job:
         encode = 10 + 0.06 * sum(c.words for c in self.plan) * 60 / wpm
         if self.run_words and self.run_t0:
             return round((time.time() - self.run_t0) / self.run_words * left + encode)
-        spw = (self.spec or {}).get("sec_per_word")
+        spw = self.host_spw or (self.spec or {}).get("sec_per_word")
         return round(spw * left + encode) if spw else None
 
     def _progress(self) -> None:
-        self.status.set(chunks_done=len(self.done), chunks_total=len(self.plan),
-                        audio_s=round(sum(self.done.values()), 1), eta_s=self._eta())
+        kw = dict(chunks_done=len(self.done), chunks_total=len(self.plan),
+                  audio_s=round(sum(self.done.values()), 1), eta_s=self._eta())
+        if self.where and self.status.get("phase") == "speaking":
+            # The page shows `note` under "Speaking N%" in place of its own ETA line.
+            eta = kw["eta_s"]
+            kw["note"] = f"Speaking on {self.where}" + (
+                f", about {max(1, round(eta / 60))} min to go." if eta else ".")
+        self.status.set(**kw)
 
     def _synth_one(self, w: Worker, ch: textprep.Chunk) -> None:
         msg = w.synth(ch.idx, ch.text, self.chunk_path(self.spec, ch), self.cancel)
@@ -267,6 +307,9 @@ class Job:
                 self.run_t0 = time.time() - float(msg.get("gen_s") or 0)
             self.done[ch.idx] = float(msg.get("audio_s") or 0)
             self.run_words += ch.words
+            if self.where:
+                by = self.m.setdefault("chunks_by_slot", {})
+                by[self.where] = by.get(self.where, 0) + 1
             if int(msg.get("attempts") or 1) > 1 or msg.get("warning"):
                 self.m.setdefault("retried_chunks", []).append(
                     {"idx": ch.idx, "words": ch.words, "attempts": msg.get("attempts"),
@@ -286,41 +329,186 @@ class Job:
             self.workers.remove(w)
 
     # --------------------------------------------------------------- GPU
-    def _wait_for_gpu(self, need: int) -> bool:
+    def _queued_at(self) -> float:
+        """When this job joined the line for a GPU (sched.py): the hand-off, which is job.json's
+        modification time, unless this run continues an interrupted one (a restart after a
+        reboot, a re-execution after an upgrade), which keeps the place it had then."""
+        prev = self.prev or {}
+        if prev.get("phase") in ACTIVE:
+            q = prev.get("queued_at")
+            if isinstance(q, (int, float)) and q > 0:
+                return float(q)
+            # A status written by a voice without a line (1.0): its wait began at `since`.
+            if prev.get("phase") == "waiting-for-gpu":
+                t = parse_iso(prev.get("since"))
+                if t:
+                    return t
+        try:
+            return os.path.getmtime(self.p("job.json"))
+        except OSError:
+            return time.time()
+
+    def _maybe_reexec(self) -> None:
+        """While waiting, and holding nothing but the place in line: if install.sh has replaced
+        the code, become the new code (same pid, so the runner still sees its process; same
+        place in line, from status.json's queued_at). All locks are close-on-exec."""
+        if not self.cfg.get("reexec_when_upgraded") or VERSION == "dev":
+            return
+        new = installed_version()
+        if new == VERSION or new == "dev":
+            return
+        self.event(f"installed code changed to {new}; restarting this job on it (pid "
+                   f"{os.getpid()}, place in line kept)")
+        self.status.set(note="restarting on the newly installed voice code")
+        self.status.stop()
+        self.m.update(total_s=None, finished_at=now_iso(), phase="reexec")
+        self._write_metrics()
+        sys.stderr.flush()
+        argv = list(getattr(sys, "orig_argv", None) or [sys.executable, "-m", "papercast_voice",
+                                                        "run", self.vdir])
+        os.execv(sys.executable, argv)
+
+    @staticmethod
+    def _slot_texts(local: tuple[str, str] | None, states: dict[str, list[str]]) -> tuple[str, str]:
+        """(wait_reason, wait_text) for a job whose turn it is: why no slot is free, per host.
+        `local` is stibnite's (Admission code, its sentence) when it was looked at. With no
+        remote slot configured, stibnite's sentence is the whole text, as before hosts."""
+        states = {k: v for k, v in states.items() if v}
+        if local and not states:
+            return local
+        parts = []
+        if local:
+            parts.append("stibnite: " + local[1].split("waiting for GPU: ", 1)[-1])
+        for name, st in states.items():
+            if all(x == "unreachable" for x in st):
+                parts.append(f"{name}: cannot be reached")
+                continue
+            if len(set(st)) == 1 and not st[0].startswith(("in use", "voicing", "short", "busy")):
+                parts.append(f"{name}: {st[0]}")          # paused, or left free for other work
+                continue
+            counts: dict[str, int] = {}
+            for x in st:
+                counts[x] = counts.get(x, 0) + 1
+            parts.append(f"{name}: " + ", ".join(f"{n} GPU{'s' if n > 1 else ''} {x}"
+                                                  for x, n in sorted(counts.items())))
+        code = local[0] if local and local[0] in ("settling", "memory", "busy", "nvidia_smi") \
+            else "slot"
+        return code, "waiting for a GPU, next in line. " + "; ".join(parts)
+
+    def _wait_for_slot(self, need: int, slots: list, remote_ok: bool) -> "hosts.Slot | None":
+        """Wait in line for a GPU slot; None if Use CPU voice was pressed. The slot comes back
+        with its lock held (self.slot_lock for a remote one, self.gpu_lock for stibnite's)."""
         g = self.cfg["gpu"]
+        local = next((s for s in slots if not s.remote), None)
+        remote = [s for s in slots if s.remote] if remote_ok else []
         adm = gpu.Admission(need, g["util_max_pct"], g["stable_polls"])
-        self.status.set(phase="waiting-for-gpu", engine=None, need_mib=need)
-        t0, next_poll = time.time(), 0.0
+        radm = {}
+        self.status.set(phase="waiting-for-gpu", engine=None, need_mib=need, host=None)
+        self.ticket.enter()
+        t0, next_poll, next_line, next_ver = time.time(), 0.0, 0.0, time.time() + 5
+        front = may_remote = False
+        line_s = float(g.get("line_poll_s", 2.0))
         try:
             while True:
                 self._check_cancel()
                 if self.control("use-cpu"):
                     self.gpu_lock.release()
+                    self.ticket.leave()
                     self.event("Use CPU voice pressed while waiting for the GPU")
-                    return False
-                if time.time() >= next_poll:
-                    next_poll = time.time() + float(g["poll_s"])
-                    have = self.gpu_lock.try_acquire()
-                    r = gpu.read(self.cfg["nvidia_smi"], g["index"], g["nvidia_smi_timeout_s"])
-                    if not have:
+                    return None
+                now = time.time()
+                if now >= next_ver:
+                    next_ver = now + float(g.get("upgrade_check_s", 10.0))
+                    self._maybe_reexec()
+                if now >= next_line:
+                    next_line = now + line_s
+                    n_all, n_remote = self.ticket.ahead()
+                    was = front or may_remote
+                    front = n_all == 0 and local is not None
+                    may_remote = bool(remote) and n_remote == 0
+                    if not (front or may_remote):
+                        self.gpu_lock.release()
                         adm.streak = 0
-                        self.status.set(free_mib=r.free_mib, wait_reason="slot",
-                                        wait_text="waiting for GPU: another paper is being voiced on it")
-                    else:
-                        ok, code, text = adm.step(r)
-                        self.status.set(free_mib=r.free_mib, wait_reason=code, wait_text=text)
-                        if ok:
-                            self.event(f"GPU admitted: {r.free_mib} MiB free, need {need}, "
-                                       f"utilisation {r.util_pct}%")
-                            return True
-                time.sleep(min(0.5, float(g["poll_s"])))
+                        self.status.set(wait_reason="slot", wait_text=(
+                            f"waiting for a GPU: {n_all} paper{'s' if n_all != 1 else ''} "
+                            "ahead of it in line"))
+                    elif not was:
+                        next_poll = 0.0          # our turn: look at the GPUs now
+                if (front or may_remote) and now >= next_poll:
+                    next_poll = now + float(g["poll_s"])
+                    states: dict[str, list[str]] = {}
+                    lstate = None
+                    if front:
+                        have = self.gpu_lock.try_acquire()
+                        r = gpu.read(self.cfg["nvidia_smi"], g["index"], g["nvidia_smi_timeout_s"])
+                        self.status.set(free_mib=r.free_mib)
+                        if not have:
+                            adm.streak = 0
+                            lstate = ("slot", "waiting for GPU: another paper is being voiced on it")
+                        else:
+                            ok, code, text = adm.step(r)
+                            if ok:
+                                self.ticket.leave()
+                                self.event(f"GPU admitted: {local.label}, {r.free_mib} MiB free, "
+                                           f"need {need}, utilisation {r.util_pct}%")
+                                return local
+                            lstate = (code, text)
+                    elif local is not None:
+                        self.gpu_lock.release()
+                        adm.streak = 0
+                    by_host: dict[str, list] = {}
+                    for s in remote:
+                        by_host.setdefault(s.host.name, []).append(s)
+                    for name, ss in by_host.items():
+                        host = ss[0].host
+                        if host.paused():
+                            states[name] = ["paused (run/pause-" + name + ")"] * len(ss)
+                            continue
+                        h = host.holdoff()
+                        if h:
+                            states[name] = ["left free for other work until " + time.strftime(
+                                "%H:%M", time.localtime(h[0]))] * len(ss)
+                            continue
+                        if time.time() < host.down_until:
+                            states[name] = ["unreachable"] * len(ss)
+                            continue
+                        readings = host.read_remote()
+                        st = states.setdefault(name, [])
+                        for s in ss:
+                            lk = FileLock(s.lock_path)
+                            if not lk.try_acquire():
+                                st.append("voicing a paper")
+                                continue
+                            ra = radm.setdefault(s.key, hosts.RemoteAdmission(
+                                s.need_mib, g["util_max_pct"], 1))
+                            r = readings.get(s.gpu) or gpu.Reading(ok=False, error="not listed")
+                            ok, why = ra.step(r)
+                            if ok:
+                                self.gpu_lock.release()
+                                self.slot_lock = lk
+                                self.ticket.leave()
+                                self.event(f"GPU admitted: {s.label}, {r.free_mib} MiB free, need "
+                                           f"{s.need_mib}, no other process on it")
+                                return s
+                            lk.release()
+                            st.append({"in use": "in use by other work", "no room": "short of memory",
+                                       "busy": "busy", "unreachable": "unreachable"}.get(why, why))
+                    code, text = self._slot_texts(lstate, states)
+                    self.status.set(wait_reason=code, wait_text=text)
+                time.sleep(0.5)
         finally:
             self.m["wait_s"] += time.time() - t0
 
-    def _speak_gpu(self, spec: dict) -> None:
+    def _speaking_on(self, where: str | None) -> None:
+        self.where = where
+        self.status.set(phase="speaking", wait_reason=None, wait_text=None, host=where)
+        self.run_words, self.run_t0 = 0, None      # this slot's own pace for the ETA
+        self._progress()
+
+    def _speak_gpu(self, spec: dict, slot) -> None:
         g = self.cfg["gpu"]
-        self.status.set(phase="speaking", engine=f"gpu:{spec['label']}", wait_reason=None,
-                        wait_text=None)
+        self.status.set(engine=f"gpu:{spec['label']}")
+        self._speaking_on(slot.label)
         w = Worker(spec, threads=int(spec.get("threads", 4)), gpu_index=int(g["index"]),
                    cfg=self.cfg, tag="gpu")
         self.workers.append(w)
@@ -340,6 +528,44 @@ class Job:
                 if y:
                     raise Yielded(why)
 
+    def _speak_remote(self, spec: dict, slot) -> None:
+        """The engine on a remote GPU (hosts.py): it yields between chunks as soon as any other
+        process appears on that GPU, and once more is checked right before its first chunk."""
+        g = self.cfg["gpu"]
+        host = slot.host
+        try:
+            code_dir = host.ensure_code(spec)
+        except (OSError, subprocess.SubprocessError, RuntimeError) as e:
+            raise EngineError(f"{slot.label}: {e}") from e
+        rspec = host.engine_spec(spec, code_dir)
+        # Who else is on the host's GPUs now (before our engine): only a process that comes
+        # after this is a reason to give the host back.
+        before = host.read_remote()
+        if not (before.get(slot.gpu) and before[slot.gpu].ok):
+            raise EngineError(f"{slot.label}: cannot read its GPUs ({host.last_error})")
+        known = {p for _g, p in host.strangers(before)}
+        self.host_spw = host.cfg.get("sec_per_word")
+        self.status.set(engine=f"gpu:{spec['label']}")
+        self._speaking_on(slot.label)
+        w = Worker(rspec, threads=int(spec.get("threads", 4)), gpu_index=slot.gpu, cfg=self.cfg,
+                   tag=slot.key, host=host)
+        self.workers.append(w)
+        w.start(self.cancel)
+        self.event(f"{slot.label}: engine ready in {(w.ready or {}).get('load_s')} s "
+                   f"({(w.ready or {}).get('dtype')}, remote pid {w.remote_pid})")
+        yr = hosts.RemoteYield(host, slot.gpu, g["yield_free_floor_mib"], known)
+        last = 0.0
+        for ch in self.todo():
+            self._check_cancel()
+            if time.time() - last >= float(g["poll_s"]) or host.paused():
+                last = time.time()
+                y, why, hold = yr.step(host.read_remote(), w.remote_pid)
+                if hold:
+                    host.hold_off(why)
+                if y:
+                    raise Yielded(f"{slot.label}: {why}")
+            self._synth_one(w, ch)
+
     def _gpu_pass(self, script: str, name: str) -> dict | None:
         spec = engine_spec(self.cfg, name)
         need = gpu_need_mib(self.cfg)
@@ -347,13 +573,28 @@ class Job:
             raise EngineError(f"GPU voice {name} has no measured peak memory in "
                               f"{self.cfg['config_file']}; run install.sh --gpu {name}")
         self._prepare(spec, script)
+        slots = hosts.build(self.cfg, self.state_dir, need)
+        if not slots:
+            raise EngineError("no GPU slot is configured (hosts in voice.json)")
         ooms, max_ooms = 0, int(self.cfg["gpu"]["max_ooms"])
+        fails: dict[str, int] = {}
+        remote_ok = True
+        qdir = self.cfg.get("queue_dir") or os.path.join(self.cfg["home"], "run", "queue")
+        self.ticket = sched.Ticket(qdir, self.status.get("queued_at") or time.time(),
+                                   self.status.get("paper_id") or "unknown")
         while self.todo():
-            if not self._wait_for_gpu(need):
+            slot = self._wait_for_slot(need, slots, remote_ok)
+            if slot is None:
                 return None
             try:
-                self._speak_gpu(spec)
+                if slot.remote:
+                    self._speak_remote(spec, slot)
+                else:
+                    self._speak_gpu(spec, slot)
             except EngineOOM as e:
+                if slot.remote:
+                    remote_ok = self._remote_failed(slot, fails, f"out of GPU memory: {e}")
+                    continue
                 ooms += 1
                 self.event(f"CUDA out of memory ({ooms} of {max_ooms}): {e}")
                 if ooms >= max_ooms:
@@ -363,10 +604,38 @@ class Job:
             except Yielded as y:
                 self.event(f"yielded the GPU: {y}")
                 self.status.set(note=str(y))
+            except EngineError as e:
+                if not slot.remote:
+                    raise
+                remote_ok = self._remote_failed(slot, fails, str(e))
             finally:
                 self._stop_workers()
                 self.gpu_lock.release()
+                if self.slot_lock is not None:
+                    self.slot_lock.release()
+                    self.slot_lock = None
+                self.where = self.host_spw = None
         return spec
+
+    def _remote_failed(self, slot, fails: dict[str, int], why: str) -> bool:
+        """An engine on a remote host failed (lost connection, crash, out of memory): the
+        finished chunks are kept, the host is skipped for a while, and the job waits again at
+        its place in line. After max_failures on one host in this run, the job stops using
+        remote GPUs (it stays in line for stibnite's). Returns whether remote slots may be used."""
+        n = fails[slot.host.name] = fails.get(slot.host.name, 0) + 1
+        limit = int(slot.host.cfg.get("max_failures", 3))
+        slot.host.down_until = time.time() + float(slot.host.cfg.get("down_backoff_s", 60))
+        self.event(f"{slot.label} failed ({n} of {limit}): {why}")
+        self.m.setdefault("remote_failures", []).append({"slot": slot.key, "at": now_iso(),
+                                                         "why": why[:300]})
+        if n >= limit:
+            self.ticket.set_local_only()
+            self.status.set(note=f"the GPU voice failed {n} times on {slot.host.name}; waiting "
+                                 "for stibnite's GPU instead, finished chunks kept")
+            return False
+        self.status.set(note=f"lost {slot.label} ({why[:120]}); waiting for a GPU again, "
+                             "finished chunks kept")
+        return True
 
     # --------------------------------------------------------------- CPU
     def _cpu_pass(self, script: str, why: str) -> dict:
@@ -425,7 +694,10 @@ class Job:
     # --------------------------------------------------------------- encode
     def _encode(self, spec: dict, job: dict) -> dict:
         a, ff = self.cfg["audio"], self.cfg["ffmpeg"]
-        self.status.set(phase="encoding", eta_s=round(10 + 0.02 * sum(self.done.values())))
+        note = self.status.get("note") or ""
+        self.status.set(phase="encoding", eta_s=round(10 + 0.02 * sum(self.done.values())),
+                        note="Making the MP3." if note.startswith("Speaking on") else note or None,
+                        host=None)
         t0 = time.time()
         missing = [c.idx for c in self.plan if not os.path.isfile(self.chunk_path(spec, c))]
         if missing:
@@ -505,13 +777,14 @@ class Job:
         if cur < int(self.cfg["nice"]):
             os.nice(int(self.cfg["nice"]) - cur)
         self.status.set(phase="preparing", pid=os.getpid())
+        self.status.flush()
         self.status.start()
         threading.Thread(target=self._watch, daemon=True).start()
         t0 = time.time()
         log(f"papercast-voice {VERSION} run {self.vdir} (pid {os.getpid()}, nice {os.nice(0)})")
         try:
             job = self._load_job()
-            self.status.set(paper_id=job["paper_id"])
+            self.status.set(paper_id=job["paper_id"], queued_at=round(self._queued_at(), 6))
             prev = self._previous_output()
             if prev:
                 self.event("already done: out/episode.mp3 matches status.json; nothing to do")
@@ -559,6 +832,10 @@ class Job:
             self.done_evt.set()
             self._stop_workers()
             self.gpu_lock.release()
+            if self.slot_lock is not None:
+                self.slot_lock.release()
+            if self.ticket is not None:
+                self.ticket.leave()
             self.cpu_lock.release()
             self.m.update(total_s=round(time.time() - t0, 1), wait_s=round(self.m["wait_s"], 1),
                           finished_at=now_iso(), phase=self.status.get("phase"),

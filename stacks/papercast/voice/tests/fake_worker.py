@@ -11,7 +11,12 @@ Behaviour from spec["env"] (the orchestrator passes it into the environment):
   FAKE_OOM_AT     comma list of chunk indices that fail once with a CUDA out-of-memory
   FAKE_STATE      directory for the once-only markers
   FAKE_SEC_PER_WORD  audio seconds per word (default 0.3)
+  FAKE_GPU_PIDDIR a fake remote host's process list: while running, a file "<gpu>-<pid>" there
+                  (the GPU from CUDA_VISIBLE_DEVICES), which its fake nvidia-smi reports
+An `inline` request (a remote engine, hosts.py) gets its WAV back in the reply, as base64.
 """
+import base64
+import io
 import json
 import math
 import os
@@ -20,8 +25,10 @@ import sys
 import time
 import wave
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                                "papercast_voice", "engines"))
+HERE = os.path.dirname(os.path.abspath(__file__))
+# _proto.py sits next to this file when it was copied to a (fake) remote host, else in the repo.
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "papercast_voice", "engines"))
+sys.path.insert(0, HERE)
 import _proto  # noqa: E402
 
 proto = _proto.Proto()
@@ -32,8 +39,13 @@ SR = 24000
 if env.get("FAKE_PIDFILE"):
     with open(env["FAKE_PIDFILE"], "w") as fh:
         fh.write(str(os.getpid()))
+if env.get("FAKE_GPU_PIDDIR") and env.get("CUDA_VISIBLE_DEVICES"):
+    os.makedirs(env["FAKE_GPU_PIDDIR"], exist_ok=True)
+    open(os.path.join(env["FAKE_GPU_PIDDIR"], f"{env['CUDA_VISIBLE_DEVICES']}-{os.getpid()}"),
+         "w").close()
 time.sleep(float(env.get("FAKE_LOAD_S", "0")))
-proto.send(event="ready", sample_rate=SR, load_s=float(env.get("FAKE_LOAD_S", "0")))
+proto.send(event="ready", sample_rate=SR, load_s=float(env.get("FAKE_LOAD_S", "0")),
+           pid=os.getpid(), dtype=spec.get("dtype"))
 oom_at = {int(x) for x in env.get("FAKE_OOM_AT", "").split(",") if x.strip()}
 
 
@@ -60,18 +72,26 @@ for req in proto.requests():
     if env.get("FAKE_LOG"):
         with open(env["FAKE_LOG"], "a") as fh:
             fh.write(json.dumps({"engine": spec["name"], "idx": idx, "text": req["text"],
-                                 "pid": os.getpid()}) + "\n")
+                                 "pid": os.getpid(), "gpu": env.get("CUDA_VISIBLE_DEVICES"),
+                                 "t": time.time(), "dtype": spec.get("dtype")}) + "\n")
     time.sleep(float(env.get("FAKE_DELAY_S", "0.05")))
     marker = os.path.join(env.get("FAKE_STATE", "/tmp"), f"oom-{spec['name']}-{idx}")
     if idx in oom_at and not os.path.exists(marker):
         open(marker, "w").close()
         proto.send(event="error", id=idx, message="CUDA out of memory (fake)", oom=True, fatal=True)
         sys.exit(1)
-    tmp = _proto.tmp_for(req["out"])
-    with wave.open(tmp, "wb") as w:
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
         w.setnchannels(1)
         w.setsampwidth(2)
         w.setframerate(SR)
         w.writeframes(tone(len(req["text"].split()), idx))
-    os.replace(tmp, req["out"])
-    proto.send(event="done", id=idx, audio_s=len(req["text"].split()) * 0.3, gen_s=0.05)
+    msg = {"event": "done", "id": idx, "audio_s": len(req["text"].split()) * 0.3, "gen_s": 0.05}
+    if req.get("inline"):
+        msg["wav_b64"] = base64.b64encode(buf.getvalue()).decode("ascii")
+    else:
+        tmp = _proto.tmp_for(req["out"])
+        with open(tmp, "wb") as fh:
+            fh.write(buf.getvalue())
+        os.replace(tmp, req["out"])
+    proto.send(**msg)

@@ -1,0 +1,96 @@
+/* papercast-group: comments under the player and the board above the list (social.js). The
+   page's own colours and type (app.css); no cards, no shadows. Every control is a 44 x 44 px tap
+   (test_social.py, as test_page.py); links inside a person's text are inline, in .md blocks. */
+
+/* the row's count, next to "2 versions" */
+.row-sub .nc { flex: none; margin-left: -5px; }
+
+/* ---------- the board ---------- */
+.board { padding: 0 16px 8px; }
+.bd-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; }
+.bd-toggle {
+  display: flex; align-items: center; gap: 6px; height: 44px; min-width: 44px; padding: 0 8px; margin-left: -8px;
+  border-radius: 6px; font-size: 13px; line-height: 16px; font-weight: 600; color: var(--text-2);
+}
+.bd-toggle:hover { color: var(--text); background: var(--sel); }
+.bd-toggle::after {
+  content: ""; width: 6px; height: 6px; margin-left: 2px; border: solid currentColor; border-width: 0 1.5px 1.5px 0;
+  transform: translateY(-2px) rotate(45deg); opacity: .7;
+}
+.board.closed .bd-toggle::after { transform: rotate(-45deg); }
+.bd-dot, .bd-item.unread .bd-link::before {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none;
+}
+.bd-pin { margin: 0; padding: 0 8px; min-width: 44px; }
+.bd-list { list-style: none; margin: 0; padding: 0; }
+.bd-item { position: relative; }
+.bd-link {
+  display: block; min-height: 44px; padding: 5px 8px 5px 16px; margin: 0 -8px 0 -16px; width: calc(100% + 24px);
+  border-radius: 6px; font-size: 14px; line-height: 19px; color: var(--text-2); text-decoration: none; text-align: left;
+  position: relative; overflow-wrap: anywhere;
+}
+a.bd-link:hover, button.bd-link:hover { background: var(--sel); }
+.bd-link.bd-plain { cursor: default; }
+.bd-item.unread .bd-link::before { content: ""; position: absolute; left: 5px; top: 11px; }
+.bd-t { color: var(--text); font-weight: 500; }
+.bd-item.unread .bd-text { color: var(--text); }
+.bd-when { white-space: nowrap; }
+.bd-none { font-size: 14px; line-height: 19px; color: var(--text-2); padding: 4px 0 8px; }
+.bd-foot { display: flex; gap: 16px; }
+.bd-more { margin: 0; padding: 0 8px 0 0; min-width: 44px; color: var(--accent); font-weight: 500; }
+.bd-more:hover:not(:disabled) { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+.bd-notice { background: var(--surface); border-radius: 6px; padding: 10px 12px 0; margin: 2px 0 8px; }
+.bd-ntext { font-size: 14px; line-height: 20px; color: var(--text); overflow-wrap: anywhere; }
+.bd-nmeta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13px; line-height: 18px; color: var(--text-2); min-height: 44px; }
+.bd-nmeta .text-btn { margin: 0 0 0 auto; padding: 0 4px; min-width: 44px; font-size: 13px; }
+.bd-form { margin: 0 0 8px; }
+.bd-frow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.bd-frow .field { flex: 1; min-width: 160px; margin: 0; }
+.bd-frow .btn-accent { margin: 0; border: 0; border-radius: 6px; }
+.bd-frow .text-btn { margin: 0; padding: 0 8px; min-width: 44px; }
+.bd-msg { color: var(--danger); font-size: 13px; line-height: 18px; margin: 4px 0 0; }
+.bd-msg:empty { display: none; }
+.c-body a, .bd-ntext a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; text-decoration-thickness: 1px; }
+
+/* ---------- comments, under the player ---------- */
+.comments { padding: 0 32px 48px; }
+.c-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; margin-top: 8px; }
+.c-head .sec-h { margin: 0; }
+.c-at { margin: 0; padding: 0 8px; min-width: 44px; color: var(--accent); font-weight: 500; font-variant-numeric: tabular-nums; }
+.c-at:hover:not(:disabled) { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+.c-list, .c-replies { list-style: none; margin: 0; padding: 0; }
+.c-thread { padding-top: 8px; }
+.c-thread + .c-thread { border-top: 1px solid var(--hairline); }
+.c-replies { margin-left: 4px; padding-left: 14px; border-left: 2px solid var(--hairline); }
+.c-replies:empty { display: none; }
+.c-item { padding-top: 4px; border-radius: 6px; transition: background-color .6s ease; }
+.c-item.c-flash { background-color: var(--sel); transition: none; }
+.c-meta { font-size: 13px; line-height: 18px; color: var(--text-2); overflow-wrap: anywhere; }
+.c-who { color: var(--text); font-weight: 600; }
+.c-body { font-size: 15px; line-height: 22px; margin-top: 2px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.c-body a.c-time { color: var(--accent); text-decoration: none; }   /* no bold: a synthetic bold box is wider than its hit area */
+.c-body a.c-time:hover { text-decoration: underline; text-underline-offset: 2px; }
+.c-gone { font-size: 14px; line-height: 20px; color: var(--text-2); font-style: italic; margin: 4px 0 8px; }
+.c-acts { display: flex; flex-wrap: wrap; gap: 4px; margin-left: -8px; }
+.c-acts .text-btn { margin: 0; padding: 0 8px; min-width: 44px; font-size: 13px; }
+.c-acts .text-btn.danger { color: var(--danger); }
+.c-none { font-size: 14px; line-height: 20px; color: var(--text-2); padding: 4px 0 8px; }
+.c-compose { margin-top: 12px; }
+.c-box { margin: 6px 0 12px; }
+.c-text { min-height: 72px; }
+.c-replybox .c-text { min-height: 60px; }
+.c-row { display: flex; align-items: center; gap: 12px; margin-top: 8px; flex-wrap: wrap; }
+.c-row .btn-accent { margin: 0; border: 0; border-radius: 6px; }
+.c-row .text-btn { margin: 0; padding: 0 8px; min-width: 44px; }
+.c-msg { font-size: 13px; line-height: 18px; color: var(--text-2); overflow-wrap: anywhere; }
+.c-msg.err { color: var(--danger); }
+
+/* with a mouse the board is denser; a phone keeps 44 px taps */
+@media (min-width: 721px) {
+  .bd-link { min-height: 0; padding-top: 4px; padding-bottom: 4px; }
+  .bd-item.unread .bd-link::before { top: 10px; }
+}
+@media (max-width: 720px) {
+  .comments { padding: 0 16px 32px; }
+  .board { padding: 0 16px 4px; }
+}

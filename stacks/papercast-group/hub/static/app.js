@@ -152,8 +152,11 @@
 
   // ------------------------------------------------------------------ versions
   function indexEps(p) { for (const e of p.episodes || []) S.epPaper.set(e.id, p.id); }
+  // A paper the list does not show (a search, or queued from elsewhere) is still known from the
+  // Up next answer or the map.
+  const paperOf = (pid) => S.papers.get(pid) || Q.papers.get(pid) || (S.mapPapers && S.mapPapers.get(pid)) || null;
   function epById(eid) {
-    const p = S.papers.get(S.epPaper.get(eid));
+    const p = paperOf(S.epPaper.get(eid));
     return (p && (p.episodes || []).find((e) => e.id === eid)) || null;
   }
   const anyAudio = (p) => (p.episodes || []).some((e) => e.has_audio);
@@ -439,9 +442,9 @@
     const c = chosen(p), n = (p.episodes || []).length;
     const title = displayTitle(p), rg = ring(p), sub = stateLine(c), ptags = p.tags || [];
     const by = c ? whoLine(c) : "", nv = n > 1 ? `${n} versions` : "";
-    const canDel = !!(c && c.can_delete), audio = anyAudio(p);
+    const canDel = !!(c && c.can_delete), audio = anyAudio(p), hasMenu = canDel || canQueue(c);
     // Everything the row shows, in one string: when the row shows it already, it is left as it is.
-    const sig = JSON.stringify([title, p.added_at, rg, sub, by, nv, ptags, ptags.includes(S.tag) ? S.tag : null, audio, !!p.listened, canDel]);
+    const sig = JSON.stringify([title, p.added_at, rg, sub, by, nv, ptags, ptags.includes(S.tag) ? S.tag : null, audio, !!p.listened, canDel, hasMenu]);
     if (r.sig === sig) return;
     r.sig = sig;
     const tnode = el("p", { class: "row-title", title: title || null });
@@ -450,10 +453,10 @@
       nv ? el("span", { class: "nv", text: `· ${nv}` }) : null);
     const byl = by ? el("div", { class: "row-by" }, el("span", { text: by })) : null;
     const open = S.menu && S.menu.for === `row:${p.id}`;
-    const more = canDel ? el("button", { type: "button", class: "more", "aria-label": "More", "aria-haspopup": "menu",
+    const more = hasMenu ? el("button", { type: "button", class: "more", "aria-label": "More", "aria-haspopup": "menu",
       "aria-expanded": open ? "true" : "false", html: I.more,
       onclick: (e) => { e.stopPropagation(); openMenu(e.currentTarget, `row:${p.id}`, rowMenu(p)); } }) : el("span", { class: "more-sp" });
-    if (open && canDel) S.menu.anchor = more;       // the row's open menu closes onto the new button
+    if (open && hasMenu) S.menu.anchor = more;       // the row's open menu closes onto the new button
     // Tags: small plain words; a tap shows only the papers with that tag (again: all of them).
     const tags = ptags.length ? el("div", { class: "row-tags" }, ptags.map((t) =>
       el("button", { type: "button", class: `tag${t === S.tag ? " on" : ""}`, title: t === S.tag ? "Show all papers" : `Only “${t}”`,
@@ -779,6 +782,8 @@
     renderState(c);
     renderVersions(p, c);
     renderPlayer();
+    renderQueue();
+    renderTranscript(c);
     onScroll();
   }
 
@@ -861,7 +866,7 @@
     a.playbackRate = S.speed;
     // The hub's position, fresh: the list may have been loaded before another device played.
     const fresh = api("GET", `/api/papers/${pid}`).then((v) => {
-      if (v && v.id && S.papers.has(v.id)) { S.papers.set(v.id, pinEdits(v)); indexEps(v); }
+      if (v && v.id && S.papers.has(v.id)) { S.papers.set(v.id, pinEdits(v)); indexEps(v); } else if (v && v.id && Q.papers.has(v.id)) Q.papers.set(v.id, v);
       return v;
     }).catch(() => null);
     a.addEventListener("loadedmetadata", async () => {
@@ -878,7 +883,7 @@
       renderPlayer(); updateRow(pid);
     }, { once: true });
     if ("mediaSession" in navigator) {
-      const p = S.papers.get(pid) || {};
+      const p = paperOf(pid) || {};
       try { navigator.mediaSession.metadata = new MediaMetadata({ title: displayTitle(p) || "Papers", artist: shortAuthors(p), album: whoLine(e) }); } catch (x) { /* old browser */ }
     }
     renderMini();
@@ -1000,7 +1005,7 @@
     document.body.classList.toggle("has-mini", on);
     $("mini").hidden = !on;
     if (!on) return;
-    titleInto($("mini-title"), S.papers.get(S.epPaper.get(e.id)) || {});
+    titleInto($("mini-title"), paperOf(S.epPaper.get(e.id)) || {});
     $("mini-sub").textContent = `${Math.max(1, Math.round((d - t) / 60))} min left · ${whoLine(e)}`;
     $("mini-prog").style.width = d ? `${100 * Math.min(1, t / d)}%` : "0";
     const playing = isPlaying(e.id), mp = $("mini-play");
@@ -1080,6 +1085,469 @@
     $("strip").classList.toggle("on", S.view === "paper" && !!(e && e.has_audio) && w.scrollTop > pz.offsetTop + pz.offsetHeight - 72);
   }
 
+  // ------------------------------------------------------------------ up next
+  // Each person's queue of episodes, kept on the hub so it follows them from the laptop to the
+  // phone. A change shows at once and goes to the hub one after another; once the last is
+  // answered, the hub's queue is what stays (as with the Listened tick). When an episode ends,
+  // the first in the queue that has audio plays and leaves the queue; an episode that starts
+  // playing any other way leaves it too. A window showing the one that ended follows to the next.
+  const Q = { ids: [], rev: -1, papers: new Map(), n: 0, chain: Promise.resolve(), last: null, failed: null,
+    again: false, lastFocus: null, dragging: false, timer: null };
+  const PI = {
+    queue: `<svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M3.5 6h11M3.5 11h11M3.5 16h6.5"/><path d="M14.5 13.6v5.2l4.2-2.6z" fill="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>`,
+    up: `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 16V4.5M5 9.5l5-5 5 5"/></svg>`,
+    down: `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 4v11.5M5 10.5l5 5 5-5"/></svg>`,
+    grip: `<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="5.5" cy="3.5" r="1.3"/><circle cx="10.5" cy="3.5" r="1.3"/><circle cx="5.5" cy="8" r="1.3"/><circle cx="10.5" cy="8" r="1.3"/><circle cx="5.5" cy="12.5" r="1.3"/><circle cx="10.5" cy="12.5" r="1.3"/></svg>`,
+    prev: `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 5-5 5 5"/></svg>`,
+    next: `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 7.5 5 5 5-5"/></svg>`,
+  };
+  const queued = (eid) => Q.ids.includes(eid);
+  // An answer older than one already seen (a read that left before a change and came back
+  // after it) is dropped: the hub's rev only goes up.
+  function applyQueue(j) {
+    if (!j || !Array.isArray(j.ids) || (typeof j.rev === "number" && j.rev < Q.rev)) return;
+    for (const p of j.papers || []) { Q.papers.set(p.id, p); indexEps(p); }
+    Q.ids = j.ids.slice();
+    if (typeof j.rev === "number") Q.rev = j.rev;
+    renderQueue();
+  }
+  async function loadQueue() {
+    if (Q.n) { Q.again = true; return; }       // after the changes on their way
+    let j;
+    try { j = await api("GET", "/api/queue"); } catch (e) { return; }
+    if (Q.n) { Q.again = true; return; }
+    applyQueue(j);
+  }
+  function queueOp(body, ids) {
+    Q.ids = ids;
+    renderQueue();
+    Q.n++;
+    Q.chain = Q.chain.then(() => api("PUT", "/api/queue", body))
+      .then((j) => { Q.last = j; }, (e) => { Q.failed = e; })
+      .then(() => {
+        if (--Q.n) return;
+        const f = Q.failed, j = Q.last;
+        Q.failed = null; Q.last = null;
+        if (f) { if (f.status !== 404) toast(f.message); Q.again = false; loadQueue(); return; }
+        applyQueue(j);
+        if (Q.again) { Q.again = false; loadQueue(); }
+      });
+    return Q.chain;
+  }
+  function qAdd(ids) {
+    const add = ids.filter((x) => !queued(x));
+    return add.length ? queueOp({ op: "add", ids: add }, Q.ids.concat(add)) : Promise.resolve();
+  }
+  function qNext(ids) {
+    return ids.length ? queueOp({ op: "next", ids }, ids.concat(Q.ids.filter((x) => !ids.includes(x)))) : Promise.resolve();
+  }
+  function qRemove(ids) {
+    const gone = ids.filter(queued);
+    return gone.length ? queueOp({ op: "remove", ids: gone }, Q.ids.filter((x) => !gone.includes(x))) : Promise.resolve();
+  }
+  function qMove(id, to) {
+    const rest = Q.ids.filter((x) => x !== id);
+    to = Math.max(0, Math.min(rest.length, to));
+    rest.splice(to, 0, id);
+    if (rest.join() === Q.ids.join()) { drawQueue(); return; }
+    queueOp({ op: "move", id, to }, rest);
+  }
+  function qClear() { if (Q.ids.length) queueOp({ op: "clear" }, []); }
+
+  // "Play next" and "Add to Up next" for a version with audio, but not the one playing now.
+  const canQueue = (e) => !!(e && e.has_audio && !isPlaying(e.id));
+  function queueItems(e) {
+    if (!canQueue(e)) return [];
+    return [mItem("Play next", () => { qNext([e.id]); toast("Plays next", null, 2500); }),
+      queued(e.id) ? mItem("Remove from Up next", () => qRemove([e.id]))
+        : mItem("Add to Up next", () => { qAdd([e.id]); toast("Added to Up next", null, 2500); })];
+  }
+  function playEp(eid) {
+    if (!loadAudio(eid)) return false;
+    A().play().catch((x) => { if (x.name !== "AbortError") toast(`Cannot play: ${x.message}`); });
+    return true;
+  }
+  function advance() {
+    const next = Q.ids.find((x) => { const e = epById(x); return x !== S.audioEp && e && e.has_audio; });
+    if (!next) return;
+    const follow = S.view === "paper" && !!S.open && S.open === S.audioPaper;
+    qRemove([next]);
+    if (!playEp(next)) return;
+    const pid = S.epPaper.get(next);
+    if (follow && pid && pid !== S.open) openPaper(pid);
+  }
+
+  // Ids from elsewhere (the map): episode ids, or paper ids for the version that would play.
+  async function episodeIds(ids) {
+    const want = [].concat(ids || []).filter((x) => typeof x === "string" && /^[ep]_[a-z0-9]{4,32}$/.test(x));
+    const missing = [...new Set(want.filter((x) => x[0] === "p" && !paperOf(x)))];
+    for (let i = 0; i < missing.length; i += 50) {
+      try {
+        const j = await api("GET", `/api/library?ids=${missing.slice(i, i + 50).join(",")}`);
+        for (const p of j.papers || []) { Q.papers.set(p.id, p); indexEps(p); }
+      } catch (e) { /* those papers are left out */ }
+    }
+    const out = [];
+    for (const x of want) {
+      const c = x[0] === "p" ? chosen(paperOf(x)) : epById(x) || { id: x, has_audio: true };
+      if (c && c.has_audio && !out.includes(c.id)) out.push(c.id);
+    }
+    return out;
+  }
+  async function playAll(ids) {
+    const eps = (await episodeIds(ids)).filter((x) => epById(x));
+    if (!eps.length) return 0;
+    const rest = eps.slice(1);
+    if (rest.length) qNext(rest);
+    playEp(eps[0]);
+    return eps.length;
+  }
+  // For the map ("Play this graph in order") and anything else on the page. Each answers how
+  // many episodes it took.
+  window.papercastQueue = Object.freeze({
+    add: async (ids) => { const e = (await episodeIds(ids)).filter((x) => !isPlaying(x)); await qAdd(e); return e.length; },
+    playNext: async (id) => { const e = (await episodeIds(id)).filter((x) => !isPlaying(x)); await qNext(e); return e.length; },
+    playAll,
+  });
+
+  // The panel: what plays, then the queue; a row plays at a tap, and moves by its arrows or by
+  // dragging its handle (with a mouse).
+  function openQueue() {
+    if (!$("q-overlay").hidden) return;
+    closeMenu();
+    Q.lastFocus = document.activeElement;
+    $("q-overlay").hidden = false;
+    drawQueue();
+    $("q-close").focus();
+    loadQueue();
+  }
+  function closeQueue() {
+    if ($("q-overlay").hidden) return;
+    $("q-overlay").hidden = true;
+    if (Q.lastFocus && Q.lastFocus.isConnected && Q.lastFocus.focus) Q.lastFocus.focus();
+  }
+  function renderQueue() {
+    const first = Q.ids[0], fp = first ? paperOf(S.epPaper.get(first)) || {} : null, more = Q.ids.length - 1;
+    const pn = $("p-next");
+    pn.hidden = !first;
+    if (first) {
+      titleInto($("p-next-t"), fp);
+      $("p-next-n").textContent = more > 0 ? `${more} more` : "";
+      pn.setAttribute("aria-label", `Up next: ${displayTitle(fp) || "a paper"}${more > 0 ? `, and ${more} more` : ""}`);
+    }
+    $("mini-q").hidden = !first;
+    if (!$("q-overlay").hidden) drawQueue();
+  }
+  function drawQueue(focus) {
+    if (Q.dragging) return;
+    const now = S.audioEp && A().getAttribute("src") ? epById(S.audioEp) : null;
+    const np = now ? paperOf(S.epPaper.get(now.id)) || {} : null;
+    $("q-now").hidden = !now;
+    if (now) $("q-now").textContent = `${isPlaying(now.id) ? "Playing" : "Paused"}: ${displayTitle(np) || "a paper"}`;
+    $("q-empty").hidden = Q.ids.length > 0;
+    $("q-clear").disabled = !Q.ids.length;
+    const list = $("q-list");
+    // Drawn again only when a row changed; the focus stays on its row (the button it was on,
+    // else the row itself).
+    const sig = JSON.stringify(Q.ids.map((eid) => { const e = epById(eid), p = paperOf(S.epPaper.get(eid)) || {}; return [eid, displayTitle(p), e && whoLine(e), e && stateLine(e).text]; }));
+    if (!focus && list.dataset.sig === sig) return;
+    const had = document.activeElement && document.activeElement.closest && document.activeElement.closest("#q-list .q-row");
+    if (!focus && had) focus = { eid: had.dataset.ep, act: document.activeElement.dataset.act };
+    list.dataset.sig = sig;
+    list.replaceChildren(...Q.ids.map((eid, i) => queueRow(eid, i)));
+    if (focus) {
+      const li = list.querySelector(`.q-row[data-ep="${focus.eid}"]`);
+      const b = li && (li.querySelector(`[data-act="${focus.act}"]:not(:disabled)`) || li.querySelector(".q-main"));
+      if (b) b.focus();
+    }
+  }
+  function queueRow(eid, i) {
+    const e = epById(eid), p = paperOf(S.epPaper.get(eid)) || {};
+    const name = displayTitle(p) || "this paper";
+    const t = el("span", { class: "q-t" });
+    titleInto(t, p);
+    const st = e ? stateLine(e) : { text: "" };
+    const move = (to, act) => () => { qMove(eid, to); drawQueue({ eid, act }); };
+    const btn = (act, label, html, fn, off) => el("button", { type: "button", class: `icon-btn q-${act}`, "data-act": act, "aria-label": label, title: label, html, disabled: off, onclick: fn });
+    return el("li", { class: "q-row", "data-ep": eid },
+      el("span", { class: "q-grip", "aria-hidden": "true", title: "Drag to move", html: PI.grip, onpointerdown: (ev) => dragRow(ev, eid) }),
+      el("button", { type: "button", class: "q-main", "data-act": "main", "aria-label": `Play ${name} now`,
+        onclick: () => { if (e && e.has_audio) { qRemove([eid]); playEp(eid); } } },
+      t, el("span", { class: "q-s t", text: [e ? whoLine(e) : "", st.text].filter(Boolean).join(" · ") })),
+      btn("up", `Move ${name} up`, PI.up, move(i - 1, "up"), i === 0),
+      btn("down", `Move ${name} down`, PI.down, move(i + 1, "down"), i === Q.ids.length - 1),
+      btn("del", `Remove ${name} from Up next`, I.close, () => qRemove([eid])));
+  }
+  function dragRow(ev, eid) {
+    if (ev.button) return;
+    const grip = ev.currentTarget, li = grip.closest(".q-row"), list = $("q-list");
+    ev.preventDefault();
+    try { grip.setPointerCapture(ev.pointerId); } catch (x) { /* already gone */ }
+    Q.dragging = true;
+    li.classList.add("drag");
+    const from = [...list.children].indexOf(li);
+    let y0 = ev.clientY;
+    // Past half of a neighbour, the row takes its place; it follows the pointer in between.
+    const move = (e) => {
+      if (e.pointerId !== ev.pointerId) return;
+      const prev = li.previousElementSibling, next = li.nextElementSibling, dy = e.clientY - y0;
+      if (next && dy > next.offsetHeight / 2) { list.insertBefore(next, li); y0 += next.offsetHeight; }
+      else if (prev && dy < -prev.offsetHeight / 2) { list.insertBefore(li, prev); y0 -= prev.offsetHeight; }
+      li.style.transform = `translateY(${e.clientY - y0}px)`;
+    };
+    const done = (e) => {
+      if (e.pointerId !== ev.pointerId) return;
+      for (const [k, f] of [["pointermove", move], ["pointerup", done], ["pointercancel", done]]) grip.removeEventListener(k, f);
+      li.classList.remove("drag");
+      li.style.transform = "";
+      Q.dragging = false;
+      const to = [...list.children].indexOf(li);
+      if (e.type === "pointerup" && to !== from) qMove(eid, to); else drawQueue();
+    };
+    grip.addEventListener("pointermove", move);
+    grip.addEventListener("pointerup", done);
+    grip.addEventListener("pointercancel", done);
+  }
+  // The hub tells this person's other tabs and devices of a change; a version deleted, or a
+  // paper changed, that the queue holds reads the queue again (the hub leaves the deleted out).
+  function queueEvents(es) {
+    const soon = () => { clearTimeout(Q.timer); Q.timer = setTimeout(loadQueue, 200); };
+    es.addEventListener("queue", (e) => {
+      if (e.lastEventId) S.lastId = e.lastEventId;
+      let d = {};
+      try { d = JSON.parse(e.data) || {}; } catch (x) { /* junk */ }
+      if (!(typeof d.rev === "number" && d.rev <= Q.rev)) soon();
+    });
+    es.addEventListener("resync", soon);
+    for (const kind of ["episode", "paper"]) {
+      es.addEventListener(kind, (e) => {
+        let d = {};
+        try { d = JSON.parse(e.data) || {}; } catch (x) { return; }
+        const eid = d.episode_id || (kind === "episode" ? d.id : null), pid = d.paper_id || (kind === "paper" ? d.id : null);
+        if ((eid && queued(eid)) || (pid && Q.ids.some((x) => S.epPaper.get(x) === pid))) soon();
+      });
+    }
+  }
+  function wireQueue() {
+    const a = A();
+    $("mini-q").innerHTML = PI.queue;
+    $("q-close").innerHTML = I.close;
+    $("p-next").addEventListener("click", openQueue);
+    $("mini-q").addEventListener("click", (e) => { e.stopPropagation(); openQueue(); });
+    $("q-close").addEventListener("click", closeQueue);
+    $("q-clear").addEventListener("click", qClear);
+    $("q-overlay").addEventListener("click", (e) => { if (e.target === $("q-overlay")) closeQueue(); });
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("q-overlay").hidden && !S.menu) closeQueue(); });
+    a.addEventListener("ended", advance);
+    a.addEventListener("playing", () => { if (S.audioEp && queued(S.audioEp)) qRemove([S.audioEp]); });
+    for (const ev of ["play", "pause", "emptied"]) a.addEventListener(ev, () => { if (!$("q-overlay").hidden) drawQueue(); });
+  }
+
+  // ------------------------------------------------------------------ transcript
+  // The window's version's script as plain headings and paragraphs (text, never markup), each
+  // sentence tied to its time: the voice worker's timings, else the hub's estimate (stretched to
+  // the audio's real length). The sentence being spoken is marked. While the person can see it,
+  // it is kept in view as it moves on; once they scroll away it is left alone, and "Back to now"
+  // brings it back. A tap on a sentence plays from there.
+  const T = { key: null, eid: null, data: null, parts: [], texts: [], bySeg: new Map(), rep: [], cur: -1,
+    follow: false, autoUntil: 0, req: 0, q: "", hits: [], hit: -1, marked: [], findTimer: null };
+  function renderTranscript(c) {
+    $("tr-body").classList.toggle("live", !!(c && c.has_audio));
+    const key = c ? `${c.id}:${!!c.has_audio}` : null;      // voiced since: its timings may be new
+    if (key === T.key) { trTick(); return; }
+    T.key = key; T.eid = c ? c.id : null;
+    T.data = null; T.parts = []; T.texts = []; T.bySeg = new Map(); T.rep = []; T.cur = -1; T.follow = false;
+    T.hits = []; T.hit = -1; T.marked = [];
+    $("tr-body").replaceChildren();
+    $("tr").hidden = true;
+    $("tr-now").hidden = true;
+    $("tr-count").textContent = "";
+    if (!c) return;
+    const n = ++T.req, eid = c.id;
+    api("GET", `/api/episodes/${eid}/transcript`).then((j) => { if (n === T.req) drawTranscript(j); }, () => { /* none: the section stays hidden */ });
+  }
+  function drawTranscript(j) {
+    const blocks = (j && j.blocks) || [];
+    if (!blocks.length) return;
+    const segs = Array.isArray(j.segments) ? j.segments : [];
+    T.data = { segments: segs, estimated: !!j.estimated, duration_s: j.duration_s };
+    const kids = [];
+    for (const b of blocks) {
+      const node = el(b.kind === "heading" ? "h4" : "p", { class: b.kind === "heading" ? "tr-hd" : "tr-p" });
+      (b.parts || []).forEach((pt, i) => {
+        if (i) node.append(" ");
+        const timed = Number.isInteger(pt.seg) && pt.seg >= 0 && pt.seg < segs.length;
+        const s = el("span", { class: timed ? "tr-s" : "tr-x", text: String(pt.text) });
+        if (timed) {
+          s.dataset.seg = String(pt.seg);
+          if (!T.bySeg.has(pt.seg)) T.bySeg.set(pt.seg, []);
+          T.bySeg.get(pt.seg).push(s);
+        }
+        T.parts.push(s); T.texts.push(String(pt.text));
+        node.append(s);
+      });
+      kids.push(node);
+    }
+    $("tr-body").replaceChildren(...kids);
+    // A segment with no words of its own shows as the one before it.
+    let last = -1;
+    T.rep = segs.map((_, i) => (T.bySeg.has(i) ? (last = i) : last));
+    $("tr-note").hidden = !T.data.estimated;
+    $("tr").hidden = false;
+    if ($("tr-q").value.trim()) trFind(false, true);
+    trTick();
+    trNowBtn();
+  }
+  // Estimated timings are shares of the length the hub knew; the audio's own length wins.
+  function trScale(e) {
+    const d = T.data;
+    if (!d || !d.estimated || !(d.duration_s > 0)) return 1;
+    const real = durOf(e);
+    return real > 0 ? real / d.duration_s : 1;
+  }
+  function segAt(t) {
+    const s = T.data.segments;
+    let lo = 0, hi = s.length - 1, at = -1;
+    while (lo <= hi) {
+      const m = (lo + hi) >> 1;
+      if (s[m].start <= t + 0.01) { at = m; lo = m + 1; } else hi = m - 1;
+    }
+    return at;
+  }
+  function trTick() {
+    if (!T.data) return;
+    const e = openEp();
+    if (!e || e.id !== T.eid || !e.has_audio) { setCur(-1); return; }
+    setCur(segAt(posOf(e) / trScale(e)));
+  }
+  const curEls = () => (T.cur >= 0 && T.bySeg.get(T.rep[T.cur])) || [];
+  function setCur(i) {
+    if (i === T.cur) return;
+    for (const s of curEls()) s.classList.remove("now");
+    T.cur = i;
+    for (const s of curEls()) s.classList.add("now");
+    if (T.follow) keepInView(false);
+    trNowBtn();
+  }
+  // The part of the window a sentence is seen in: under the slim player bar when it shows.
+  function trView() {
+    const r = $("win").getBoundingClientRect(), bar = $("strip").classList.contains("on") ? 56 : 0;
+    return { top: r.top + bar, bottom: r.bottom, h: Math.max(1, r.height - bar) };
+  }
+  function curVisible() {
+    const els = curEls();
+    if (!els.length || S.view !== "paper" || $("tr").hidden) return false;
+    const v = trView(), a = els[0].getBoundingClientRect(), b = els[els.length - 1].getBoundingClientRect();
+    return b.bottom > v.top + 8 && a.top < v.bottom - 8;
+  }
+  const motion = () => (window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth");
+  function scrollWinTo(node, at) {
+    const w = $("win"), v = trView(), r = node.getBoundingClientRect();
+    T.autoUntil = Date.now() + 1000;        // this scroll is the page's own, not the person's
+    w.scrollTo({ top: Math.max(0, w.scrollTop + r.top - (v.top + v.h * at)), behavior: motion() });
+  }
+  function keepInView(force) {
+    const els = curEls();
+    if (!els.length || S.view !== "paper" || $("tr").hidden) return;
+    const v = trView(), r = els[0].getBoundingClientRect();
+    if (!force && r.top >= v.top + v.h * 0.12 && r.bottom <= v.bottom - v.h * 0.2) return;
+    scrollWinTo(els[0], 0.3);
+  }
+  function trNowBtn() {
+    $("tr-now").hidden = !(T.data && T.cur >= 0 && !T.follow && !curVisible());
+  }
+  function playFrom(e, t) {
+    const a = A();
+    loadAudio(e.id, (au) => {
+      S.dirty = true;
+      au.currentTime = Math.max(0, Math.min((au.duration || durOf(e) || t + 1) - 0.1, t));
+      savePosition(true); renderPlayer(); updateRow(S.epPaper.get(e.id)); trTick();
+    });
+    if (a.paused || a.ended) a.play().catch((x) => { if (x.name !== "AbortError") toast(`Cannot play: ${x.message}`); });
+  }
+
+  // Find: every match marked, one of them the current; Enter and the arrows go through them.
+  function trFind(go, keep) {
+    const q = $("tr-q").value.trim();
+    const was = T.hit;
+    T.q = q;
+    for (const i of T.marked) T.parts[i].textContent = T.texts[i];
+    T.marked = []; T.hits = []; T.hit = -1;
+    if (q.length >= 2) {
+      const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "giu");
+      T.parts.forEach((s, i) => {
+        const t = T.texts[i];
+        let m, from = 0, kids = null;
+        rx.lastIndex = 0;
+        while ((m = rx.exec(t))) {
+          kids = kids || [];
+          if (m.index > from) kids.push(t.slice(from, m.index));
+          const mk = el("mark", { class: "tr-m", text: m[0] });
+          kids.push(mk); T.hits.push(mk);
+          from = m.index + m[0].length;
+        }
+        if (kids) { if (from < t.length) kids.push(t.slice(from)); s.replaceChildren(...kids); T.marked.push(i); }
+      });
+    }
+    const n = T.hits.length;
+    $("tr-count").textContent = q.length >= 2 && !n ? "No matches" : "";
+    $("tr-prev").disabled = $("tr-next").disabled = !n;
+    if (!n) return;
+    if (keep) { goHit(Math.max(0, Math.min(n - 1, was)), true); return; }
+    // the first match at or under the top of what is on screen
+    const top = trView().top, i = T.hits.findIndex((mk) => mk.getBoundingClientRect().bottom > top);
+    goHit(i < 0 ? 0 : i, !go);
+  }
+  function goHit(i, quiet) {
+    const n = T.hits.length;
+    if (!n) return;
+    i = ((i % n) + n) % n;
+    if (T.hits[T.hit]) T.hits[T.hit].classList.remove("on");
+    T.hit = i;
+    T.hits[i].classList.add("on");
+    $("tr-count").textContent = `${i + 1} of ${n}`;
+    if (quiet) return;
+    const v = trView(), r = T.hits[i].getBoundingClientRect();
+    if (r.top < v.top + 8 || r.bottom > v.bottom - 64) { T.follow = false; scrollWinTo(T.hits[i], 0.35); }
+    trNowBtn();
+  }
+  function wireTranscript() {
+    const w = $("win"), a = A(), q = $("tr-q");
+    $("tr-prev").innerHTML = PI.prev; $("tr-next").innerHTML = PI.next;
+    // What the person does to scroll ends the page's own scroll at once.
+    const theirs = () => { T.autoUntil = 0; };
+    for (const ev of ["wheel", "touchstart", "pointerdown"]) w.addEventListener(ev, theirs, { passive: true });
+    document.addEventListener("keydown", (e) => { if (/^(Arrow|Page|Home|End| )/.test(e.key)) theirs(); });
+    // Scrolled by the person: the page follows the sentence again once they can see it.
+    w.addEventListener("scroll", () => {
+      if (!T.data) return;
+      if (Date.now() >= T.autoUntil) T.follow = curVisible();
+      trNowBtn();
+    }, { passive: true });
+    for (const ev of ["timeupdate", "seeked", "loadedmetadata", "durationchange", "emptied"]) a.addEventListener(ev, trTick);
+    $("tr-body").addEventListener("click", (ev) => {
+      const s = ev.target.closest(".tr-s");
+      if (!s || !T.data) return;
+      const sel = window.getSelection && window.getSelection();
+      if (sel && !sel.isCollapsed && String(sel).trim()) return;      // selecting words, not a tap
+      const e = openEp(), seg = T.data.segments[Number(s.dataset.seg)];
+      if (!e || e.id !== T.eid || !e.has_audio || !seg) return;
+      T.follow = true;
+      playFrom(e, seg.start * trScale(e));
+    });
+    $("tr-now").addEventListener("click", () => { T.follow = true; $("tr-now").hidden = true; keepInView(true); });
+    q.addEventListener("input", () => { S.typedAt = Date.now(); clearTimeout(T.findTimer); T.findTimer = setTimeout(() => trFind(true), 150); });
+    q.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        clearTimeout(T.findTimer);
+        if (T.q !== q.value.trim()) trFind(true); else goHit(T.hit + (e.shiftKey ? -1 : 1));
+      } else if (e.key === "Escape" && q.value) { e.preventDefault(); e.stopPropagation(); q.value = ""; trFind(false); }
+    });
+    $("tr-prev").addEventListener("click", () => goHit(T.hit - 1));
+    $("tr-next").addEventListener("click", () => goHit(T.hit + 1));
+  }
+
   // ------------------------------------------------------------------ explainer overlay
   function openExplainer() {
     const e = openEp();
@@ -1122,7 +1590,7 @@
   const delLabel = (e) => (e.mine ? "Delete my version" : `Delete ${makerName(e)}’s version`);
   function rowMenu(p) {
     const c = chosen(p);
-    return c && c.can_delete ? [mItem(delLabel(c), () => deleteVersion(c.id), "danger")] : [];
+    return queueItems(c).concat(c && c.can_delete ? [mItem(delLabel(c), () => deleteVersion(c.id), "danger")] : []);
   }
   function paperLink(p) {
     if (p.url && /^https?:\/\//i.test(p.url)) return p.url;
@@ -1134,7 +1602,7 @@
     const p = S.papers.get(S.open);
     if (!p) return [];
     const c = chosen(p);
-    const items = [mItem(S.details ? "Hide details" : "Details", () => { S.details = !S.details; renderWin(); })];
+    const items = queueItems(c).concat([mItem(S.details ? "Hide details" : "Details", () => { S.details = !S.details; renderWin(); })]);
     const link = paperLink(p);
     if (link) items.push(el("a", { role: "menuitem", href: link, target: "_blank", rel: "noopener noreferrer", text: "Open paper link", onclick: closeMenu }));
     if (c && c.can_delete) items.push(mItem(delLabel(c), () => deleteVersion(c.id), "danger"));
@@ -1618,6 +2086,7 @@
     on("episode", (d) => touched(d.paper_id || (d.paper && d.paper.id) || S.epPaper.get(d.episode_id || d.id)));
     on("graph", (d) => toMap("graph", d));
     on("log", (d) => toMap("log", d));
+    queueEvents(es);
   }
 
   // ------------------------------------------------------------------ start
@@ -1637,6 +2106,8 @@
     $("search").addEventListener("input", (e) => { S.q = e.target.value.trim(); scheduleSearch(); });
     $("w-listened").addEventListener("click", () => { const p = S.papers.get(S.open); if (p) setListened(p.id, !p.listened); });
     wirePlayer();
+    wireQueue();
+    wireTranscript();
     $("back").addEventListener("click", goList);
     $("s-back").addEventListener("click", goList);
     $("set-back").addEventListener("click", goList);
@@ -1660,6 +2131,7 @@
     $("map-btn").addEventListener("click", openMap);
     window.addEventListener("popstate", () => closeMap(true));
     connect();          // first: nothing that changes while the list loads is missed
+    loadQueue();
     await loadList();
     if (location.hash) openFromHash();
     else {

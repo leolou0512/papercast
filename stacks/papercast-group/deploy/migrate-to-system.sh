@@ -92,6 +92,26 @@ relocate_voice() {
     ' _ "$OLD/voice" "$S/voice" "$S/python/$(basename "$minor")"
 }
 
+# The copied venvs must satisfy the voice's requirements as they are, so its install re-checks
+# them without downloading a package again (online only for the index's metadata: the Kokoro
+# venv's spaCy model is a URL requirement, which uv cannot check offline).
+check_voice_venvs() {
+    local R=$S/src/stacks/papercast/voice/requirements v e out x
+    for e in orchestrator kokoro breeze; do
+        case "$e" in
+            orchestrator) v=$S/voice/venv; x=() ; r=$R/voice.txt ;;
+            kokoro) v=$S/voice/engines/kokoro/venv; r=$R/kokoro.txt
+                    x=(--index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+                       --index-strategy unsafe-best-match) ;;
+            breeze) v=$S/voice/engines/breeze/venv; x=(); r=$R/breeze.txt ;;
+        esac
+        out=$(pc env UV_CACHE_DIR="$S/cache/uv" UV_PYTHON_INSTALL_DIR="$S/python" VIRTUAL_ENV="$v" \
+              nice -n 10 uv pip sync --dry-run "${x[@]}" "$r" 2>&1) || { echo "$out"; die "uv pip sync --dry-run failed for $e"; }
+        echo "  $e: $(echo "$out" | tail -1)"
+        echo "$out" | grep -q 'Would make no changes' || { echo "$out"; die "the $e venv would change: not reinstalling it here"; }
+    done
+}
+
 prepare() {
     [ -d "$OLD" ] || die "no $OLD"
     say "disk"; df -h "$(dirname "$S")" /
@@ -108,8 +128,10 @@ prepare() {
     copy_etc
     copy_data --delete
     relocate_voice
-    say "install.sh --system --no-start --voice (offline: the voice's packages must all be there)"
-    sudo env UV_OFFLINE=1 bash "$HERE/install.sh" --system --no-start --voice
+    say "the voice's venvs against its pinned requirements (uv pip sync --dry-run, as $PCG_USER)"
+    check_voice_venvs
+    say "install.sh --system --no-start --voice"
+    sudo bash "$HERE/install.sh" --system --no-start --voice
     say "units"
     sudo systemd-analyze verify "$PCG_SYS_UNITS"/papercast-*.service "$PCG_SYS_UNITS"/papercast-*.timer 2>&1 |
         grep -v -e '^$' || echo "systemd-analyze verify: nothing to say"

@@ -85,14 +85,16 @@ status)
     pub=$(get_env "$ETC/hub.env" PCG_PUBLIC_URL)
     case "$pub" in https://*) printf '  %-17s GET / -> %s\n' "$pub" "$(http_code "$pub/")" ;; esac
     printf '  %-17s %s connection(s) to Cloudflare registered\n' tunnel "$(tunnel_connections)"
+    claim=$(journalctl -u "$U_HUB" -n 300 -o short-iso --no-pager 2>/dev/null | grep 'POST /api/voice/claim' | tail -1 |
+            sed -E 's/^([^ ]+) .*" ([0-9]{3}) .*/\1 -> \2/')
     if [ -f "$H/worker/current.json" ]; then
         printf '  %-17s holding %s\n' voice "$(tr -d '\n' < "$H/worker/current.json" | cut -c1-120)"
     else
-        printf '  %-17s idle (%s)\n' voice "$(journalctl -u "$U_VOICE" -n 1 -o cat --no-pager 2>/dev/null | cut -c1-100)"
+        printf '  %-17s idle; the worker last asked for work %s\n' voice "${claim:-(not in the last 300 lines of the hub log)}"
     fi
     systemctl list-timers --no-pager "$U_BACKUP.timer" "$U_LAYOUT.timer" 2>/dev/null | sed -n '2,3p' | sed 's/^/  /'
     last=$(ls -1d "$H"/backups/2* 2>/dev/null | tail -1 || true)
-    printf '  %-17s %s\n' "last backup" "${last:+$(basename "$last")}${last:-none}"
+    printf '  %-17s %s\n' "last backup" "$([ -n "$last" ] && basename "$last" || echo none)"
     printf '  %-17s %s\n' disk "$(df -h --output=used,avail "$H" | tail -1 | awk '{print $1 " used, " $2 " free"}') ($(du -sh "$H/data" 2>/dev/null | cut -f1) data)"
     if command -v nvidia-smi >/dev/null; then
         printf '  %-17s %s\n' GPU "$(nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader 2>/dev/null | head -1)"
@@ -163,7 +165,9 @@ allow)
     ;;
 backup-now)
     systemctl start "$U_BACKUP.service"
-    journalctl -u "$U_BACKUP" -n 3 -o cat --no-pager | tail -2
+    inv=$(systemctl show -p InvocationID --value "$U_BACKUP.service")
+    journalctl --no-pager -o cat "_SYSTEMD_INVOCATION_ID=$inv" | grep -v -e '^Starting ' -e '^Finished ' -e 'Deactivated' -e 'Consumed' || true
+    echo "the newest backups:"
     ls -1d "$H"/backups/2* 2>/dev/null | tail -3 | sed "s|^$H/backups/|  |"
     ;;
 backups)

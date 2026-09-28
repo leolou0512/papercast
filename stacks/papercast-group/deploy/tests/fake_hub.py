@@ -22,15 +22,18 @@ class FakeHub:
         self.statuses: dict[str, list[dict]] = {}
         self.audio: dict[str, dict] = {}
         self.failures: dict[str, dict] = {}
+        self.timings: dict[str, list] = {}       # every timings body sent, per episode
+        self.uploads: list[tuple[str, str | None]] = []     # (episode, X-Voice) per audio upload
         self.claims = 0
         # knobs: an HTTP status to answer instead, per (method, route name), for the next n calls
         self.inject: dict[tuple[str, str], list[int]] = {}
         self.srv = None
 
-    def add(self, eid: str, title: str, script: str, first_author: str = "Ada Lovelace"):
+    def add(self, eid: str, title: str, script: str, first_author: str = "Ada Lovelace", voice=None):
+        """Queue an episode; again with `voice` (hub/voices.py's claim voice) for a voice change."""
         with self.lock:
             self.episodes[eid] = {"episode_id": eid, "title": title, "first_author": first_author,
-                                  "year": 2022, "script": script, "state": "waiting-for-gpu"}
+                                  "year": 2022, "script": script, "state": "waiting-for-gpu", "voice": voice}
             self.queue.append(eid)
 
     def lose(self, eid: str):
@@ -94,7 +97,8 @@ class FakeHub:
                             return self.answer(200, {
                                 "episode_id": e["episode_id"], "title": e["title"],
                                 "first_author": e["first_author"], "year": e["year"],
-                                "script_url": f"/api/voice/{e['episode_id']}/script"})
+                                "script_url": f"/api/voice/{e['episode_id']}/script",
+                                "voice": e.get("voice")})
                     return self.answer(204)
                 e = hub.episodes.get(eid)
                 if e is None or e["state"] == "deleted":
@@ -105,8 +109,13 @@ class FakeHub:
                     with hub.lock:
                         hub.statuses.setdefault(eid, []).append(json.loads(body))
                     return self.answer(200, {"ok": True})
+                if method == "PUT" and route == "timings":
+                    with hub.lock:
+                        hub.timings.setdefault(eid, []).append(json.loads(body))
+                    return self.answer(200, {"episode_id": eid, "stored": "next"})
                 if method == "PUT" and route == "audio":
                     with hub.lock:
+                        hub.uploads.append((eid, self.headers.get("X-Voice")))
                         hub.audio[eid] = {"bytes": body, "duration_s": float(self.headers.get("X-Duration-S")),
                                           "sha256": self.headers.get("X-Sha256"),
                                           "ctype": self.headers.get("Content-Type"),

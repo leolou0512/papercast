@@ -24,6 +24,7 @@ runner: script.md passes its check
 voice:  preparing -> waiting-for-gpu -> speaking -> encoding -> done | failed
         writes status.json (every change, and every 10 s), reads use-cpu / cancel
   -> out/episode.mp3 + status.json output {sha256, duration_s, loudness_lufs, ...}
+     + out/timings.json (when each sentence is spoken; output.timings names it)
 runner: verifies, exposes it as audio/episode.mp3; the NAS publishes it to tank/music/podcast/papers
 ```
 
@@ -167,6 +168,28 @@ stibnite has none: `engines/breeze/bin/cc` is zig's clang from the venv's `zigla
 **No systemd unit** (a deliberate deviation from the brief; RISKS.md says why). The voice is a
 command, not a service: the runner's user unit supervises it, re-adopts it after its own restart,
 and restarts an interrupted voice step once after a reboot (INTERFACE §3).
+
+## Voices and timings (the group's copy)
+
+**job.json `voice`** (optional): which narrator, for one engine, e.g. `{"engine": "breeze",
+"voice": "preset-warm-male-s42", "instruction": "Adult male, mid-30s, ...", "seed": 42}` or
+`{"engine": "kokoro", "voice": "af_heart"}` (with `"engine": "cpu"` in job.json). It may set only
+`voice`, `instruction`, `seed` and `speed` of that engine's spec; `voice` is the chunk cache key
+(`chunks/<engine>-<voice>-...`) and comes back as `output.voice`. A GPU voice that falls back
+to the CPU keeps the CPU engine's own voice. Without it, everything is as before.
+
+**out/timings.json** (`timings.py`): `{"version": 1, "duration_s", "segments": [{"start", "end",
+"text"}]}`, one segment per sentence (a heading is one) in script order, seconds of the MP3. The
+times are where `audio.join()` put each chunk (the lead-in, each chunk trimmed, the pause after
+it); loudnorm, the resampling and the MP3 encoder keep that timeline (under 10 ms on test bursts).
+Inside a chunk the sentences share its voiced part by characters, and each boundary between two
+moves into the pause the voice made there, if there is one near (`audio.pauses`). Measured on
+synthetic chunks through the real ffmpeg steps (`tests/test_timings.py`): every sentence edge
+within 65 ms of its sound in the decoded MP3, where characters alone were off by 0.7 s on uneven
+speech. A problem making them never fails the episode.
+
+`papercast-voice timings <job dir> [--out FILE]` makes them afterwards for a job whose chunk WAVs
+are still there (a finished job deletes them), checked against the MP3's duration.
 
 ## Measured (stibnite, 2026-09-26)
 
@@ -331,6 +354,7 @@ taken while stt is on it. RISKS.md "bs1" says what that means for the chat model
 | `engines/breeze/` | the Breeze install step and its C compiler wrapper |
 | `papercast_voice/busy.py` | install.sh's check that no voice job is running |
 | `papercast_voice/audio.py`, `tags.py` | join, loudness, MP3, verification; ID3 |
+| `papercast_voice/timings.py` | out/timings.json: each sentence's time in the MP3 |
 | `papercast_voice/measure.py` | the measurements above |
 | `tests/` | unit and job tests with fake engines (the Breeze worker with its model faked), a fake `nvidia-smi`, and a fake remote host (`fake_ssh.py`, `fake_remote_smi.py`; `test_slots.py`); `test_real.py`, `test_real_gpu.py`, `test_real_remote.py` |
 | `samples/` | the earlier three-voice choice for Leo (not the pipeline) |

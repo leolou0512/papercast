@@ -153,6 +153,18 @@ copy of the MP3 (the hub has it). A failure is `POST /api/voice/<id>/failed {"er
   says perov's name instead before the page sees them.
 - `PCG_VOICE_ENGINE=cpu` in `worker.env` voices with Kokoro on the CPU instead (a different
   voice: Leo's pick is Breeze; never automatic).
+- **Voices and timings** (hub/voices.py, SPEC section 9). A claim naming a voice goes into
+  job.json as `voice` (a CPU voice with `"engine": "cpu"`); a claim for an episode voiced before
+  (someone changed its voice) starts its job directory afresh. Before the MP3 the worker sends
+  `out/timings.json` (`PUT /api/voice/<id>/timings`; a refusal never stops the audio), and the MP3
+  says which voice it is in (`X-Voice`). Both need the group's papercast-voice with job.json
+  `voice` (from this commit on): after syncing, `bash stacks/papercast-group/deploy/install.sh
+  --voice` when no episode is being voiced.
+- **The voice samples** for the page's lists: `python3 stacks/papercast-group/tools/make_voice_samples.py`
+  (one clip per preset through papercast-voice, about two minutes each on the A4000 once it has
+  the GPU; into `data/voices/`). **Timings for episodes voiced before**:
+  `python3 stacks/papercast-group/tools/backfill_timings.py` (only where the job dir still has
+  its chunk WAVs; `--dry-run` first).
 
 Tests: `python3 -m unittest discover -s stacks/papercast-group/deploy/tests` (a fake hub, a fake
 papercast-voice with the real one's files and ids; 14 tests, about 20 s) [run on stibnite and perov]; the same command runs `test_cloudflare.py` (5 tests, stibnite only).

@@ -240,6 +240,80 @@ class TestWorker(WorkerCase):
         self.assertEqual(p.wait(timeout=30), 1)
         self.assertEqual(self.hub.claims, 0, "no episode is taken without a voice")
 
+    # ---- voices (hub/voices.py) and timings
+
+    WARM = {"id": "warm-male", "name": "Warm male", "cpu": False,
+            "spec": {"engine": "breeze", "voice": "preset-warm-male-s42", "id": "warm-male",
+                     "instruction": "Adult male, mid-30s, neutral American accent.", "seed": 42}}
+    CPU = {"id": "basic-female", "name": "Basic female (CPU)", "cpu": True,
+           "spec": {"engine": "kokoro", "voice": "af_heart", "id": "basic-female"}}
+
+    def test_the_claims_voice_reaches_papercast_voice(self):
+        self.hub.add("e_aaaaaaaaaaaa", "Warm", SCRIPT, voice=self.WARM)
+        p = self.worker(self.env(self.voice()), "--exit-when-idle")
+        self.assertEqual(p.wait(timeout=60), 0, self.log())
+        v = self.jobs / "e_aaaaaaaaaaaa" / "voice"
+        job = json.loads((v / "job.json").read_text())
+        self.assertEqual((job["voice"], job["engine"]), (self.WARM["spec"], "auto"))
+        self.assertEqual(self.status("e_aaaaaaaaaaaa")["output"]["voice_spec"], self.WARM["spec"])
+        self.assertEqual(self.hub.uploads, [("e_aaaaaaaaaaaa", "preset-warm-male-s42")])
+        # the timings went first, so the hub has them when the MP3 lands
+        (doc,) = self.hub.timings["e_aaaaaaaaaaaa"]
+        self.assertEqual(doc["version"], 1)
+        self.assertEqual(doc["segments"][0]["text"], "A heading")
+        calls = self.hub.calls
+        self.assertLess(calls.index(("PUT", "/api/voice/e_aaaaaaaaaaaa/timings")),
+                        calls.index(("PUT", "/api/voice/e_aaaaaaaaaaaa/audio")))
+
+    def test_a_cpu_voice_runs_on_the_cpu(self):
+        self.hub.add("e_aaaaaaaaaaaa", "Quick", SCRIPT, voice=self.CPU)
+        p = self.worker(self.env(self.voice()), "--exit-when-idle")
+        self.assertEqual(p.wait(timeout=60), 0, self.log())
+        job = json.loads((self.jobs / "e_aaaaaaaaaaaa" / "voice" / "job.json").read_text())
+        self.assertEqual((job["engine"], job["voice"]["voice"]), ("cpu", "af_heart"))
+        self.assertEqual(self.hub.uploads, [("e_aaaaaaaaaaaa", "af_heart")])
+
+    def test_no_voice_is_papercast_voices_default(self):
+        self.hub.add("e_aaaaaaaaaaaa", "Default", SCRIPT)
+        p = self.worker(self.env(self.voice()), "--exit-when-idle")
+        self.assertEqual(p.wait(timeout=60), 0, self.log())
+        job = json.loads((self.jobs / "e_aaaaaaaaaaaa" / "voice" / "job.json").read_text())
+        self.assertNotIn("voice", job)
+        self.assertEqual(self.hub.uploads, [("e_aaaaaaaaaaaa", "described-narrator-a-seed42")])
+
+    def test_a_voice_change_starts_the_job_directory_afresh(self):
+        self.hub.add("e_aaaaaaaaaaaa", "Twice", SCRIPT)
+        env = self.env(self.voice())
+        self.assertEqual(self.worker(env, "--exit-when-idle").wait(timeout=60), 0, self.log())
+        self.hub.add("e_aaaaaaaaaaaa", "Twice", SCRIPT, voice=self.WARM)       # someone changed its voice
+        self.assertEqual(self.worker(env, "--exit-when-idle").wait(timeout=60), 0, self.log())
+        self.assertEqual(self.hub.uploads, [("e_aaaaaaaaaaaa", "described-narrator-a-seed42"),
+                                            ("e_aaaaaaaaaaaa", "preset-warm-male-s42")])
+        v = self.jobs / "e_aaaaaaaaaaaa" / "voice"
+        self.assertEqual(json.loads((v / "job.json").read_text())["voice"], self.WARM["spec"])
+        self.assertEqual(self.status("e_aaaaaaaaaaaa")["resumed_chunks"], 0, "nothing of the old voice reused")
+        self.assertIn("another voice; its job directory starts afresh", self.log())
+        self.assertEqual(len(self.hub.timings["e_aaaaaaaaaaaa"]), 2)
+        # and the same voice once more (a change back and forth): voiced again, not "already done"
+        self.hub.add("e_aaaaaaaaaaaa", "Twice", SCRIPT, voice=self.WARM)
+        self.assertEqual(self.worker(env, "--exit-when-idle").wait(timeout=60), 0, self.log())
+        self.assertEqual(len(self.hub.uploads), 3)
+        self.assertIn("voiced again; its job directory starts afresh", self.log())
+
+    def test_timings_are_a_bonus(self):
+        # a voice without timings (papercast-voice before 1.5), and a hub that refuses them
+        self.hub.add("e_aaaaaaaaaaaa", "No timings", SCRIPT)
+        p = self.worker(self.env(self.voice(no_timings=1)), "--exit-when-idle")
+        self.assertEqual(p.wait(timeout=60), 0, self.log())
+        self.assertIn("e_aaaaaaaaaaaa", self.hub.audio)
+        self.assertNotIn("e_aaaaaaaaaaaa", self.hub.timings)
+        self.hub.add("e_bbbbbbbbbbbb", "Refused timings", SCRIPT)
+        self.hub.fail_next("PUT", "timings", 400)
+        p = self.worker(self.env(self.voice()), "--exit-when-idle")
+        self.assertEqual(p.wait(timeout=60), 0, self.log())
+        self.assertIn("e_bbbbbbbbbbbb", self.hub.audio)
+        self.assertIn("the hub did not take the timings", self.log())
+
     def test_one_worker_at_a_time(self):
         env = self.env(self.voice())
         p = self.worker(env)

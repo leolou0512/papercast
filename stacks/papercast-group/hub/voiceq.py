@@ -15,9 +15,15 @@ Two columns this module adds to voice_jobs if they are missing (A1 may put them 
 one second) and `worker` (which worker holds the claim).
 
 Also here, because the bundle upload needs it too: save_body(), which streams a request body to
-disk in chunks under a size limit instead of holding it in memory."""
+disk in chunks under a size limit instead of holding it in memory.
+
+A voice change (voices.py) puts an episode that has audio back in this queue: while it is made the
+episode stays ready with its old audio (claim, status and failures leave the episode row alone),
+the claim carries the voice, and the new MP3 replaces the old one. PUT /api/voice/<id>/timings
+takes the sentence timings of the audio being made (before its MP3), or of the audio there is."""
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sqlite3
@@ -27,7 +33,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import db, events
+from . import db, events, voices
 from .app import HTTPError
 
 log = logging.getLogger("pcg.voiceq")
@@ -252,14 +258,16 @@ def claim(req):
                 c.execute("UPDATE voice_jobs SET state = 'claimed', worker = ?, claimed_at = ?, heartbeat_at = ?, "
                           "finished_at = NULL, phase = 'claimed', progress = 0, attempts = attempts + 1, "
                           "served_seq = ? WHERE episode_id = ?", (worker, now, now, seq, eid))
-                c.execute("UPDATE episodes SET state = 'waiting-for-gpu', state_detail = 'with the voice', "
-                          "updated_at = ? WHERE id = ?", (now, eid))
+                if not voices.revoicing(c, eid):        # a voice change: the old audio plays on
+                    c.execute("UPDATE episodes SET state = 'waiting-for-gpu', state_detail = 'with the voice', "
+                              "updated_at = ? WHERE id = ?", (now, eid))
                 job = _job(c, eid)
-        info = None
+        info = voice = None
         if job is not None:
             info = c.execute("SELECT e.id, e.paper_id, p.title, p.authors, p.year, u.name AS maker "
                              "FROM episodes e JOIN papers p ON p.id = e.paper_id "
                              "JOIN users u ON u.id = e.made_by WHERE e.id = ?", (job["episode_id"],)).fetchone()
+            voice = voices.claim_voice(c, job["episode_id"])
     c = db.conn()
     _publish(c, stale + ([job["episode_id"]] if job is not None and not resumed else []))
     if job is None:
@@ -277,6 +285,7 @@ def claim(req):
         "made_by": info["maker"] if info else None,
         "attempt": job["attempts"],
         "resumed": resumed,
+        "voice": voice,                 # None: papercast-voice's default voice (voices.py)
     })
 
 
@@ -326,10 +335,13 @@ def status(req, eid):
         _check_holder(req, job, body)
         c.execute("UPDATE voice_jobs SET heartbeat_at = ?, phase = ?, progress = ? WHERE episode_id = ?",
                   (now, phase, progress, eid))
-        state = "waiting-for-gpu" if phase in WAITING_PHASES else "speaking"
-        detail = note or (f"{phase}, {progress * 100:.0f}%" if progress is not None else phase)
-        c.execute("UPDATE episodes SET state = ?, state_detail = ?, updated_at = ? WHERE id = ?",
-                  (state, detail, now, eid))
+        if voices.revoicing(c, eid):
+            state = "ready"
+        else:
+            state = "waiting-for-gpu" if phase in WAITING_PHASES else "speaking"
+            detail = note or (f"{phase}, {progress * 100:.0f}%" if progress is not None else phase)
+            c.execute("UPDATE episodes SET state = ?, state_detail = ?, updated_at = ? WHERE id = ?",
+                      (state, detail, now, eid))
     _publish(db.conn(), [eid])
     req.send_json(200, {"episode_id": eid, "state": state, "phase": phase, "progress": progress})
 
@@ -360,6 +372,7 @@ def audio(req, eid):
     if job["state"] == "done":
         raise HTTPError(409, "already_done", f"{eid} already has its audio")
     _check_holder(req, job)
+    key = (req.headers.get("X-Voice") or "").strip()[:80] or None     # the voice it is in (output.voice)
     tmpdir = req.cfg.data / "tmp"
     tmpdir.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=f"audio-{eid}-", suffix=".mp3", dir=tmpdir)
@@ -373,16 +386,19 @@ def audio(req, eid):
             raise HTTPError(400, "not_mp3", "the body does not start like an MP3 (ID3 tag or MPEG frame)")
         epdir = req.cfg.episodes / eid
         epdir.mkdir(parents=True, exist_ok=True)
+        had = (epdir / "audio.mp3").is_file()
         os.replace(tmp, epdir / "audio.mp3")
     finally:
         tmp.unlink(missing_ok=True)
     now = db.now()
     with db.transaction() as c:
+        swap = voices.after_audio(c, req.cfg, eid, round(dur, 2), key, had)
         c.execute("UPDATE voice_jobs SET state = 'done', finished_at = ?, heartbeat_at = ?, phase = 'done', "
                   "progress = 1, error = NULL, worker = NULL WHERE episode_id = ?", (now, now, eid))
         c.execute("UPDATE episodes SET state = 'ready', duration_s = ?, state_detail = NULL, updated_at = ? "
                   "WHERE id = ?", (round(dur, 2), now, eid))
     _publish(db.conn(), [eid])
+    voices.publish(swap)
     req.send_json(200, {"episode_id": eid, "state": "ready", "duration_s": round(dur, 2), "bytes": n})
 
 
@@ -405,13 +421,38 @@ def failed(req, eid):
         retry = attempts < MAX_ATTEMPTS
         c.execute("UPDATE voice_jobs SET state = 'failed', error = ?, finished_at = ?, phase = 'failed', "
                   "worker = NULL WHERE episode_id = ?", (err, now, eid))
-        detail = f"the voice failed: {err} " + (
-            f"(attempt {attempts} of {MAX_ATTEMPTS}; it will be tried again)" if retry
-            else f"(tried {MAX_ATTEMPTS} times; it stays failed)")
-        c.execute("UPDATE episodes SET state = 'failed', state_detail = ?, updated_at = ? WHERE id = ?",
-                  (detail, now, eid))
+        if voices.revoicing(c, eid):        # a voice change failed: the episode keeps its audio
+            voices.revoice_failed(c, eid, err, retry)
+        else:
+            detail = f"the voice failed: {err} " + (
+                f"(attempt {attempts} of {MAX_ATTEMPTS}; it will be tried again)" if retry
+                else f"(tried {MAX_ATTEMPTS} times; it stays failed)")
+            c.execute("UPDATE episodes SET state = 'failed', state_detail = ?, updated_at = ? WHERE id = ?",
+                      (detail, now, eid))
     _publish(db.conn(), [eid])
     req.send_json(200, {"episode_id": eid, "state": "failed", "attempts": attempts, "retry": retry})
+
+
+def timings(req, eid):
+    """The sentence timings (papercast-voice's out/timings.json): for the audio this claim is
+    making, kept until its MP3 arrives; or, sent for an episode not being voiced, for its audio."""
+    raw = req.body(voices.TIMINGS_MAX)
+    try:
+        doc = json.loads(raw or b"null")
+    except ValueError:
+        raise HTTPError(400, "bad_json", "the body is not JSON")
+    c = db.conn()
+    ensure_columns(c)
+    job = _job(c, eid)
+    if job is None:
+        raise HTTPError(404, "no_such_job", f"no voice job for {eid}")
+    gone = c.execute("SELECT deleted_at FROM episodes WHERE id = ?", (eid,)).fetchone()
+    if gone is not None and gone["deleted_at"]:
+        raise HTTPError(410, "deleted", f"{eid} was deleted")
+    if job["state"] == "claimed":
+        _check_holder(req, job)
+    stored = voices.save_timings(req, c, eid, doc, job)
+    req.send_json(200, {"episode_id": eid, "stored": stored})
 
 
 def queue(req):
@@ -434,5 +475,6 @@ ROUTES = [
     ("GET", rf"^/api/voice/{_ID}/script$", script, "worker"),
     ("PUT", rf"^/api/voice/{_ID}/status$", status, "worker"),
     ("PUT", rf"^/api/voice/{_ID}/audio$", audio, "worker"),
+    ("PUT", rf"^/api/voice/{_ID}/timings$", timings, "worker"),
     ("POST", rf"^/api/voice/{_ID}/failed$", failed, "worker"),
 ]

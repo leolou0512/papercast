@@ -33,7 +33,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import db, events
+from . import db, events, voices
 from .app import HTTPError
 
 try:
@@ -201,6 +201,7 @@ def library(cfg, uid: int, admin: bool, q: str | None = None, pids: list | None 
     for e in _episode_rows(uid, pids):
         by_paper.setdefault(e["paper_id"], []).append(_ep_view(e, uid, admin, cfg.episodes))
     out = [_paper_view(p, by_paper[p["id"]]) for p in _paper_rows(uid, pids) if p["id"] in by_paper]
+    voices.decorate(out, cfg, uid, admin)       # each episode's `voice` (voices.py)
     words = (q or "").lower().split()
     if words:
         out = [v for v in out if _matches(v, words)]

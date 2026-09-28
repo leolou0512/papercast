@@ -263,6 +263,22 @@ queue. The worker runs `papercast-voice run <job dir>` as Leo's runner does (see
 `stacks/papercast/voice/README.md`), one episode at a time on perov's A4000, niced, and waits
 if another user takes the GPU (papercast-voice already does).
 
+Voices and timings (hub/voices.py). The claim also carries `"voice"`: null (papercast-voice's own
+default narrator) or `{"id","name","cpu","spec"}`, where `spec` is job.json's `voice` for
+papercast-voice (`{"engine","voice": key, "instruction","seed"}` for a Breeze narrator, `{"engine":
+"kokoro","voice"}` with job engine `cpu`). The worker sends `PUT /api/voice/<id>/timings` (JSON,
+`{"version": 1, "duration_s", "segments": [{"start","end","text"}]}`: one segment per sentence
+of script.md in order, seconds of the MP3) before the audio, whose upload names the voice it is in
+(`X-Voice: <key>`); the hub keeps the timings as `timings.json` next to `audio.mp3` from the moment
+the MP3 lands. The same PUT for an episode not being voiced stores timings for the audio it has.
+A new episode is voiced in its maker's own voice (Settings, Voice). Its maker or an admin can have
+an episode that has audio voiced again in another preset: the job goes back into this fair queue
+under whoever asked (at most two waiting per person), the episode stays `ready` with its old
+audio meanwhile, and the new MP3 replaces it with its timings; `voice.rev` (each episode's in the
+library) goes up, and the page asks `/audio/<id>.mp3?v=<rev>`. Browser routes: `GET /api/voices`,
+`PUT /api/voices/mine`, `GET /api/voices/<id>/sample.mp3`, `GET|PUT|DELETE /api/episodes/<id>/voice`,
+`GET /api/episodes/<id>/timings` (timings.json plus `rev`, the audio revision they are for).
+
 ## 10. Prompt (A9) and preferences
 
 - Base guideline v1 = `stacks/papercast/runner/seed-guideline.md` made general: "the listener"

@@ -89,6 +89,7 @@ class FakeApi:
         self.guideline, self.final_state = guideline, final_state
         self.settings = {"maths": "full", "emphasis": "method"} if settings is None else settings
         self.note = note
+        self.prompt_version = 2
         self.claim_expires_in = claim_expires_in
         self.calls: list[tuple] = []
         self.uploads: list[dict] = []
@@ -105,7 +106,7 @@ class FakeApi:
         if u.path == "/api/cli/lookup":
             return {"paper": self.paper, "claim": None}
         if u.path == "/api/cli/prompt":
-            return {"version": 2, "guideline": self.guideline, "wording": self.wording}
+            return {"version": self.prompt_version, "guideline": self.guideline, "wording": self.wording}
         if u.path == "/api/cli/prefs":
             return {"settings": self.settings, "note": self.note, "version": 3}
         if u.path == "/api/cli/library":

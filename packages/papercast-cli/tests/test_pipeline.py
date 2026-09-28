@@ -354,6 +354,158 @@ class Limit(PipelineCase):
         self.assertEqual(len(self.jread("links.json")["links"]), 3)
 
 
+class HubPromptDown(FakeApi):
+    """A hub that answers everything except the base prompt."""
+
+    def get(self, path: str) -> dict:
+        if path == "/api/cli/prompt":
+            self.calls.append(("GET", path))
+            raise ConnectionRefusedError("hub down")
+        return super().get(path)
+
+
+class NewestPrompt(PipelineCase):
+    """Every job writes from the group's newest base guideline, asked of the hub when the job
+    gets to writing; never a copy kept from an earlier job, bundled with the package or fetched
+    for a run Claude never saw. Once Claude has the episode instruction the job keeps it."""
+    G1 = "# Base guideline, version one\n\n- One episode per paper, 15 to 25 minutes.\n"
+    G2 = "# Base guideline, version two\n\n- One episode per paper, 15 to 25 minutes.\n"
+
+    def prompt_gets(self, api) -> int:
+        return len([c for c in api.calls if c[:2] == ("GET", "/api/cli/prompt")])
+
+    def test_every_job_asks_the_hub(self):
+        from papercast_cli import common
+        bundled = [ln for ln in common.base_guideline().splitlines() if ln.startswith("## ")][0]
+        for name, text, version in (("one", self.G1, 4), ("two", self.G2, 5)):
+            with self.subTest(job=name):
+                self.new_job(name)
+                self.scenario()
+                self.write_job()
+                api = FakeApi(guideline=text)
+                api.prompt_version = version
+                self.assertEqual(self.run_job(api)["status"], "uploaded")
+                self.assertEqual(self.prompt_gets(api), 1)
+                g = self.jread("work", "guideline.md")
+                self.assertTrue(g.startswith(text.strip().splitlines()[0]), g[:80])
+                self.assertNotIn(bundled, g)
+                self.assertEqual(self.jread("state.json")["steps"]["prompt"]["base_version"], version)
+                self.assertEqual(api.uploads[0]["manifest"]["base_version"], version)
+        self.assertNotIn("version one", self.jread("work", "guideline.md"))
+
+    def test_hub_unreachable_fails_the_job(self):
+        self.scenario()
+        self.write_job()
+        with self.assertRaises(PipelineError) as cm:
+            self.run_job(HubPromptDown())
+        e = cm.exception
+        self.assertEqual((e.step, e.code, e.retryable), ("prompt", "hub_unreachable", True))
+        self.assertIn("current guideline", e.message)
+        self.assertIn("never started from an older copy", e.message)
+        self.assertFalse(os.path.exists(self.jpath("work", "guideline.md")))
+        self.assertNotIn("prompt", self.jread("state.json")["steps"])
+        self.assertEqual(self.kinds(), ["identify"])          # no episode was started
+        self.assertEqual(self.jread("result.json")["code"], "hub_unreachable")
+
+    def stop_before_the_episode(self, api):
+        """Run the job until the prompt step is done and stop it before Claude is given the
+        episode instruction."""
+        def die(p, f, d):
+            if d == "reading the paper":
+                raise Boom("before the episode")
+        with self.assertRaises(Boom):
+            self.run_job(api, progress=die)
+        st = self.jread("state.json")
+        self.assertIn("prompt", st["steps"])
+        self.assertFalse((st.get("delivered") or {}).get("episode"))
+
+    def test_asked_again_until_claude_has_the_instruction(self):
+        self.scenario()
+        self.write_job()
+        api = FakeApi(guideline=self.G1)
+        self.stop_before_the_episode(api)
+        self.assertIn("version one", self.jread("work", "guideline.md"))
+        api.guideline, api.prompt_version = self.G2, 3        # an admin saves a new version
+        self.assertEqual(self.run_job(api)["status"], "uploaded")
+        self.assertEqual(self.prompt_gets(api), 2)
+        g = self.jread("work", "guideline.md")
+        self.assertIn("version two", g)
+        self.assertNotIn("version one", g)
+        self.assertEqual(api.uploads[0]["manifest"]["base_version"], 3)
+        self.assertEqual(self.kinds(), NORMAL)
+
+    def test_no_older_copy_when_the_hub_is_down_before_the_episode(self):
+        self.scenario()
+        self.write_job()
+        self.stop_before_the_episode(FakeApi(guideline=self.G1))
+        with self.assertRaises(PipelineError) as cm:
+            self.run_job(HubPromptDown())
+        self.assertEqual((cm.exception.step, cm.exception.code), ("prompt", "hub_unreachable"))
+        self.assertEqual(self.kinds(), ["identify"])
+
+    def test_resumed_after_the_limit_keeps_its_guideline(self):
+        self.scenario(limit={"on": "episode", "runs": 1, "resets_at": int(time.time()) + 600})
+        self.write_job()
+        api = FakeApi(guideline=self.G1)
+        with self.assertRaises(UsageLimit):
+            self.run_job(api)
+        api.guideline, api.prompt_version = self.G2, 3
+        self.assertEqual(self.run_job(api)["status"], "uploaded")
+        self.assertEqual(self.prompt_gets(api), 1)
+        self.assertIn("version one", self.jread("work", "guideline.md"))
+        self.assertEqual(api.uploads[0]["manifest"]["base_version"], 2)
+        self.assertEqual(self.kinds(), ["identify", "episode", "retry", "cut", "grade"])
+
+
+class QueueInputs(PipelineCase):
+    """What `papercast add` was given, as its queue writes job.json (jobs.create): the job runs
+    in its own directory, so a relative PDF path, a bare arXiv id or a DOI must still work."""
+
+    def queue_job(self, typed: str) -> None:
+        from papercast_cli import jobs
+        inp = jobs.parse_input(typed)
+        j = {"input": inp["input"], "kind": inp["kind"], "url": inp.get("url"),
+             "arxiv_id": inp.get("arxiv_id"), "doi": inp.get("doi"), "source": None}
+        if inp["kind"] == "pdf":
+            import shutil
+            shutil.copyfile(inp["path"], self.jpath("source.pdf"))
+            j.update(source="source.pdf", source_name=inp["name"])
+        self.write_job(**j)
+
+    def test_a_relative_pdf_path(self):
+        self.scenario()
+        here = os.getcwd()
+        os.chdir(os.path.dirname(self.pdf_path))
+        try:
+            self.queue_job(os.path.basename(self.pdf_path))
+        finally:
+            os.chdir(here)
+        os.remove(self.pdf_path)                    # the original may move: the job has a copy
+        self.assertEqual(self.run_job(FakeApi())["status"], "uploaded")
+        self.assertEqual(self.jread("state.json")["steps"]["source"]["kind"], "pdf")
+        self.assertTrue(os.path.isfile(self.jpath("work", "paper.pdf")))
+
+    def test_a_bare_arxiv_id_and_a_doi(self):
+        with open(self.pdf_path, "rb") as fh:
+            body = fh.read()
+        arxiv = ("https://arxiv.org/abs/2210.02747", ["https://arxiv.org/pdf/2210.02747"])
+        for typed, (url, get) in (("2210.02747", arxiv), ("arXiv:2210.02747", arxiv),
+                                  ("10.1000/ABC", ("https://doi.org/10.1000/abc", []))):
+            with self.subTest(typed=typed):
+                self.new_job(typed.replace("/", "_").replace(":", "_"))
+                self.scenario()
+                self.queue_job(typed)
+                got = []
+
+                def download(u, limit, got=got):
+                    got.append(u)
+                    return body
+                self.assertEqual(self.run_job(FakeApi(), download=download)["status"], "uploaded")
+                src = self.jread("state.json")["steps"]["source"]
+                self.assertEqual((src["kind"], src["url"]), ("url", url))
+                self.assertEqual(got, get)
+
+
 class PaperText(PipelineCase):
     """The paper's own text goes to the hub for its search (never shown): what pdftotext made
     of the PDF, as UTF-8, at most 2 MB; without pdftotext the bundle simply has none."""

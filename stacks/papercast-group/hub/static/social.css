@@ -98,3 +98,8 @@ a.bd-link:hover, button.bd-link:hover { background: var(--sel); }
   .comments { padding: 0 16px 32px; }
   .board { padding: 0 16px 4px; }
 }
+
+/* profile pictures next to the names (avatar.js): no taller than the line they sit on */
+.c-meta .av { margin: -4px 6px -2px 0; }
+.bd-link .av { margin: -2px 6px -1px 0; }
+.bd-nmeta .av { margin: 0 -2px 0 0; }

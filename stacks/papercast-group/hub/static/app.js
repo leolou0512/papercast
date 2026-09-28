@@ -58,7 +58,8 @@
   async function api(method, path, body, more) {
     const opt = { method, headers: { "X-PCG": "1" }, credentials: "same-origin" };
     if (more && more.keepalive) opt.keepalive = true;
-    if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
+    if (body instanceof Blob) { opt.headers["Content-Type"] = body.type || "application/octet-stream"; opt.body = body; }     // a picture
+    else if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
     let r;
     try { r = await fetch(path, opt); } catch (e) {
       const err = new Error("The hub did not answer (or the sign-in expired: reload the page).");
@@ -666,7 +667,7 @@
     if (m && m.more && !m.asked) { m.asked = true; S.snipWant.add(p.id); }
     const hit = m && m.lead ? [m.lead, m.parts || []] : null;
     // Everything the row shows, in one string: when the row shows it already, it is left as it is.
-    const sig = JSON.stringify([title, p.added_at, rg, sub, by, nv, ptags, ptags.includes(S.f.tag) ? S.f.tag : null, audio, !!p.listened, canDel,
+    const sig = JSON.stringify([title, p.added_at, rg, sub, by, c && c.made_by ? c.made_by.id : null, nv, ptags, ptags.includes(S.f.tag) ? S.f.tag : null, audio, !!p.listened, canDel,
       hasMenu, nc, m ? m.title : null, hit]);
     if (r.sig === sig) return;
     r.sig = sig;
@@ -677,7 +678,7 @@
     const line = el("div", { class: `row-sub t${sub.cls ? ` ${sub.cls}` : ""}` }, el("span", { class: "st", text: sub.text }),
       nv ? el("span", { class: "nv", text: `· ${nv}` }) : null,
       nc ? el("span", { class: "nc", text: `· ${nc} comment${nc === 1 ? "" : "s"}` }) : null);
-    const byl = by ? el("div", { class: "row-by" }, el("span", { text: by })) : null;
+    const byl = by ? el("div", { class: "row-by" }, avatarNode(c.made_by), el("span", { text: by })) : null;
     const open = S.menu && S.menu.for === `row:${p.id}`;
     const more = hasMenu ? el("button", { type: "button", class: "more", "aria-label": "More", "aria-haspopup": "menu",
       "aria-expanded": open ? "true" : "false", html: I.more,
@@ -1826,7 +1827,7 @@
   // social.js (window.PaperSocial) draws them; this is what it may use of the page.
   function socialCtx() {
     return {
-      api, me: () => S.me, isAdmin, phone, toast, hms,
+      api, me: () => S.me, isAdmin, phone, toast, hms, avatar: avatarNode,
       typed: () => { S.typedAt = Date.now(); },
       openPaper: (pid) => openPaper(pid),
       rowChanged: (pid) => updateRow(pid),
@@ -2100,10 +2101,12 @@
         show(to);
         put(u, { disabled: to }, () => show(!to));
       });
-      return el("li", { class: "item", "data-id": String(u.id) },
+      const pic = u.id !== S.me.id && hasPicture(u) ? el("button", { type: "button", class: "text-btn", text: "Remove picture",
+        "aria-label": `Remove the picture of ${u.name || u.email}`, onclick: (e) => { e.currentTarget.remove(); removePicture(u); } }) : null;
+      return el("li", { class: "item", "data-id": String(u.id) }, avatarNode(u, "m"),
         el("div", { class: "it-main" }, el("div", { class: "it-t", text: `${u.name || u.email}${u.id === S.me.id ? " (you)" : ""}` }),
           el("div", { class: "it-s", text: [u.email, u.created_at ? `since ${day(u.created_at)}` : ""].filter(Boolean).join(" · ") })),
-        el("div", { class: "it-ctl" }, role, dis));
+        el("div", { class: "it-ctl" }, role, dis, pic));
     }));
     const kids = [ul];
     // Invite links are the local sign-in's (with Cloudflare Access, people sign in by email).
@@ -2125,6 +2128,16 @@
         el("p", { class: "muted", text: "One use, for 7 days." }));
     }
     body.replaceChildren(...kids);
+  }
+
+  // An admin takes someone's picture down (hub/avatars.py); the event redraws it everywhere.
+  async function removePicture(u) {
+    try {
+      await api("DELETE", `/api/admin/users/${encodeURIComponent(u.id)}/avatar`);
+      u.avatar = null;
+      if (window.PcgAvatar) window.PcgAvatar.set(u.id, null);
+      toast("Picture removed", null, 3000);
+    } catch (e) { toast(e.message); }
   }
 
   // Password sign-in (PCG_AUTH=password): this person's name, password and sessions.
@@ -2194,12 +2207,94 @@
     body.replaceChildren(
       el("p", { class: "intro", text: "Your name as the group sees it, your password, how the site looks, and where you are signed in." }),
       el("p", { class: "pref-h", text: "Name" }), el("div", { class: "invite first" }, name, nameSave), nameMsg,
+      ...pictureSection(),
       el("p", { class: "pref-h sec", text: "Appearance" }), look,
       el("p", { class: "muted", text: "Light or dark in this browser. System follows your computer's setting." }),
       el("p", { class: "pref-h sec", text: "Change password" }), form,
       el("p", { class: "pref-h sec", text: "Sign out" }),
       el("p", { class: "muted", text: "Sign out everywhere ends every browser session of yours, this one too. papercast on your computers stays logged in: remove those under Devices." }),
       el("div", { class: "save-row" }, out, all));
+  }
+
+  // ------------------------------------------------------------------ profile pictures
+  // avatar.js draws them (the picture, or initials on a colour) and hub/avatars.py keeps them.
+  // The browser makes the picture that is sent: the middle square of the file, 256 x 256, a JPEG
+  // (quality 0.85), so the hub only ever gets a small JPEG and never opens an image itself.
+  const AV_SIDE = 256, AV_QUALITY = 0.85, AV_FILE_MAX = 10 * 1024 * 1024;
+  const avatarNode = (u, size) => (window.PcgAvatar && u ? window.PcgAvatar.node(u, size) : document.createTextNode(""));
+  const hasPicture = (u) => !!(window.PcgAvatar ? window.PcgAvatar.version(u) : u && u.avatar);
+  function avatarChanged(d) {
+    if (!d || d.user_id === undefined || d.user_id === null) return;
+    if (window.PcgAvatar) window.PcgAvatar.set(d.user_id, d.avatar || null);
+    if (S.me && S.me.id === d.user_id) { S.me.avatar = d.avatar || null; if (S.set.pic) S.set.pic(); }
+  }
+  function imageOf(f) {
+    const viaImg = () => new Promise((resolve, reject) => {          // a data: URL: the page's CSP allows no blob: images
+      const r = new FileReader();
+      r.onerror = () => reject(new Error("unreadable"));
+      r.onload = () => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error("undecodable"));
+        img.src = r.result;
+      };
+      r.readAsDataURL(f);
+    });
+    return window.createImageBitmap ? createImageBitmap(f, { imageOrientation: "from-image" }).catch(viaImg) : viaImg();
+  }
+  // Refused: a word or two, no sentences (Leo, 2026-09-29).
+  const AV_SAYS = { not_image: "Not an image", not_jpeg: "Not an image", bad_type: "Not an image", too_big: "Too big",
+    too_large: "Too big", bad_size: "Wrong size", not_square: "Wrong size", slow_down: "Wait a minute" };
+  const avRefusal = (code) => Object.assign(new Error(AV_SAYS[code] || "Failed"), { code });
+  async function makePicture(f) {
+    if (!f || !/^image\//i.test(f.type || "")) throw avRefusal("not_image");
+    if (f.size > AV_FILE_MAX) throw avRefusal("too_big");
+    let img;
+    try { img = await imageOf(f); } catch (e) { throw avRefusal("not_image"); }
+    const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height, side = Math.min(w, h);
+    if (!side) throw avRefusal("not_image");
+    const cv = el("canvas", { width: String(AV_SIDE), height: String(AV_SIDE) });
+    const g = cv.getContext("2d");
+    g.fillStyle = "#FFFFFF";                 // a transparent picture on white, not on black
+    g.fillRect(0, 0, AV_SIDE, AV_SIDE);
+    g.imageSmoothingEnabled = true; g.imageSmoothingQuality = "high";
+    g.drawImage(img, (w - side) / 2, (h - side) / 2, side, side, 0, 0, AV_SIDE, AV_SIDE);
+    if (img.close) img.close();
+    const blob = await new Promise((resolve) => cv.toBlob(resolve, "image/jpeg", AV_QUALITY));
+    if (!blob || blob.type !== "image/jpeg") throw avRefusal("failed");
+    return blob;
+  }
+  // Settings > Account: "Profile picture", the picture, Upload, Remove; nothing else to read.
+  function pictureSection() {
+    const pic = el("div", { class: "av-now", id: "acct-av" });
+    const file = el("input", { type: "file", accept: "image/*", id: "acct-av-file", hidden: true, "aria-label": "Profile picture" });
+    const up = el("button", { type: "button", class: "btn-accent", id: "acct-av-up", text: "Upload" });
+    const rm = el("button", { type: "button", class: "text-btn danger", id: "acct-av-rm", text: "Remove" });
+    const msg = el("span", { class: "err", id: "acct-av-msg", role: "status" });
+    const draw = () => {
+      if (!pic.isConnected && pic.firstChild) return;
+      pic.replaceChildren(avatarNode(S.me, "l"));
+      rm.hidden = !hasPicture(S.me);
+    };
+    const run = async (fn) => {
+      up.disabled = rm.disabled = true; msg.textContent = "";
+      try {
+        const v = await fn();
+        S.me.avatar = v;
+        if (window.PcgAvatar) window.PcgAvatar.set(S.me.id, v);
+      } catch (e) { msg.textContent = AV_SAYS[e.code] || "Failed"; }
+      up.disabled = rm.disabled = false; draw();
+    };
+    up.addEventListener("click", () => { file.value = ""; file.click(); });
+    file.addEventListener("change", () => {
+      const f = file.files && file.files[0];
+      if (f) run(async () => (await api("PUT", "/api/me/avatar", await makePicture(f))).avatar).then(() => { file.value = ""; });
+    });
+    rm.addEventListener("click", () => run(async () => { await api("DELETE", "/api/me/avatar"); return null; }));
+    S.set.pic = draw;
+    draw();
+    return [el("p", { class: "pref-h sec", text: "Profile picture" }),
+      el("div", { class: "av-edit" }, pic, el("div", { class: "av-btns" }, up, rm, msg)), file];
   }
 
   // Users with password sign-in: the group's list of Imperial addresses. Adding a short code
@@ -2341,6 +2436,7 @@
         e.stopPropagation();
         openMenu(more, `user-${u.id}`, [mItem("Make a password link", () => linkFor(u, li))]
           .concat(!mine && u.default_password && !u.disabled && j && j.email ? [mItem("Send the welcome email again", () => welcomeAgain(u))] : [])
+          .concat(!mine && hasPicture(u) ? [mItem("Remove their picture", () => removePicture(u))] : [])
           .concat(mine ? [] : [mItem("Reset to the first password", () => resetDefault(u, li)), mItem("Remove…", () => remove(u, li), "danger")]));
       });
       const sub = [u.name && u.name !== u.username ? u.username : u.email,
@@ -2354,7 +2450,7 @@
         u.note && u.note !== "bootstrap" ? u.note : null].filter(Boolean);
       const s = el("div", { class: "it-s" });
       sub.forEach((x, i) => { if (i) s.append(" · "); s.append(x); });
-      li.append(el("div", { class: "it-main" }, el("div", { class: "it-t", text: `${u.name || u.username}${mine ? " (you)" : ""}` }), s),
+      li.append(avatarNode(u, "m"), el("div", { class: "it-main" }, el("div", { class: "it-t", text: `${u.name || u.username}${mine ? " (you)" : ""}` }), s),
         el("div", { class: "it-ctl" }, role, more));
       return li;
     }));
@@ -2665,6 +2761,9 @@
     on("graph", (d) => toMap("graph", d));
     on("log", (d) => toMap("log", d));
     queueEvents(es);
+    // profile pictures: avatar.js redraws each one on the page; a resync reads them all again
+    on("avatar", avatarChanged);
+    on("resync", () => { api("GET", "/api/config").then((j) => { if (window.PcgAvatar && j) window.PcgAvatar.seed(j.avatars); }, () => {}); });
     // comments and the board (social.js); paper, episode and log events reach it as papercast:event
     on("comment", (d) => { if (S.social) S.social.event("comment", d); });
     on("board", (d) => { if (S.social) S.social.event("board", d); });
@@ -2679,6 +2778,7 @@
     $("sort-btn").innerHTML = I.sort;
     try { S.cfg = await api("GET", "/api/config"); } catch (e) { toast(e.message); return; }
     S.me = S.cfg.me || {};
+    if (window.PcgAvatar) window.PcgAvatar.seed(S.cfg.avatars);       // everyone's profile picture
     S.build = S.cfg.build || "";        // the build this page's code came with
     S.social = window.PaperSocial ? window.PaperSocial.mount(socialCtx()) : null;     // comments and the board
     wireList();

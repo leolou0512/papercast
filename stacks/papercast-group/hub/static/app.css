@@ -571,3 +571,29 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; padding: 0 1
 .vrow .vplay[aria-pressed="true"] { color: var(--accent); }
 .vrow .vnone { font-size: 13px; margin: 0; padding: 0 4px; white-space: nowrap; }
 .vnote { font-size: 13px; line-height: 18px; color: var(--text-2); margin: 8px 0 0; max-width: 60ch; }
+
+/* ---------- profile pictures (avatar.js, hub/avatars.py) ---------- */
+/* A round picture, or the person's initials on one of eight colours (from their id). The
+   initials come from data-i through ::before, so the circle adds no text to the line. */
+.av {
+  --av: 20px;
+  display: inline-grid; place-items: center; flex: none; position: relative; overflow: hidden;
+  width: var(--av); height: var(--av); border-radius: 50%; vertical-align: middle;
+  color: #FFFFFF; font: 600 calc(var(--av) * .42)/1 var(--sans); letter-spacing: 0; user-select: none;
+}
+.av::before { content: attr(data-i); }
+.av.av-pic::before { content: none; }
+.av img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+.av-s { --av: 20px; }
+.av-m { --av: 24px; }
+.av-l { --av: 88px; }
+.av-c0 { background: #A5462A; } .av-c1 { background: #3A7552; } .av-c2 { background: #36628F; } .av-c3 { background: #7A5190; }
+.av-c4 { background: #86611F; } .av-c5 { background: #2C7A7A; } .av-c6 { background: #924563; } .av-c7 { background: #58636F; }
+.row-by .av { align-self: center; margin: -1px -4px -1px 0; }
+.item > .av { margin-right: -2px; }
+/* Settings > Account: the picture, Upload and Remove */
+.av-edit { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+.av-btns { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.av-btns .btn-accent { margin: 0; border: 0; border-radius: 6px; }
+.av-btns .text-btn { margin: 0; padding: 0 8px; min-width: 44px; }
+.av-btns .text-btn.danger { color: var(--danger); }

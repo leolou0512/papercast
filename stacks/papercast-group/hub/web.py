@@ -1,6 +1,6 @@
 """The browser API: library, listened, positions, prefs, admin, audio, explainer, SSE (SPEC.md section 7). Owner: A4.
 
-  GET    /api/config                      who is looking, the auth mode, the page's build
+  GET    /api/config                      who is looking, the auth mode, the page's build, everyone's picture
   GET    /api/library?q=&graph=&tag=...   papers with at least one live episode, for this user;
                                           q searches everything (search.py), the rest filter
   GET    /api/papers/<id>                 one paper, as in the library
@@ -34,7 +34,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import db, events, search, voices
+from . import avatars, db, events, search, voices
 from .app import HTTPError
 
 try:
@@ -207,8 +207,11 @@ def library(cfg, uid: int, admin: bool, q: str | None = None, pids: list | None 
     `q`: every word must appear in the title, authors, tags, makers' names, arXiv id, DOI or year.
     `pids`: only these papers (those of them still in the library)."""
     by_paper: dict = {}
+    av = avatars.versions()
     for e in _episode_rows(uid, pids):
-        by_paper.setdefault(e["paper_id"], []).append(_ep_view(e, uid, admin, cfg.episodes))
+        v = _ep_view(e, uid, admin, cfg.episodes)
+        v["made_by"]["avatar"] = av.get(e["made_by"])       # the maker's picture (avatars.py)
+        by_paper.setdefault(e["paper_id"], []).append(v)
     out = [_paper_view(p, by_paper[p["id"]]) for p in _paper_rows(uid, pids) if p["id"] in by_paper]
     voices.decorate(out, cfg, uid, admin)       # each episode's `voice` (voices.py)
     words = (q or "").lower().split()
@@ -226,10 +229,12 @@ def _one(req, pid: str) -> dict:
 
 
 def get_config(req):
+    av = avatars.versions()
     req.send_json(200, {"me": {"id": _uid(req), "name": _u(req, "name"), "email": _u(req, "email"),
-                               "role": _u(req, "role")},
+                               "role": _u(req, "role"), "avatar": av.get(_uid(req))},
                         "auth": req.cfg.auth, "build": build(req.cfg), "undo_days": UNDO_DAYS,
-                        "public_url": req.cfg.public_url})     # the address `papercast login --server` takes
+                        "public_url": req.cfg.public_url,     # the address `papercast login --server` takes
+                        "avatars": {str(k): v for k, v in av.items()}})     # everyone's picture (the map's cards)
 
 
 def get_library(req):

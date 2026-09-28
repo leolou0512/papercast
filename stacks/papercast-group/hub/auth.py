@@ -24,7 +24,8 @@ Routes: GET/PUT /api/me; GET /api/tokens, DELETE /api/tokens/<id> (own devices);
 device login POST /api/cli/login/start, /poll, the approve page GET /cli?code=, GET
 /api/cli/login/info?code=, POST /api/cli/login/approve; POST /api/cli/logout (revokes the
 caller's token); local joining GET /join/<token>, POST /api/join; admin GET /api/admin/users,
-PUT /api/admin/users/<id>, POST /api/admin/invites.
+PUT /api/admin/users/<id>, POST /api/admin/invites. /api/me and /api/admin/users say each
+person's "avatar" (hub/avatars.py: the picture's version, or null).
 
 Secrets are kept as sha256 only: tokens, invite links, poll secrets. A device's token is made at
 the poll that collects it, so no plaintext is ever stored (cli_logins.token_plain stays NULL).
@@ -604,13 +605,15 @@ def page_for(req, e) -> str | None:
 
 
 def me_get(req):
-    req.send_json(200, {**req.user, "auth": req.cfg.auth})
+    from . import avatars
+    req.send_json(200, {**req.user, "auth": req.cfg.auth, "avatar": avatars.version_of(req.user["id"])})
 
 
 def me_put(req):
+    from . import avatars
     name = clean_name(req.json().get("name"))
     db.conn().execute("UPDATE users SET name = ? WHERE id = ?", (name, req.user["id"]))
-    req.send_json(200, {**get_user(req.user["id"]), "auth": req.cfg.auth})
+    req.send_json(200, {**get_user(req.user["id"]), "auth": req.cfg.auth, "avatar": avatars.version_of(req.user["id"])})
 
 
 def tokens_list(req):
@@ -803,9 +806,10 @@ def admin_users(req):
         "(SELECT MAX(l.at) FROM auth_log l WHERE l.user_id = u.id AND l.kind = 'welcome_failed') AS welcome_failed_at "
         "FROM users u LEFT JOIN allowed_emails a ON a.email = u.email ORDER BY u.id").fetchall()
     pw = req.cfg.auth == "password"
-    from . import accounts
+    from . import accounts, avatars
+    av = avatars.versions()
     req.send_json(200, {"auth": req.cfg.auth, "email": accounts.email_ready(req.cfg), "users": [{
-        **_user(r), "devices": r["devices"], "last_used_at": r["last_used_at"], "last_login_at": r["last_login_at"],
+        **_user(r), "avatar": av.get(r["id"]), "devices": r["devices"], "last_used_at": r["last_used_at"], "last_login_at": r["last_login_at"],
         "on_list": bool(r["listed"]), "note": r["note"] or "",
         "default_password": bool(r["default_pw"]) if pw else False,
         "reset_asked_at": r["reset_asked_at"], "welcome_at": r["welcome_at"],

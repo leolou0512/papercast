@@ -694,7 +694,7 @@ class MapTest(unittest.TestCase):
         self.assertIsNone(self.js("document.querySelector('#map .pm-card .pm-linkto')"))
         self.assertIsNone(self.js("document.querySelector('#map .pm-card .pm-rm')"))
         self.assertFalse(self.js(f"!!{self.button('.pm-card', 'Edit label')}"))
-        self.assertIn("This graph is locked: only admins change it.", self.text(".pm-card"))
+        self.assertIn("Locked", self.text(".pm-card"))
         # shift-click only selects
         x, y = self.pos(DPO)
         self.click(x, y, shift=True)
@@ -708,7 +708,7 @@ class MapTest(unittest.TestCase):
         self.assertFalse(self.js(f"!!{self.button('.pm-card', 'Remove link')}"))
         self.open_panel("Graph settings")
         self.assertEqual(self.js("document.querySelectorAll('#map .pm-setdyn input').length"), 0)
-        self.assertIn("Locked: only admins change this graph.", self.text(".pm-setdyn"))
+        self.assertIn("Locked", self.text(".pm-setdyn"))
         self.assertEqual(self.hub.edits(), [])
         # an admin: everything, and the lock itself
         self.open(me=ALICE)
@@ -716,7 +716,7 @@ class MapTest(unittest.TestCase):
         self.wait(f"{M}.cur().id === {J(LOCKED)} && {M}.cur()._s.nodes.length === 3", "the locked graph")
         self.js(f"{M}.select({J(PPO)})")
         self.assertIsNotNone(self.js("document.querySelector('#map .pm-card .pm-linkto')"))
-        self.assertIn("as an admin you can still change it", self.text(".pm-card"))
+        self.assertIn("Locked", self.text(".pm-card"))
         self.open_panel("Graph settings")
         self.assertTrue(self.js("document.querySelector('#map .pm-lockrow input').checked"))
         self.js("document.querySelector('#map .pm-lockrow input').click()")
@@ -1350,7 +1350,7 @@ class MapTest(unittest.TestCase):
         self.open_panel("Graph settings")
         self.wait("!!document.querySelector('#map .pm-setsite h2')", "the setting")
         self.assertEqual(self.texts(".pm-setsite h2"), ["Links from uploads"])
-        self.assertEqual(self.text(".pm-setsite .pm-note"), "Suggest only: an upload’s links wait as suggestions until someone accepts them.")
+        self.assertEqual(self.text(".pm-setsite .pm-note"), "Links from uploads: Suggest only")
         self.assertEqual(self.js("document.querySelectorAll('#map .pm-setsite button').length"), 0)
         # someone's upload found another: the page hears of it
         with self.hub.lock:
@@ -1365,7 +1365,7 @@ class MapTest(unittest.TestCase):
         self.wait("!!document.querySelector('#map .pm-modes')", "the switch")
         pressed = lambda: self.js("[...document.querySelectorAll('#map .pm-modes button')].map(b => [b.textContent, b.getAttribute('aria-pressed')])")
         self.assertEqual(pressed(), [["Automatic", "false"], ["Suggest only", "true"]])
-        self.assertEqual(self.text(".pm-setsite .pm-note"), "An upload’s links wait as suggestions until someone accepts them. For every graph.")
+        self.assertFalse(self.js("!!document.querySelector('#map .pm-setsite .pm-note')"))     # no sentence under the switch
         self.press("[data-panel=set] .pm-modes", "Automatic")
         self.assertEqual(pressed(), [["Automatic", "true"], ["Suggest only", "false"]])
         self.until(lambda: self.hub.s["agent_links"] == "auto", "saved")

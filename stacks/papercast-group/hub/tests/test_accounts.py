@@ -1155,7 +1155,7 @@ class PasswordPagesTest(unittest.TestCase):
         n = len(self.smtp.messages)
         self.click("#add-go")
         self.wait("document.getElementById('add-msg').textContent.startsWith('Added pg501@ic.ac.uk')", "added")
-        self.assertIn("welcome email with their username and first password is on its way", self.js("document.getElementById('add-msg').textContent"))
+        self.assertIn("Welcome email sent.", self.js("document.getElementById('add-msg').textContent"))
         self.assertTrue(accounts.mail_idle() and self.smtp.wait(n + 1))
         self.assertEqual(self.smtp.messages[n]["to"], ["pg501@ic.ac.uk"])
         self.typ("#add-code", "PG502@ic.ac.uk")

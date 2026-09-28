@@ -736,7 +736,7 @@
     if (!items.length && S.loaded) {
       if (!empty) ul.append(empty = el("li", { class: "empty-list" }));
       empty.textContent = typed() ? "No matches." : filtering() ? "No papers match these filters."
-        : "No episodes yet. They appear here as people add papers with papercast add.";
+        : "No episodes yet.";
     } else if (empty) empty.remove();
     if (S.flash && S.rows.has(S.flash)) {
       const li = S.rows.get(S.flash).li;
@@ -1058,11 +1058,11 @@
       bar.firstChild.style.width = `${pct}%`;
       kids.push(big(`Speaking ${pct}%`), bar, detail("Recording the voice."));
     } else if (st === "waiting-for-gpu") {
-      kids.push(big("Waiting for GPU", "warn"), detail("In the voice queue. It starts by itself when the GPU has room."));
+      kids.push(big("Waiting for GPU", "warn"));
     } else if (st === "failed") {
       kids.push(big("Couldn't record the voice", "danger"), detail(c.state_detail || "The voice worker gave up on it."));
     } else if (st === "ready") {
-      kids.push(big("The audio is missing", "danger"), detail("The hub has no audio file for this version."));
+      kids.push(big("The audio is missing", "danger"));
     } else {
       kids.push(big("Checking…"), detail("The hub is checking the upload."));
     }
@@ -1923,8 +1923,7 @@
   // Base prompt and Slack. Each tab reads the hub when opened.
   const TABS = [["prefs", "Preferences"], ["voice", "Voice", false, false, true], ["devices", "Devices"], ["account", "Account", false, true], ["users", "Users", true], ["base", "Base prompt", true], ["slack", "Slack", true]];
   const PREF_TEXT = {
-    maths: ["Maths", { words: "In words", "key-steps": "Key steps", full: "Full derivations" },
-      "In words only, the key steps, or the whole derivation walked through (the equations go on the explainer page)."],
+    maths: ["Maths", { words: "In words", "key-steps": "Key steps", full: "Full derivations" }, ""],
     emphasis: ["What gets more time", { balanced: "Balanced", theory: "Theory", method: "Method", practice: "Practice" }, ""],
     background: ["What the listener already knows", { newcomer: "New to the field", field: "Works in the field", specialist: "Specialist" }, ""],
   };
@@ -2012,7 +2011,6 @@
     });
     summary();
     body.replaceChildren(
-      el("p", { class: "intro", text: "How the versions you make with papercast add are written. They decide what gets more time; the rules every episode follows stay the same." }),
       ...groups,
       el("div", { class: "pref" }, el("p", { class: "pref-h", text: "Note" }), note, count),
       sumLine,
@@ -2043,7 +2041,6 @@
     draw();
     body.append(el("div", { class: "pref", "data-k": "slack", id: "pref-slack" },
       el("p", { class: "pref-h sec", text: `Post my new episodes to ${j.channel}` }), seg,
-      el("p", { class: "muted", text: "papercast add asks each time; this is the answer when you just press Enter, or when it runs without a terminal. Saved at once." }),
       msg));
   }
 
@@ -2072,10 +2069,10 @@
             el("div", { class: "it-s", text: [t.created_at ? `added ${day(t.created_at)}` : "", t.last_used_at ? `last used ${when(t.last_used_at)}` : "never used"].filter(Boolean).join(" · ") })),
           b);
       }));
-      if (!live.length) ul.replaceChildren(el("li", { class: "muted intro", text: "None yet. Run papercast login on your computer to add one." }));
+      if (!live.length) ul.replaceChildren(el("li", { class: "muted intro", text: "None yet." }));
     };
     draw();
-    body.replaceChildren(el("p", { class: "intro", text: "Computers where papercast is logged in as you. Revoke one you no longer use: it stops working at once." }), ul);
+    body.replaceChildren(ul);
   }
 
   async function usersTab(body) {
@@ -2108,7 +2105,7 @@
           el("div", { class: "it-s", text: [u.email, u.created_at ? `since ${day(u.created_at)}` : ""].filter(Boolean).join(" · ") })),
         el("div", { class: "it-ctl" }, role, dis));
     }));
-    const kids = [el("p", { class: "intro", text: "Viewers listen and edit graphs; contributors also add papers with papercast; admins also manage people and the base prompt." }), ul];
+    const kids = [ul];
     // Invite links are the local sign-in's (with Cloudflare Access, people sign in by email).
     if (S.cfg && S.cfg.auth === "local") {
       const irole = el("select", { class: "pick", "aria-label": "Role for the invite" },
@@ -2268,7 +2265,7 @@
       try {
         const r = await api("POST", "/api/admin/allowed", { email: c.email });
         S.set.added = r.state === "already" ? `${r.email} is already on the list.`
-          : r.welcome === "queued" ? `Added ${r.email}. The welcome email with their username and first password is on its way (tell them to look in junk too).`
+          : r.welcome === "queued" ? `Added ${r.email}. Welcome email sent.`
           : `Added ${r.email}. Tell them: username ${r.username}, first password ${r.username}${r.user && !r.user.must_change ? " (or the one they had)" : ""}.`;
         again();
       } catch (err) { addMsg.className = "err"; addMsg.textContent = err.message; add.disabled = false; }
@@ -2371,7 +2368,6 @@
     if (!events.length) evs.append(el("li", { class: "muted", text: "Nothing yet." }));
     body.replaceChildren(...[
       el("p", { class: "pref-h", text: "Add someone" }), addForm, addMsg,
-      el("p", { class: "muted", text: `They sign in with the short code as username and as first password, and choose their own straight away. They start as contributors.${j && j.email ? " The hub emails them a welcome with both." : ""}` }),
       el("p", { class: "pref-h sec", text: `On the list (${listed.length})` }), ul,
       j && j.email === false ? el("p", { class: "muted", id: "no-email", text: "This hub cannot send email yet, so someone who forgets their password shows up here as “asked for a new password”: reset them to the first password, or make them a password link." }) : null,
       off.length ? el("p", { class: "muted", id: "off-list", text: `Not on the list, so they cannot sign in: ${off.map((u) => u.username || u.email).join(", ")}. Add one again to bring the account back.` }) : null,
@@ -2387,7 +2383,7 @@
     const draw = () => {
       if (!stillOn("base")) return;
       const newest = versions[0];
-      const kids = [el("p", { class: "intro", text: "The guideline every episode is written from, before each maker's preferences. A new version is used for episodes started after it; an episode keeps the version it was made with." })];
+      const kids = [];
       if (st.editing) {
         const g = el("textarea", { class: "field editor", id: "base-text", "aria-label": "Guideline", spellcheck: "false" });
         g.value = newest ? newest.guideline : "";
@@ -2633,7 +2629,6 @@
         p.detail ? el("div", { class: "it-s" }, el("span", { class: p.state === "skipped" ? "" : "warn", text: p.detail })) : null))));
     if (!posts.length) ul.replaceChildren(el("li", { class: "muted intro", text: "Nothing announced yet." }));
     body.replaceChildren(
-      el("p", { class: "intro", text: `papercast add asks each maker whether to post their episode to ${j.channel}; the hub posts it with its link once the audio is ready. The webhook address stays in a file on the hub (${j.setting} in hub.env).` }),
       status,
       el("div", { class: "save-row" }, test, res),
       el("p", { class: "pref-h sec", text: "Last 20" }), ul);

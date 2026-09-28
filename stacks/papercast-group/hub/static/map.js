@@ -1300,13 +1300,12 @@
           seg.appendChild(b);
         });
         setSite.appendChild(seg);
-        setSite.appendChild(h("p", "pm-note", m[2] + " For every graph."));
         if (SETS.open) {
           var act = h("div", "pm-act");
           act.appendChild(btn("Accept all " + SETS.open + (SETS.open === 1 ? " suggestion" : " suggestions"), "pm-btn pm-acceptall", acceptAll));
           setSite.appendChild(act);
         }
-      } else setSite.appendChild(h("p", "pm-note", m[1] + ": " + m[2].charAt(0).toLowerCase() + m[2].slice(1)));
+      } else setSite.appendChild(h("p", "pm-note", "Links from uploads: " + m[1]));
     }
 
     /* ---------- the edit log: Undo and History ---------- */
@@ -1472,7 +1471,6 @@
         } else box.appendChild(h("div", "pm-undo-t pm-muted", "Nothing to undo."));
         undoEl.appendChild(box);
       });
-      undoEl.appendChild(h("p", "pm-note", "An undo is an edit too: it shows in the History, and Redo takes it back."));
     }
     function renderRedo() {
       renderUndoButtons();
@@ -1492,7 +1490,6 @@
         } else box.appendChild(h("div", "pm-undo-t pm-muted", "Nothing to redo."));
         redoEl.appendChild(box);
       });
-      redoEl.appendChild(h("p", "pm-note", "A new edit after an undo leaves nothing to redo."));
     }
     function renderHist() {
       if (histEl.hidden) return;
@@ -1512,7 +1509,6 @@
         var li = h("li"); li.appendChild(b); ul.appendChild(li);
       });
       histEl.appendChild(ul);
-      histEl.appendChild(h("p", "pm-note", "The last 100 changes, newest first."));
       histEl.scrollTop = st;
     }
     // From a change to what it changed: the link (or its papers), the paper, the graph.
@@ -1575,7 +1571,7 @@
       card.hidden = false;
     }
     function lockNote() {
-      if (cur.meta.locked) card.appendChild(h("p", "pm-note", ADMIN ? "This graph is locked; as an admin you can still change it." : "This graph is locked: only admins change it."));
+      if (cur.meta.locked) card.appendChild(h("p", "pm-note", "Locked"));
     }
     function paperCard() {
       var id = selId, s = cur._s, n = s.nodes[s.idx[id]], can = canEdit();
@@ -1608,7 +1604,6 @@
         act.appendChild(btn("Take out of this graph", "pm-btn pm-rm", function () { removePaper(cur, id); }));
       }
       if (act.childNodes.length) card.appendChild(act);
-      if (can && !phone()) card.appendChild(h("p", "pm-note", "Shift-click another paper to link the two."));
       lockNote();
       section("Builds on", n.par.map(function (j) { return s.nodes[j].id; }));
       section("Built on by", n.ch.map(function (j) { return s.nodes[j].id; }));
@@ -1642,8 +1637,6 @@
         seg.appendChild(b);
       });
       card.appendChild(seg);
-      var gl0 = GRADES.filter(function (g) { return g[0] === l.grade; })[0];
-      if (gl0) card.appendChild(h("p", "pm-note", gl0[1] + ": " + gl0[2] + "."));
       if (can) { var act = h("div", "pm-act"); act.appendChild(btn("Remove link", "pm-btn pm-danger", function () { removeLink(e.id); })); card.appendChild(act); }
       else if (e.pending) card.appendChild(h("p", "pm-note", "Saving…"));
       lockNote();
@@ -1663,7 +1656,6 @@
         act.appendChild(btn("Accept", "pm-open pm-accept", function () { acceptSugg(e.id); }));
         act.appendChild(btn("Dismiss", "pm-btn pm-dismiss", function () { dismissSugg(e.id); }));
         card.appendChild(act);
-        card.appendChild(h("p", "pm-note", "Accept makes it a link (Undo takes it back). Dismiss drops it for good."));
       }
       lockNote();
       card.appendChild(h("h2", null, "Papers"));
@@ -1717,7 +1709,7 @@
       (d.roots || []).filter(inG).sort(function (a, b) { return (D[b] || 0) - (D[a] || 0); }).forEach(function (id) {
         var n = D[id] || 0; if (n) ol.appendChild(item(id, null, yy(id) + " · " + n + " after"));
       });
-      if (!ol.childNodes.length) startEl.appendChild(h("p", "pm-note", "No paper leads anywhere yet: link a few."));
+      if (!ol.childNodes.length) startEl.appendChild(h("p", "pm-note", "No links yet."));
       startEl.appendChild(ol);
       var path = (d.path || []).filter(inG);
       startEl.appendChild(h("h2", null, "Listening order"));
@@ -1751,13 +1743,12 @@
       if (!canEdit()) {
         setDyn.appendChild(h("p", "pm-gname", m.name));
         if (m.tags && m.tags.length) setDyn.appendChild(h("p", "pm-note", "Tags: " + m.tags.join(", ")));
-        setDyn.appendChild(h("p", "pm-note", m.locked ? "Locked: only admins change this graph." : "You can look but not change it here."));
+        setDyn.appendChild(h("p", "pm-note", m.locked ? "Locked" : "View only"));
         return;
       }
       field(setDyn, "Name", m.name, "pm-name", "Rename", function (v) { renameGraph(g, v); });
       var tg = field(setDyn, "Tags", (m.tags || []).join(", "), "pm-tags", "Save tags", function (v) { setTags(g, tagList(v)); });
       tg.placeholder = "e.g. robotics, agents";
-      setDyn.appendChild(h("p", "pm-note", "Papers with any of these tags join the graph by themselves; add others by hand below."));
       if (ADMIN) {
         var row = h("label", "pm-row pm-lockrow"), cb = h("input"); cb.type = "checkbox"; cb.checked = !!m.locked;
         row.appendChild(h("span", null, "Locked: only admins change it")); row.appendChild(cb);
@@ -1828,7 +1819,6 @@
       newEl.appendChild(h("h2", null, "New graph"));
       var nm = field(newEl, "Name", "", "pm-newname"); nm.maxLength = 80;
       var tg = field(newEl, "Tags (optional)", "", "pm-newtags"); tg.placeholder = "e.g. robotics, agents";
-      newEl.appendChild(h("p", "pm-note", "Papers with any of these tags join by themselves; add others by hand from Graph settings."));
       var go = function () { createGraph(nm.value, tagList(tg.value)); };
       onEnter(nm, go); onEnter(tg, go);
       var act = h("div", "pm-act"); act.appendChild(btn("Make graph", "pm-open pm-make", go)); act.appendChild(btn("Cancel", "pm-btn", function () { openPanel(null); }));

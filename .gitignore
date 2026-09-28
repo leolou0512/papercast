@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+# never commit a deploy's settings or data
+hub.env
+worker.env
+worker.token
+data/

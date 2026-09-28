@@ -48,9 +48,9 @@
 .pm-q:focus { outline: none; border-color: var(--pm-muted); }
 .pm-icons { grid-area: icons; display: flex; gap: 2px; flex: none; }
 .pm-undobox { grid-area: undo; display: flex; gap: 2px; flex: none; }
-.pm-sub { grid-area: sub; justify-self: start; display: flex; align-items: center; gap: 12px; min-width: 0; pointer-events: none; }
-.pm-sub > * { pointer-events: auto; }
-.pm-sub:not(:has(> :not([hidden]))) { display: none; }
+div.pm-sub { grid-area: sub; justify-self: start; display: flex; align-items: center; gap: 12px; min-width: 0; pointer-events: none; }
+div.pm-sub > * { pointer-events: auto; }
+div.pm-sub:not(:has(> :not([hidden]))) { display: none; }
 .pm-live { font-size: 12px; color: var(--pm-muted); pointer-events: none !important; }
 .pm-suggb[aria-pressed="true"] { background: var(--pm-panel); }
 .pm-modes { margin-top: 6px; }

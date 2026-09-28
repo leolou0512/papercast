@@ -141,7 +141,10 @@ its properties). Not measured: a full-length episode on perov (`measure-gpu`), l
 `cloudflared` (the pinned sha256) copied into `bin/`, settings and tokens copied into `etc/`, a
 first copy of `data/` and `backups/`, uv's CPython 3.11.15 copied into `python/`, the voice
 copied (`rsync -aH`, niced) and its three venvs pointed at the new paths (`pyvenv.cfg`, the
-`python` links, the scripts' `#!` lines), then `uv pip sync --dry-run` of each venv against the
+`python` links, the scripts' `#!` lines) and its Breeze compiler caches moved aside (they name
+files under the old home, which the sandbox cannot see: the first voice test as papercast failed
+at the engine load with `PermissionError: /home/leo/…/cache/inductor/…best_config`; rebuilt at the
+first load instead), then `uv pip sync --dry-run` of each venv against the
 voice's requirements, which must say "Would make no changes" (nothing downloaded again), then
 `install.sh --system --no-start --voice`. `cutover`: stop leo's units, copy data, backups and
 settings again, `install.sh --system`, the live checks; leo's units come back if the hub, the
@@ -157,7 +160,21 @@ the new hub answered 38 s after the old one stopped (`hub.db` schema 4 -> 5 by t
 migration, a backup first); then the hub `GET /` -> 303 to `/signin` as papercast, the tunnel 4
 connections registered, https://papercast.virtualatoms.org -> 303, `/signin` 200, the worker's
 claims reaching the hub every 15 s (204: nothing queued), both timers set (03:31 and 04:15 BST),
-`papercastctl backup-now` a new backup.]
+`papercastctl backup-now` a new backup; `papercastctl tunnel-token` with the same token: the
+tunnel back with a connection in 31 s (cloudflared drains for up to 30 s when stopped); the hub
+SIGKILLed: back by itself (`NRestarts=1`), 303 again. **The voice as papercast** (`papercastctl
+voice-test`, the card idle: 123 MiB, 0 %): the first try failed at the engine load on the copied
+compiler caches (above); with them rebuilt, admitted after 20 s, engine load 87 s (cold caches),
+speech 28.5 s for 35.7 s of audio, 142 s in all; the stand-in hub received 430,551 bytes of
+`audio/mpeg`, sha256 matching, -16.18 LUFS, true peak -2.3 dBTP (the same bytes as leo's test in
+the morning); the card back to 123 MiB. A second run with the rebuilt caches: 90.7 s in all, as leo's warm run. `papercast-layout.service` run by hand as
+papercast fails in `hub/layout.py` (`simulate`: `IndexError: index 1 is out of bounds for axis 1
+with size 1`, after a graph with 0 papers), the code's, not the sandbox's (the same on a copy of
+`hub.db` outside it): the nightly layout fails until that is fixed. `finish` at 21:37Z: leo's
+seven `pcg-*` unit files moved into `~/papercast-group.migrated-2026-09-28/user-units/`, none left
+in `~/.config/systemd/user`; his crontab had no `pcg-` line (only his own `gpus-report`); linger
+left on (his tmux, bkrelay relay and VS Code server run in session scopes and probably do not
+need it, but that is not certain); nothing in the units or `etc/` names `/home`.]
 
 ## Running it
 

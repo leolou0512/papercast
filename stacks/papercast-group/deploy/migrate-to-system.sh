@@ -87,6 +87,20 @@ relocate_voice() {
             "$v/bin/python" -c "import sys; assert sys.prefix == \"$v\", sys.prefix"
             echo "  $v: $("$v/bin/python" -c "import sys; print(sys.version.split()[0], sys.prefix)")"
         done
+        # The Breeze compiler caches (Triton, inductor, zig) name files by their absolute paths
+        # under the old home, which the sandboxed service cannot even look at (ProtectHome):
+        # "PermissionError: .../cache/inductor/...best_config" at the engine load. They are moved
+        # aside and rebuilt at the first load (about a minute more, once).
+        c=$new/engines/breeze/cache
+        if [ -d "$c" ]; then
+            mkdir -p "$new/../cache/breeze-compiler-cache.copied-from-leo"
+            for d in inductor triton zig; do
+                [ -d "$c/$d" ] || continue
+                rm -rf "$new/../cache/breeze-compiler-cache.copied-from-leo/$d"
+                mv "$c/$d" "$new/../cache/breeze-compiler-cache.copied-from-leo/$d"
+                mkdir "$c/$d"
+            done
+        fi
         left=$({ grep -rlI -- "$old" "$new/venv/bin" "$new"/engines/*/venv/bin "$new"/engines/*/venv/pyvenv.cfg 2>/dev/null || true; } | wc -l)
         [ "$left" = 0 ] || { echo "still naming $old: $left file(s)" >&2; exit 1; }
     ' _ "$OLD/voice" "$S/voice" "$S/python/$(basename "$minor")"

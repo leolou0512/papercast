@@ -36,6 +36,7 @@
       <div class="prog" id="mini-prog"></div>
       <button type="button" class="mp-play" id="mini-play" aria-label="Play"></button>
       <div class="mp-text"><div class="mp-title" id="mini-title"></div><div class="mp-sub t" id="mini-sub"></div></div>
+      <button type="button" class="mp-q" id="mini-q" aria-label="Up next" aria-haspopup="dialog" hidden></button>
     </div>
   </aside>
 
@@ -80,12 +81,26 @@
             </div>
             <div class="right"><button type="button" class="explain" id="x-open" disabled><span class="x-icon" id="x-icon"></span><span>Explainer</span></button></div>
           </div>
+          <button type="button" class="upnext" id="p-next" aria-haspopup="dialog" hidden><span class="un-l">Up next</span><span class="un-t" id="p-next-t"></span><span class="un-n t" id="p-next-n"></span></button>
         </div>
         <div class="pz-state" id="w-state" hidden></div>
       </div></section>
       <section class="versions" id="versions" hidden><div class="col">
         <h3 class="sec-h">Versions</h3>
         <div class="vlist" id="vlist" role="radiogroup" aria-label="Versions"></div>
+      </div></section>
+      <section class="tr" id="tr" hidden><div class="col">
+        <div class="tr-head">
+          <h3 class="sec-h">Transcript <span class="tr-note" id="tr-note" hidden>· timing estimated</span></h3>
+          <div class="tr-find">
+            <input class="field" type="search" id="tr-q" placeholder="Find in transcript" aria-label="Find in transcript" autocomplete="off" enterkeyhint="search">
+            <span class="tr-count t" id="tr-count" role="status"></span>
+            <button type="button" class="icon-btn" id="tr-prev" aria-label="Previous match" disabled></button>
+            <button type="button" class="icon-btn" id="tr-next" aria-label="Next match" disabled></button>
+          </div>
+        </div>
+        <div class="tr-body" id="tr-body"></div>
+        <div class="tr-now-wrap"><button type="button" class="tr-now" id="tr-now" hidden>Back to now</button></div>
       </div></section>
     </div>
     <div class="settings" id="settings" hidden>
@@ -110,6 +125,16 @@
     <div class="sheet-h"><span id="ov-label">Explainer</span>
       <button type="button" class="icon-btn" id="x-close" aria-label="Close the explainer"></button></div>
     <iframe id="x-frame" class="x-frame" sandbox="allow-scripts allow-popups" referrerpolicy="no-referrer" title="Explainer"></iframe>
+  </div>
+</div>
+<div class="scrim" id="q-overlay" hidden>
+  <div class="sheet q-sheet" role="dialog" aria-modal="true" aria-labelledby="q-label">
+    <div class="sheet-h q-h"><h2 class="q-title" id="q-label">Up next</h2>
+      <button type="button" class="text-btn" id="q-clear">Clear</button>
+      <button type="button" class="icon-btn" id="q-close" aria-label="Close Up next"></button></div>
+    <p class="q-now" id="q-now" hidden></p>
+    <ol class="q-list" id="q-list"></ol>
+    <p class="q-empty" id="q-empty" hidden>Nothing up next. Play next and Add to Up next are in a paper’s ⋯ menu.</p>
   </div>
 </div>
 </body>

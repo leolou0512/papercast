@@ -424,3 +424,83 @@ svg { display: block; }
   .sheet { width: 100%; height: 100vh; height: 100dvh; border-radius: 0; }
   .sheet-h { padding: 8px 8px 4px 16px; }
 }
+
+/* ---------- up next and the transcript ---------- */
+/* The sentence being spoken, and a find match: a grey mark, and the accent. */
+:root { --now: #EAEAEA; --hl: rgba(200, 67, 26, .16); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --now: #2A2A2A; --hl: rgba(255, 122, 69, .26); }
+}
+:root[data-theme="dark"] { --now: #2A2A2A; --hl: rgba(255, 122, 69, .26); }
+
+/* the player's "Up next" line: what plays after this, a tap opens the queue */
+.upnext {
+  display: flex; align-items: center; gap: 10px; width: 100%; height: 44px; margin: 12px 0 -12px;
+  text-align: left; font-size: 14px; line-height: 20px; color: var(--text); min-width: 0;
+}
+.upnext .un-l { flex: none; font-size: 13px; font-weight: 600; color: var(--text-2); }
+.upnext .un-t { flex: 0 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.upnext .un-n { flex: none; font-size: 13px; color: var(--text-2); }
+.upnext:hover .un-t { text-decoration: underline; text-underline-offset: 2px; text-decoration-color: var(--quote); }
+.mini .mp-q { width: 44px; height: 44px; margin-right: -8px; display: grid; place-items: center; color: var(--text-2); flex: none; }
+
+/* the Up next panel: a sheet like the explainer's, as tall as its rows */
+.q-sheet { width: min(520px, 100%); height: auto; max-height: calc(100vh - 64px); max-height: calc(100dvh - 64px); }
+.sheet-h.q-h { padding: 16px 12px 4px 24px; gap: 8px; }
+.q-h .q-title { flex: 1; min-width: 0; margin: 0; font-size: 20px; line-height: 26px; font-weight: 700; color: var(--text); }
+.q-h .text-btn { margin: 0; padding: 0 10px; min-width: 44px; }
+.q-now { margin: 0; padding: 0 24px 8px; font-size: 13px; line-height: 18px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.q-list { list-style: none; margin: 0; padding: 0 12px 16px; overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+.q-row { display: flex; align-items: center; gap: 2px; min-height: 60px; padding: 4px 0; border-radius: 8px; background: var(--bg); }
+.q-row.drag { background: var(--hover); position: relative; z-index: 1; }
+.q-grip { width: 28px; height: 44px; flex: none; display: grid; place-items: center; color: var(--text-2); cursor: grab; touch-action: none; }
+.q-row.drag .q-grip { cursor: grabbing; }
+.q-main { flex: 1; min-width: 0; min-height: 44px; padding: 4px 8px; border-radius: 6px; text-align: left; }
+.q-main:hover { background: var(--hover); }
+.q-t { font-size: 15px; line-height: 20px; font-weight: 600; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.q-s { display: block; font-size: 13px; line-height: 18px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.q-row .icon-btn { color: var(--text-2); }
+.q-row .icon-btn:hover:not(:disabled) { color: var(--text); }
+.q-empty { margin: 0; padding: 4px 24px 24px; font-size: 14px; line-height: 20px; color: var(--text-2); }
+
+/* the transcript: the script as it is spoken, under the versions */
+.tr { padding: 0 32px 48px; }
+.tr-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 16px; margin: 16px 0 8px; }
+.tr-head .sec-h { margin: 0; }
+.tr-note { font-weight: 400; }
+.tr-find { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.tr-find .field { width: 220px; margin: 0; }
+.tr-count { min-width: 60px; font-size: 13px; line-height: 16px; color: var(--text-2); text-align: right; white-space: nowrap; }
+.tr-find .icon-btn { color: var(--text-2); }
+.tr-find .icon-btn:hover:not(:disabled) { color: var(--text); }
+.tr-body { font-size: 16px; line-height: 27px; max-width: 66ch; overflow-wrap: anywhere; }
+.tr-body p { margin: 0 0 16px; }
+.tr-body h4 { font-size: 16px; line-height: 24px; font-weight: 600; margin: 28px 0 8px; }
+.tr-body h4:first-child { margin-top: 8px; }
+.tr-body.live .tr-s { cursor: pointer; }
+.tr-body.live .tr-s:hover { text-decoration: underline; text-decoration-color: var(--quote); text-underline-offset: 3px; }
+.tr-s.now { background: var(--now); border-radius: 3px; box-shadow: 0 0 0 2px var(--now); -webkit-box-decoration-break: clone; box-decoration-break: clone; }
+.tr-m { background: var(--hl); color: inherit; border-radius: 2px; }
+.tr-m.on { background: var(--accent); color: var(--on-accent); }
+/* "Back to now": held at the bottom of the window while the transcript is on screen */
+.tr-now-wrap { position: sticky; bottom: 16px; height: 0; z-index: 4; }
+.tr-now {
+  position: absolute; left: 50%; bottom: 0; transform: translateX(-50%); white-space: nowrap;
+  height: 44px; padding: 0 16px; border: 4px solid transparent; background-clip: padding-box; border-radius: 22px;
+  background-color: var(--accent); color: var(--on-accent); font-size: 14px; font-weight: 600;
+}
+.tr-now:hover { filter: brightness(1.06); }
+
+@media (max-width: 720px) {
+  .tr { padding: 0 16px 32px; }
+  .tr-find { margin-left: 0; width: 100%; }
+  .tr-find .field { flex: 1; width: auto; min-width: 0; }
+  .tr-find .icon-btn, .q-row .icon-btn, .q-h .icon-btn { margin: 0; }
+  .tr-now-wrap { bottom: calc(16px + env(safe-area-inset-bottom)); }
+  .q-grip { display: none; }
+  .q-sheet { width: 100%; height: 100vh; height: 100dvh; max-height: none; border-radius: 0; }
+  .sheet-h.q-h { padding: 8px 8px 4px 16px; }
+  .q-now { padding: 0 16px 8px; }
+  .q-list { padding: 0 8px calc(16px + env(safe-area-inset-bottom)); }
+  .q-empty { padding: 4px 16px 24px; }
+}

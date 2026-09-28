@@ -610,13 +610,14 @@ class Page(PageBase):
         b, r = self.b, self.r
         deleted = lambda eid: r.q("SELECT deleted_at FROM episodes WHERE id = ?", eid)[0][0]
         try:
-            # Carol made nothing: no ⋯ on the rows, no Delete in the window's menu
+            # Carol made nothing: no ⋯ on a row with nothing to play, no Delete in the window's menu
             self.home(C)
             self.assertIsNone(b.js(f"document.querySelector('{ROW.format(self.wait)} .more')"))
             self.open(self.two)
             b.js("document.getElementById('w-more').click()")
             b.wait_js("!!document.querySelector('.menu')", 3, "menu")
-            self.assertEqual(b.js("[...document.querySelectorAll('.menu [role=menuitem]')].map(x => x.textContent)"), ["Details", "Open paper link"])
+            self.assertEqual(b.js("[...document.querySelectorAll('.menu [role=menuitem]')].map(x => x.textContent)"),
+                             ["Play next", "Add to Up next", "Details", "Open paper link"])
             b.js("document.getElementById('w-more').click()")
             # Bob deletes his only version of a paper: the row goes; Undo brings it back
             self.home(B)

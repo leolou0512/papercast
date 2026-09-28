@@ -462,5 +462,179 @@ class TestEvents(Base):
         self.assertIn(("graph", gid), kinds)
 
 
+class TestRevisions(Base):
+    """Every graph has a revision, one up with every change touching it; an edit sent with the
+    revision it was made on (base_rev) is refused with 409 stale when the graph moved on."""
+
+    def setUp(self):
+        super().setUp()
+        h = self.h
+        self.a, self.b, self.c = h.paper("Alpha paper", 2017, ["rv"]), h.paper("Beta paper", 2019, ["rv"]), h.paper("Gamma paper", 2020, ["rv"])
+        self.gid = self.graph_with(["rv"])
+
+    def rev(self, who="alice"):
+        v = self.view(self.gid, who)
+        self.assertEqual(v["rev"], v["graph"]["rev"])
+        return v["rev"]
+
+    def test_every_change_goes_up_one(self):
+        h, a, b, c, gid = self.h, self.a, self.b, self.c, self.gid
+        other = self.graph_with(["elsewhere"], name="Other")
+        r0 = self.rev()
+        self.assertEqual(self.rev(), r0, "a read changed the revision")
+        steps = [("POST", "/api/links", {"src": a, "dst": b, "grade": "s"}),
+                 ("PUT", None, {"grade": "e"}),
+                 ("DELETE", None, None),
+                 ("DELETE", f"/api/graphs/{gid}/papers/{c}", None),
+                 ("POST", f"/api/graphs/{gid}/papers", {"paper_id": c}),
+                 ("PUT", f"/api/graphs/{gid}", {"name": "Renamed"}),
+                 ("PUT", f"/api/graphs/{gid}", {"tags": ["rv", "more"]}),
+                 ("PUT", f"/api/papers/{a}/label", {"label": "Al"})]
+        lid = None
+        for k, (method, path, body) in enumerate(steps, 1):
+            path = path or f"/api/links/{lid}"
+            base = self.rev()
+            body = dict(body or {}, base_rev=base, graph_id=gid)
+            js = h.ok(method, path, body)
+            if lid is None and "link" in js:
+                lid = js["link"]["id"]
+            self.assertEqual(js["revs"].get(gid), base + 1, (method, path, js))
+            self.assertEqual(self.rev(), r0 + k, (method, path))
+        self.assertNotIn(other, js["revs"])
+        base = self.rev()
+        h.ok("PUT", f"/api/graphs/{gid}", {"locked": True, "base_rev": base}, who="root")
+        self.assertEqual(self.rev(), base + 1)
+        st, js = h.undo(who="root")                                 # the lock undone
+        self.assertEqual((st, js["revs"]), (200, {gid: base + 2}))
+        st, js = h.undo(who="root", redo=True)                      # and redone
+        self.assertEqual((st, js["revs"]), (200, {gid: base + 3}))
+        h.ok("PUT", f"/api/graphs/{gid}", {"locked": False}, who="root")
+        base = self.rev()
+        js = h.ok("DELETE", f"/api/graphs/{gid}?base_rev={base}")
+        self.assertEqual(js["revs"], {gid: base + 1})
+        st, js = h.undo()                                           # back, one more
+        self.assertEqual((st, js["revs"]), (200, {gid: base + 2}))
+        self.assertEqual(self.rev(), base + 2)
+        # no change, no new revision
+        self.assertTrue(h.ok("PUT", f"/api/graphs/{gid}", {"name": "Renamed", "base_rev": 1})["already"])
+        self.assertEqual(self.rev(), base + 2)
+        self.assertEqual([g["rev"] for g in h.ok("GET", "/api/graphs")["graphs"] if g["id"] == gid], [base + 2])
+
+    def test_a_stale_edit_is_refused_and_changes_nothing(self):
+        h, a, b, c, gid = self.h, self.a, self.b, self.c, self.gid
+        seen = self.rev()
+        lk = self.link(a, b, "s", who="bob")                        # Bob, after Alice loaded the graph
+        n, snap = h.log_count(), (h.link_row(a, b)["grade"], h.link_row(a, b)["state"])
+        for method, path, body in [("POST", "/api/links", {"src": b, "dst": c, "grade": "w"}),
+                                   ("PUT", f"/api/links/{lk['id']}", {"grade": "e"}),
+                                   ("DELETE", f"/api/links/{lk['id']}", {}),
+                                   ("DELETE", f"/api/graphs/{gid}/papers/{a}", {}),
+                                   ("PUT", f"/api/graphs/{gid}", {"name": "Mine now"}),
+                                   ("PUT", f"/api/papers/{c}/label", {"label": "G"}),
+                                   ("DELETE", f"/api/graphs/{gid}", {})]:
+            st, js = h.req(method, path, dict(body, base_rev=seen, graph_id=gid))
+            self.assertEqual((st, js["error"]), (409, "stale"), (method, path, js))
+            self.assertEqual((js["rev"], js["base_rev"], js["graph_id"], js["actor"]), (seen + 1, seen, gid, "human"))
+            self.assertEqual(js["by"]["name"], "Bob")
+        # the same through the query string (a DELETE without a body)
+        st, js = h.req("DELETE", f"/api/links/{lk['id']}?base_rev={seen}&graph_id={gid}")
+        self.assertEqual((st, js["error"]), (409, "stale"))
+        self.assertEqual(h.log_count(), n)
+        self.assertEqual((h.link_row(a, b)["grade"], h.link_row(a, b)["state"]), snap)
+        self.assertEqual(self.view(gid)["graph"]["name"], "G")
+        # with the revision it has now, the edit goes through
+        js = h.ok("PUT", f"/api/links/{lk['id']}", {"grade": "e", "base_rev": self.rev(), "graph_id": gid})
+        self.assertEqual(js["link"]["grade"], "e")
+        # an edit someone else already made is done, whatever the revision says
+        js = h.ok("PUT", f"/api/links/{lk['id']}", {"grade": "e", "base_rev": seen, "graph_id": gid})
+        self.assertTrue(js["already"])
+        st, js = h.req("POST", "/api/links", {"src": a, "dst": b, "grade": "e", "base_rev": seen, "graph_id": gid})
+        self.assertEqual((st, js["already"], js["link"]["id"]), (200, True, lk["id"]))
+        st, js = h.req("POST", "/api/links", {"src": a, "dst": b, "grade": "w", "base_rev": seen, "graph_id": gid})
+        self.assertEqual((st, js["error"]), (409, "stale"))       # not the same link: the page must look again
+        self.assertEqual(h.log_count(), n + 1)
+        # a revision needs the graph it belongs to; a bad one is a 400
+        self.assertEqual(h.req("POST", "/api/links", {"src": b, "dst": c, "base_rev": seen})[0], 400)
+        self.assertEqual(h.req("POST", "/api/links", {"src": b, "dst": c, "base_rev": "x", "graph_id": gid})[0], 400)
+        # a graph deleted meanwhile
+        other = self.graph_with(["rv"], name="Other", who="bob")
+        orev = self.view(other)["rev"]
+        h.ok("DELETE", f"/api/graphs/{other}", who="bob")
+        st, js = h.req("POST", "/api/links", {"src": b, "dst": c, "grade": "s", "base_rev": orev, "graph_id": other})
+        self.assertEqual((st, js["error"], js["deleted"]), (409, "stale", True))
+
+    def test_members_that_come_by_their_tags_count(self):
+        h, gid = self.h, self.gid
+        seen = self.rev()
+        h.paper("Delta paper arrives", 2021, ["rv"])               # an upload: no edit here
+        st, js = h.req("PUT", f"/api/graphs/{gid}", {"name": "N", "base_rev": seen})
+        self.assertEqual((st, js["error"], js["actor"]), (409, "stale", "library"))
+        v = self.view(gid)
+        self.assertEqual((v["rev"], len(v["nodes"])), (seen + 1, 4))
+        self.assertEqual(self.rev(), seen + 1)
+        h.ok("PUT", f"/api/graphs/{gid}", {"name": "N", "base_rev": seen + 1})
+
+    def test_undo_and_redo_check_the_graph_the_page_shows(self):
+        h, a, b, c, gid = self.h, self.a, self.b, self.c, self.gid
+        other = self.graph_with(["other"], name="Other")
+        x, y = h.paper("Other one paper", 2018, ["other"]), h.paper("Other two paper", 2019, ["other"])
+        self.link(x, y)                                             # Alice's last edit: in Other
+        seen = self.rev()
+        self.link(a, b, who="bob")                                  # Bob changes the graph Alice shows
+        log = h.ok("GET", "/api/graph-log")
+        e = log["undo"]["mine"]
+        st, js = h.req("POST", "/api/graph-log/revert", {"scope": "mine", "expect": e["id"], "base_rev": seen, "graph_id": gid})
+        self.assertEqual(st, 200, js)                               # her undo does not touch it: no check
+        self.assertEqual(h.link_row(x, y)["state"], "removed")
+        self.assertIn(other, js["revs"])
+        e = h.ok("GET", "/api/graph-log")["undo"]["any"]             # Bob's link, in the graph she shows
+        st, js = h.req("POST", "/api/graph-log/revert", {"scope": "any", "expect": e["id"], "base_rev": seen, "graph_id": gid})
+        self.assertEqual((st, js["error"]), (409, "stale"))
+        self.assertEqual(h.link_row(a, b)["state"], "active")
+        st, js = h.req("POST", "/api/graph-log/revert", {"scope": "any", "expect": e["id"], "base_rev": self.rev(), "graph_id": gid})
+        self.assertEqual((st, js["revs"]), (200, {gid: seen + 2}))
+        r = h.ok("GET", "/api/graph-log")["redo"]["any"]
+        st, js = h.req("POST", "/api/graph-log/revert", {"scope": "any", "expect": r["id"], "redo": True, "base_rev": seen, "graph_id": gid})
+        self.assertEqual((st, js["error"]), (409, "stale"))
+        st, js = h.req("POST", "/api/graph-log/revert", {"scope": "any", "expect": r["id"], "redo": True, "base_rev": seen + 2, "graph_id": gid})
+        self.assertEqual((st, js["log"]["kind"]), (200, "redo"))
+        self.assertEqual(h.link_row(a, b)["state"], "active")
+
+    def test_a_new_change_leaves_nothing_to_redo(self):
+        h, a, b, c = self.h, self.a, self.b, self.c
+        self.link(a, b)
+        h.undo()
+        log = h.ok("GET", "/api/graph-log")
+        self.assertEqual((log["redo"]["mine"]["kind"], log["redo"]["any"]["kind"]), ("undo", "undo"))
+        self.link(b, c, who="bob")                                  # someone else's change: mine can still redo
+        log = h.ok("GET", "/api/graph-log")
+        self.assertIsNotNone(log["redo"]["mine"])
+        self.assertIsNone(log["redo"]["any"])
+        self.link(a, c)                                             # my own new change: nothing of mine to redo
+        self.assertIsNone(h.ok("GET", "/api/graph-log")["redo"]["mine"])
+        # undo, undo, then redo, redo walks forward again
+        h.undo()
+        h.undo()                                                    # the b->c link is Bob's: mine is a->b's undo
+        log = h.ok("GET", "/api/graph-log")
+        self.assertEqual(log["redo"]["mine"]["kind"], "undo")
+
+    def test_graph_events_carry_the_revision(self):
+        h, a, b, gid = self.h, self.a, self.b, self.gid
+        seen = self.rev()
+        sub = events.subscribe(None)
+        try:
+            self.link(a, b, who="bob")
+            got = []
+            while not sub.q.empty():
+                got.append(sub.q.get_nowait())
+        finally:
+            events.unsubscribe(sub)
+        ev = [d for _, k, d in got if k == "graph" and d.get("id") == gid]
+        self.assertEqual(len(ev), 1)
+        self.assertEqual((ev[0]["graph_rev"], ev[0]["by"]["name"], ev[0]["log_op"], ev[0]["deleted"]), (seen + 1, "Bob", "link.add", False))
+        v = self.view(gid)
+        self.assertEqual((v["graph"]["changed"]["by"]["name"], v["graph"]["changed"]["actor"]), ("Bob", "human"))
+
+
 if __name__ == "__main__":
     unittest.main()

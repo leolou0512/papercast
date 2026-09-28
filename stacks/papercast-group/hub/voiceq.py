@@ -318,6 +318,9 @@ def status(req, eid):
         job = _job(c, eid)
         if job is None:
             raise HTTPError(404, "no_such_job", f"no voice job for {eid}")
+        gone = c.execute("SELECT deleted_at FROM episodes WHERE id = ?", (eid,)).fetchone()
+        if gone is not None and gone["deleted_at"]:   # its maker deleted it: the worker stops voicing
+            raise HTTPError(410, "deleted", f"{eid} was deleted")
         if job["state"] != "claimed":
             raise HTTPError(409, "not_claimed", f"{eid} is {job['state']}, not claimed")
         _check_holder(req, job, body)

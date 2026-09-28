@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Papers</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<div class="app">
+  <aside class="list-pane" id="list-pane">
+    <div class="offline" id="offline" hidden></div>
+    <header class="list-head">
+      <h1>Papers</h1>
+      <div class="head-btns">
+        <button type="button" class="icon-btn" id="map-btn" aria-label="Paper map" title="Paper map">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M6.4 6.9 8.7 12.4M13.6 6.2 11.3 12.2M7.4 5.2h5.2"/><circle cx="5.4" cy="5.2" r="2"/><circle cx="14.6" cy="4.6" r="2"/><circle cx="10" cy="14.6" r="2.4"/></svg>
+        </button>
+        <button type="button" class="icon-btn" id="set-btn" aria-label="Settings" title="Settings">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="10" cy="10" r="2.6"/><path d="M10 2.2v2.4M10 15.4v2.4M2.2 10h2.4M15.4 10h2.4M4.5 4.5l1.7 1.7M13.8 13.8l1.7 1.7M4.5 15.5l1.7-1.7M13.8 6.2l1.7-1.7"/></svg>
+        </button>
+      </div>
+    </header>
+    <div class="search">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="7" cy="7" r="5"/><path d="m11 11 3.5 3.5" stroke-linecap="round"/></svg>
+      <input class="field" type="search" id="search" placeholder="Search papers or people" aria-label="Search papers" autocomplete="off">
+      <button type="button" class="icon-btn sort-btn" id="sort-btn" aria-label="Sort" aria-haspopup="menu" aria-expanded="false"></button>
+    </div>
+    <div class="filter" id="filter" hidden><span class="f-lbl">Tag: <b id="filter-tag"></b></span><button type="button" class="text-btn" id="filter-clear">Clear</button></div>
+    <ul class="rows" id="rows"></ul>
+    <div class="rows-end" id="rows-end" aria-hidden="true"></div>
+    <div class="mini" id="mini" role="button" tabindex="0" aria-label="Open the paper that is playing" hidden>
+      <div class="prog" id="mini-prog"></div>
+      <button type="button" class="mp-play" id="mini-play" aria-label="Play"></button>
+      <div class="mp-text"><div class="mp-title" id="mini-title"></div><div class="mp-sub t" id="mini-sub"></div></div>
+    </div>
+  </aside>
+
+  <main class="window" id="win">
+    <div class="nothing" id="nothing"><div><div class="big">Nothing open</div><div>Pick a paper.</div></div></div>
+    <div class="paper" id="paper" hidden>
+      <div class="phone-top">
+        <button type="button" class="icon-btn" id="back" aria-label="Back to papers"></button>
+        <button type="button" class="icon-btn" id="w-more-phone" aria-label="More"></button>
+      </div>
+      <div class="strip-anchor"><div class="strip" id="strip">
+        <div class="strip-in">
+          <button type="button" class="icon-btn s-back" id="s-back" aria-label="Back to papers"></button>
+          <button type="button" class="s-play" id="s-play" aria-label="Play"></button>
+          <div class="s-text"><div class="s-title" id="s-title"></div><div class="s-sub t" id="s-sub"></div></div>
+        </div>
+        <div class="s-prog" id="s-prog"></div>
+      </div></div>
+      <section class="pz" id="pz"><div class="col">
+        <div class="pz-head">
+          <div class="grow">
+            <h2 id="w-title"></h2>
+            <p class="byline" id="w-by"></p>
+            <p class="maker" id="w-maker"></p>
+            <p class="details" id="w-details" hidden></p>
+            <div class="w-tags" id="w-tags" hidden></div>
+            <button type="button" class="lbox" id="w-listened" role="checkbox" aria-checked="false" hidden><span class="box" aria-hidden="true"></span><span>Listened</span></button>
+          </div>
+          <button type="button" class="icon-btn" id="w-more" aria-label="More"></button>
+        </div>
+        <div class="player" id="player" hidden>
+          <div class="scrub" id="scrub" role="slider" tabindex="0" aria-label="Position" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0">
+            <div class="track"></div><div class="fill" id="fill"></div><div class="thumb" id="thumb"></div>
+          </div>
+          <div class="times t"><span id="p-el">0:00</span><span id="p-rem">&minus;0:00</span></div>
+          <div class="controls">
+            <div class="left"><button type="button" class="speed t" id="p-speed" aria-label="Playback speed">1&times;</button></div>
+            <div class="mid">
+              <button type="button" class="skip" id="p-back" aria-label="Back 15 seconds"></button>
+              <button type="button" class="play" id="p-play" aria-label="Play"></button>
+              <button type="button" class="skip" id="p-fwd" aria-label="Forward 30 seconds"></button>
+            </div>
+            <div class="right"><button type="button" class="explain" id="x-open" disabled><span class="x-icon" id="x-icon"></span><span>Explainer</span></button></div>
+          </div>
+        </div>
+        <div class="pz-state" id="w-state" hidden></div>
+      </div></section>
+      <section class="versions" id="versions" hidden><div class="col">
+        <h3 class="sec-h">Versions</h3>
+        <div class="vlist" id="vlist" role="radiogroup" aria-label="Versions"></div>
+      </div></section>
+    </div>
+    <div class="settings" id="settings" hidden>
+      <div class="phone-top">
+        <button type="button" class="icon-btn" id="set-back" aria-label="Back to papers"></button>
+      </div>
+      <section class="pz set-head"><div class="col">
+        <h2>Settings</h2>
+        <p class="byline" id="set-who"></p>
+        <div class="tabs" id="set-tabs" role="tablist" aria-label="Settings"></div>
+      </div></section>
+      <section class="set-body"><div class="col" id="set-body"></div></section>
+    </div>
+  </main>
+</div>
+
+<audio id="audio" preload="metadata"></audio>
+<div class="toast" id="toast" role="status" hidden><span class="msg-t" id="toast-msg"></span><button type="button" id="toast-act" hidden></button></div>
+<div id="map" hidden></div>
+<div class="scrim" id="overlay" hidden>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="ov-label">
+    <div class="sheet-h"><span id="ov-label">Explainer</span>
+      <button type="button" class="icon-btn" id="x-close" aria-label="Close the explainer"></button></div>
+    <iframe id="x-frame" class="x-frame" sandbox="allow-scripts allow-popups" referrerpolicy="no-referrer" title="Explainer"></iframe>
+  </div>
+</div>
+</body>
+</html>

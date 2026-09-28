@@ -1,0 +1,34 @@
+# papercast-group voice worker: takes finished scripts from the hub, one at a time, and voices
+# them with papercast-voice (Breeze TTS 2 on this machine's GPU, waiting while anyone else uses
+# it). Installed by deploy/install.sh; @H@ is the install.
+[Unit]
+Description=papercast-group voice worker (Breeze on the local GPU)
+Documentation=file://@H@/app/papercast-group/deploy/README.md
+After=pcg-hub.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+EnvironmentFile=@H@/worker.env
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=@H@
+ExecStart=@H@/venv/bin/python @H@/app/papercast-group/deploy/voice_worker.py
+Restart=always
+RestartSec=10
+# Stopping the unit stops the voice it started (the whole cgroup gets SIGTERM). Finished chunks
+# stay on disk, and the next start carries on with the same episode (current.json).
+KillMode=control-group
+TimeoutStopSec=40
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+UMask=0077
+# Measured on stibnite: the Breeze engine process 5.7 GB resident, the orchestrator 1.4 GB at
+# its final check; the CPU voice (Kokoro, only if asked for) 11.8 GB. 24 GB covers either with
+# room, and stops a leak before it reaches other people's jobs (perov has 251 GB, shared).
+MemoryMax=24G
+MemorySwapMax=0
+OOMPolicy=continue
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,16 @@
+# Nightly full layout of every graph (SPEC.md section 8: 8 starts, run to rest), A5's
+# `python -m hub.layout --all`. Guarded: until hub/layout.py has a command line this says so
+# and succeeds. Started by pcg-layout.timer.
+[Unit]
+Description=papercast-group nightly graph layout
+
+[Service]
+Type=oneshot
+EnvironmentFile=@H@/hub.env
+WorkingDirectory=@H@/app/papercast-group
+ExecStart=/bin/sh -c 'if grep -q "__main__" hub/layout.py; then exec @H@/venv/bin/python -m hub.layout --all; else echo "hub/layout.py has no command line yet: nothing laid out"; fi'
+Nice=15
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+UMask=0077
+MemoryMax=8G

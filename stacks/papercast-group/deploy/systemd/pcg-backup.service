@@ -1,0 +1,16 @@
+# Nightly backup of the hub's data (tools/backup.py, another part's). Guarded: until that script
+# is in the installed code this says so and succeeds. Started by pcg-backup.timer.
+[Unit]
+Description=papercast-group nightly backup
+
+[Service]
+Type=oneshot
+EnvironmentFile=@H@/hub.env
+Environment=PCG_BACKUP_DIR=@H@/backups
+WorkingDirectory=@H@/app/papercast-group
+# $$ is a literal $ for the shell (systemd would expand $PCG_DATA itself otherwise).
+ExecStart=/bin/sh -c 'if [ -f tools/backup.py ]; then exec @H@/venv/bin/python tools/backup.py --data "$$PCG_DATA" --dest "$$PCG_BACKUP_DIR"; else echo "tools/backup.py is not installed yet: nothing backed up"; fi'
+Nice=19
+IOSchedulingClass=idle
+UMask=0077
+MemoryMax=4G

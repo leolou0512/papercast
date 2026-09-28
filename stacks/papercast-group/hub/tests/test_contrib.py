@@ -406,7 +406,7 @@ class ContribTest(unittest.TestCase):
         self.assertEqual(ep["state"], "waiting-for-gpu", ep["check_report"])
         ep = self.version(alice, pid, script_text=H.script(extra="Alice, the score is a gradient."))
         self.assertEqual(ep["state"], "rejected")
-        self.assertTrue(any("names the listener (Alice)" in p for p in ep["check_report"]), ep["check_report"])
+        self.assertTrue(any(p.startswith("names the listener") and '("Alice")' in p for p in ep["check_report"]), ep["check_report"])
         leo = self.h.user("Leo")
         pid2, _ = self.paper(leo, 6)
         ep = self.version(leo, pid2, script_text=H.script(extra="Leo, the score is a gradient."))

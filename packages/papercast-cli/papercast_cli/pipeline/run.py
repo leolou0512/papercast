@@ -753,16 +753,19 @@ class Job:
                     self._classes = wording.load(path)
                 except (ValueError, KeyError, TypeError, OSError, re.error):
                     self._classes = False
-        if not self._classes or not hasattr(wording, "_CLASSES"):
+        if not self._classes:
             yield
             return
+        # common.wording.hits() asks classes() for its list: for these checks it is the hub's
+        # (whose listener-name class already carries this person's name).
         with _WORDING_LOCK:
-            old = wording._CLASSES
-            wording._CLASSES = self._classes
+            old = wording.classes
+            mine = self._classes
+            wording.classes = lambda listener_name=None, data=None: mine
             try:
                 yield
             finally:
-                wording._CLASSES = old
+                wording.classes = old
 
     # ---------------------------------------------------------------- 5. the episode
     def _delivered(self, kind: str) -> bool:

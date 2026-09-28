@@ -366,38 +366,7 @@ def listener_name(name: str):
     return None
 
 
-def _script_problems(text: str, res: dict, maker_name: str) -> list:
-    """check()'s problems plus common.wording's never-wanted list, with the listener-name class
-    taken from the maker's name (SPEC.md section 10) instead of the list's own (Leo's)."""
-    problems = list(res.get("problems") or [])
-    reported = set(res.get("wording") or [])
-    name_cls = next((c for c in wording.classes() if c.get("id") == "listener_name"), None)
-    listener = listener_name(maker_name)
-    list_names = list(name_cls.get("phrases") or []) if name_cls else []
-    if name_cls and listener not in list_names:
-        if name_cls["wrong"] in reported:           # that is someone else's name here
-            problems = [p for p in problems if not p.startswith(name_cls["wrong"])]
-            reported.discard(name_cls["wrong"])
-    for c, found in wording.hits(text, "script"):
-        if c.get("id") == "listener_name" and listener not in list_names:
-            continue
-        if c["wrong"] in reported:
-            continue
-        reported.add(c["wrong"])
-        problems.append(f"{c['wrong']}: {wording.quoted(found)}. {c['fix']}")
-    if listener and listener not in list_names:
-        rx = re.compile(r"(?<![\w'’-])" + re.escape(listener) + r"(?![\w-])")
-        said = [s for s in checks.sentences(text) if rx.search(s)]
-        if said:
-            wrong = name_cls["wrong"] if name_cls else "names the listener"
-            fix = name_cls["fix"] if name_cls else "Delete the name."
-            listed = "; ".join(f'({i}) "{s}"' for i, s in enumerate(said[:5], 1))
-            problems.append(f"{wrong} ({listener}), in {len(said)} sentence{'s' if len(said) > 1 else ''}: "
-                            f"{listed}. {fix}")
-    return problems
-
-
-def check_files(epdir: Path, lo: float, hi: float, maker_name: str) -> tuple:
+def check_files(epdir: Path, lo: float, hi: float, maker_name: str, wording_data=None) -> tuple:
     """(problems in plain words, {"words", "minutes"}) for an episode's stored files."""
     problems, stats = [], {"words": None, "minutes": None}
     sp = epdir / "script.md"
@@ -411,9 +380,14 @@ def check_files(epdir: Path, lo: float, hi: float, maker_name: str) -> tuple:
         except UnicodeDecodeError:
             problems.append("script.md is not UTF-8 text")
         else:
-            res = checks.check(text, WPM, lo, hi)
+            # common's check, with the never-wanted list the episode's base version carries and
+            # the maker's name in its listener-name class: the same judgement as the CLI's
+            try:
+                res = checks.check(text, WPM, lo, hi, listener_name=maker_name or None, data=wording_data)
+            except ValueError:              # a stored wording list that no longer loads
+                res = checks.check(text, WPM, lo, hi, listener_name=maker_name or None)
             stats = {"words": res.get("words"), "minutes": res.get("minutes")}
-            problems += _script_problems(text, res, maker_name)
+            problems += list(res.get("problems") or [])
     hp = epdir / "explainer.html"
     if not hp.is_file():
         problems.append("explainer.html is missing")
@@ -495,8 +469,11 @@ def run_checks(cfg, eid: str) -> None:
     epdir = cfg.episodes / eid
     manifest = json.loads((epdir / "bundle-manifest.json").read_text(encoding="utf-8"))
     maker = c.execute("SELECT name FROM users WHERE id = ?", (ep["made_by"],)).fetchone()
-    lo, hi = minutes_range(_base_for(c, ep["base_version"]))
-    problems, stats = check_files(epdir, lo, hi, maker["name"] if maker else "")
+    base = _base_for(c, ep["base_version"])
+    lo, hi = minutes_range(base)
+    wdata = db.loads(base["wording"], None) if base is not None else None
+    problems, stats = check_files(epdir, lo, hi, maker["name"] if maker else "",
+                                  wdata if isinstance(wdata, dict) and wdata.get("classes") else None)
     now = db.now()
     with db.transaction() as t:
         cur = t.execute("SELECT state FROM episodes WHERE id = ?", (eid,)).fetchone()
@@ -582,7 +559,17 @@ def prompt(req):
     r = db.conn().execute("SELECT * FROM base_prompts ORDER BY version DESC LIMIT 1").fetchone()
     if r is None:
         raise HTTPError(404, "no_base_prompt", "there is no base prompt yet; an admin adds one on the web")
-    req.send_json(200, {"version": r["version"], "guideline": r["guideline"], "wording": db.loads(r["wording"], {})})
+    w = db.loads(r["wording"], {})
+    try:
+        name = req.user["name"] if req.user is not None else None
+    except (KeyError, IndexError, TypeError):
+        name = None
+    if isinstance(w, dict) and name:        # the caller's name, so the CLI's checks match the hub's
+        for cl in w.get("classes") or []:
+            if isinstance(cl, dict) and cl.get("id") == wording.NAME_CLASS:
+                cl["phrases"] = list(cl.get("phrases") or []) + [p for p in wording.name_phrases(name)
+                                                                  if p not in (cl.get("phrases") or [])]
+    req.send_json(200, {"version": r["version"], "guideline": r["guideline"], "wording": w})
 
 
 def _prefs_of(c, uid) -> dict:

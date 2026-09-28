@@ -487,6 +487,43 @@ def bootstrap(cfg, email: str) -> dict:
     return {**got, "default_password": row["pw_hash"] is None, "link": link}
 
 
+def server_admin(cfg, email: str, password: str) -> dict:
+    """An admin account made on the server only (python3 -m hub.auth admin-account EMAIL): any email
+    domain, unlike the ledger's box on the page, since the lab's own admin need not be a student or
+    member of staff. It goes on the ledger (so signing in works as for everyone), is an admin, and has
+    this password at once (no forced change: the person running it chose it). Its sessions end."""
+    db.init(cfg)
+    db.migrate()
+    e = (email or "").strip().lower()
+    local, _, dom = e.partition("@")
+    if not local or "." not in dom or not re.fullmatch(r"[a-z0-9._+-]{1,64}", local):
+        raise HTTPError(400, "bad_email", "That is not an email address.")
+    name = re.sub(r"[^a-z0-9._-]", "", local)[:32]
+    if len(name) < 3:
+        raise HTTPError(400, "bad_email", "The part before the @ needs at least 3 letters or digits for a username.")
+    now = db.now()
+    with db.transaction() as c:
+        clash = c.execute("SELECT id FROM users WHERE username = ? AND email != ?", (name, e)).fetchone()
+        if clash is not None:
+            raise HTTPError(409, "username_taken", f"The username {name} belongs to another account.")
+        row = c.execute("SELECT id FROM users WHERE email = ?", (e,)).fetchone()
+        if row is None:
+            uid = c.execute("INSERT INTO users(email, name, role, disabled, created_at) VALUES (?, ?, 'admin', 0, ?)",
+                            (e, name, now)).lastrowid
+        else:
+            uid = row["id"]
+        problem = password_problem(password, {"username": name, "email": e})
+        if problem:
+            raise HTTPError(400, "weak_password", problem)
+        c.execute("UPDATE users SET role = 'admin', disabled = 0, username = ?, pw_hash = ?, "
+                  "session_v = COALESCE(session_v, 0) + 1 WHERE id = ?", (name, hash_password(password), uid))
+        if c.execute("SELECT 1 FROM allowed_emails WHERE email = ?", (e,)).fetchone() is None:
+            c.execute("INSERT INTO allowed_emails(email, note, added_by, added_at) VALUES (?, ?, NULL, ?)",
+                      (e, "server admin account", now))
+        log_event("server_admin", user_id=uid, email=e, detail="made or reset on the server", c=c)
+    return {"user_id": uid, "email": e, "username": name}
+
+
 # ---------------------------------------------------------------- email (only the reset link)
 
 def email_ready(cfg) -> bool:
@@ -624,7 +661,9 @@ def _find_login(ident: str):
     if "@" in s:
         local, _, dom = s.rpartition("@")
         if dom not in IMPERIAL:
-            return None
+            # a server admin account (admin-account) may have any domain: its exact email
+            r = db.conn().execute("SELECT username FROM users WHERE email = ? AND username IS NOT NULL", (s,)).fetchone()
+            return account(username=r["username"]) if r is not None else None
         s = local
     if not s or len(s) > CODE_MAX or not CODE_RX.match(s):
         return None

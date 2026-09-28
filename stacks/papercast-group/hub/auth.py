@@ -907,6 +907,7 @@ USAGE = """usage: python3 -m hub.auth bootstrap EMAIL
        python3 -m hub.auth allow remove EMAIL...
        python3 -m hub.auth allow import FILE [--note TEXT]   (one email per line, # comments; - reads stdin)
        python3 -m hub.auth email-test ADDRESS
+       python3 -m hub.auth admin-account EMAIL   (password mode: an admin with any email domain; the password is read from stdin)
 (from stacks/papercast-group, with the hub's settings: set -a; . ~/papercast-group/hub.env; set +a)"""
 
 
@@ -998,6 +999,20 @@ def _email_test_cmd(cfg, to: str) -> int:
     return 0
 
 
+def _admin_account_cmd(cfg, email) -> int:
+    """The password comes on stdin (never the command line, so never in the process list or a
+    shell's history): the first line, without its newline."""
+    if cfg.auth != "password":
+        print("admin-account is for password sign-in (PCG_AUTH=password)", file=sys.stderr)
+        return 2
+    import getpass
+    pw = getpass.getpass("Password: ") if sys.stdin.isatty() else sys.stdin.readline().rstrip("\r\n")
+    from . import accounts
+    got = accounts.server_admin(cfg, email, pw)
+    print(f"admin {got['email']} (username {got['username']}): password set; sign in at {cfg.public_url}/signin")
+    return 0
+
+
 def main(argv=None) -> int:
     import argparse
     from . import config as C
@@ -1012,6 +1027,8 @@ def main(argv=None) -> int:
     a.add_argument("--note", default="")
     t = sub.add_parser("email-test")
     t.add_argument("address")
+    s = sub.add_parser("admin-account")
+    s.add_argument("email")
     args = ap.parse_args(argv)
     if args.cmd is None or (args.cmd == "allow" and args.what != "list" and not args.emails) \
             or (args.cmd == "allow" and args.what == "import" and len(args.emails) != 1):
@@ -1023,6 +1040,8 @@ def main(argv=None) -> int:
             return _bootstrap_cmd(cfg, args.email)
         if args.cmd == "allow":
             return _allow_cmd(cfg, args)
+        if args.cmd == "admin-account":
+            return _admin_account_cmd(cfg, args.email)
         return _email_test_cmd(cfg, args.address)
     except HTTPError as e:
         print(e.msg, file=sys.stderr)

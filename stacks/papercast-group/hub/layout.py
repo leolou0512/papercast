@@ -241,7 +241,9 @@ def _full(ids, s, t, deg, stored, rng, deadline, keep_margin):
     if stored:
         starts.append(("current", _place(ids, s, t, stored, rng)[0], False))
     for name, fn in (("graph distances", _mds_start), ("spectral", _spectral_start)):
-        if len(starts) < FULL_STARTS and len(s):
+        # both give two coordinates only from three papers up (an eigen-decomposition of an n x n
+        # matrix has n vectors): smaller graphs start from random places instead
+        if len(starts) < FULL_STARTS and len(s) and n >= 3:
             try:
                 starts.append((name, fn(n, s, t), True))
             except Exception:                       # an eigensolver that does not converge: skip that start
@@ -252,6 +254,8 @@ def _full(ids, s, t, deg, stored, rng, deadline, keep_margin):
         k += 1
     results, per = [], None
     for name, p0, scale in starts:
+        if p0.ndim != 2 or p0.shape[1] < 2:          # never fewer than two coordinates per paper
+            p0 = np.hstack([p0.reshape(n, -1), np.zeros((n, 2))])[:, :2]
         if results and per is not None and time.monotonic() + per > deadline:
             break                                   # the next start would not finish in time
         t1 = time.monotonic()

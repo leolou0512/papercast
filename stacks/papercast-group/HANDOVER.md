@@ -72,9 +72,8 @@ Users). With a Gmail account and its app password:
 
 ## Update the code
 
-The code is the papercast-group git repository. On 2026-09-28 it lived only on Leo's machine
-(stibnite, `/home/leo/papercast-group`, no remote): get a copy from him before he leaves. From a
-machine with it:
+The code is the git repository https://github.com/leolou0512/papercast (private: ask Leo, or
+whoever owns it after him, for access or to transfer it). From a checkout of it:
 
     bash stacks/papercast-group/tools/sync_to_perov.sh YOU@100.97.205.90 --install
 

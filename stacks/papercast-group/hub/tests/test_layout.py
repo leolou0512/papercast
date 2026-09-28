@@ -43,6 +43,18 @@ class TestPhysics(unittest.TestCase):
         self.assertEqual(layout.PARAMS, dict(center=0.4, repel=10, link=0.7, dist=70, node=1.0))
         self.assertEqual((layout.FULL_STARTS, layout.WARM_TICKS), (8, 400))
 
+    def test_full_layout_of_tiny_graphs(self):
+        """One or two papers, with or without a link: no eigen-start with fewer vectors than
+        coordinates (the nightly --all crashed on perov's two-paper graph, 2026-09-28)."""
+        rng = np.random.default_rng(1)
+        for n, pairs in ((1, []), (2, []), (2, [(0, 1)]), (3, [(0, 1), (1, 2)])):
+            s = np.array([a for a, _ in pairs], dtype=int)
+            t = np.array([b for _, b in pairs], dtype=int)
+            deg = np.maximum(np.bincount(np.r_[s, t], minlength=n).astype(float), 1)
+            pos, kept, runs = layout._full(list(range(n)), s, t, deg, {}, rng, time.monotonic() + 60, 0.0)
+            self.assertEqual(pos.shape, (n, 2))
+            self.assertTrue(np.isfinite(pos).all())
+
     def test_a_chain_comes_to_rest(self):
         n = 12
         s, t = np.arange(n - 1), np.arange(1, n)

@@ -1,0 +1,91 @@
+/* papercast-group: the first-sign-in tour, "Tour again" and the "?" help (tour.js), in the page's
+   own tokens (app.css). The scrim is the one dark thing: the page under it is untouched, seen
+   through a hole round one control, ringed in the accent. The tour's words and the help panel
+   are overlays, so they cast the menus' shadow. Every control is a 44 x 44 px tap. */
+:root { --tour-scrim: rgba(0, 0, 0, .56); --tour-card: var(--bg); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --tour-scrim: rgba(0, 0, 0, .72); --tour-card: var(--surface); }
+}
+:root[data-theme="dark"] { --tour-scrim: rgba(0, 0, 0, .72); --tour-card: var(--surface); }
+
+/* ---------- the tour ---------- */
+.tour-block { position: fixed; inset: 0; z-index: 80; touch-action: none; }
+.tour-hole {
+  position: fixed; z-index: 81; pointer-events: none; border-radius: 10px;
+  box-shadow: 0 0 0 2px var(--accent), 0 0 0 200vmax var(--tour-scrim);
+}
+.tour-arrow { position: fixed; left: 0; top: 0; width: 100%; height: 100%; z-index: 82; pointer-events: none; overflow: visible; }
+.tour-arrow path { fill: none; stroke: var(--accent); stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+.tour-card {
+  position: fixed; z-index: 83; left: 0; top: 0; width: max-content; min-width: 220px; max-width: min(360px, calc(100vw - 24px));
+  padding: 14px 12px 8px 16px; background: var(--tour-card); color: var(--text); border-radius: 10px;
+  border: 1px solid var(--hairline); box-shadow: 0 8px 24px rgba(0, 0, 0, .18);
+}
+.tour-card:focus { outline: none; }
+.tour-t { margin: 0 4px 0 0; font-size: 16px; line-height: 22px; font-weight: 600; overflow-wrap: anywhere; }
+.tour-row { display: flex; align-items: center; gap: 4px; margin-top: 6px; }
+.tour-n { flex: 1; font-size: 13px; line-height: 18px; color: var(--text-2); }
+.tour-card .text-btn { margin: 0; padding: 0 10px; min-width: 44px; }
+.tour-card .btn-accent { margin: 0; min-width: 76px; }
+.tour-card .text-btn:disabled { visibility: hidden; }
+.tour-wait .tour-card { opacity: .6; }
+.tour-skip {
+  position: fixed; z-index: 83; height: 44px; padding: 0 16px; border-radius: 22px;
+  background: rgba(255, 255, 255, .16); color: #FFFFFF; font-size: 14px; font-weight: 600;
+}
+.tour-skip:hover { background: rgba(255, 255, 255, .26); }
+.tour-skip:focus-visible { outline: 2px solid #FFFFFF; outline-offset: 2px; }
+.tour-skip.at-rm { top: calc(50% - 22px); right: 12px; }
+.tour-skip.at-lm { top: calc(50% - 22px); left: 12px; }
+.tour-skip.at-tr { top: 12px; right: 12px; }
+.tour-skip.at-br { bottom: 12px; right: 12px; }
+.tour-skip.at-tl { top: 12px; left: 12px; }
+.tour-skip.at-bl { bottom: 12px; left: 12px; }
+@media (prefers-reduced-motion: no-preference) {
+  .tour.glide .tour-hole { transition: left .3s ease, top .3s ease, width .3s ease, height .3s ease; }
+  .tour.glide .tour-card { transition: left .3s ease, top .3s ease; }
+  .tour-card:not([hidden]) { animation: tour-in .2s ease; }
+}
+@keyframes tour-in { from { opacity: 0; } }
+
+/* "Tour again": for three days, low in the corner of the list */
+.tour-again {
+  position: fixed; z-index: 20; bottom: 16px; left: 340px; transform: translateX(calc(-100% - 16px));
+  height: 44px; padding: 0 14px; border: 6px solid transparent; border-width: 6px 0; background-clip: padding-box;
+  border-radius: 16px / 22px; background-color: var(--sel); color: var(--text-2); font-size: 13px; font-weight: 500;
+}
+.tour-again:hover { color: var(--text); }
+body.touring .tour-again { display: none; }
+
+/* ---------- "?" and its panel ---------- */
+.help-btn { color: var(--text-2); }
+.help-btn:hover, .help-btn[aria-expanded="true"] { color: var(--text); }
+.help {
+  position: fixed; z-index: 42; width: min(460px, calc(100vw - 16px)); max-height: calc(100vh - 80px); max-height: calc(100dvh - 80px);
+  overflow-y: auto; padding: 8px 8px 12px 16px; background: var(--bg); color: var(--text);
+  border: 1px solid var(--hairline); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, .14);
+}
+.help:focus { outline: none; }
+.help-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.help-h { margin: 0; font-size: 15px; line-height: 20px; font-weight: 600; }
+.help-cmds { list-style: none; margin: 4px 0 0; padding: 0; }
+.help-cmd { margin: 0 0 6px; }
+.help-line { display: flex; align-items: center; gap: 4px; }
+.help-code {
+  flex: 1; min-width: 0; padding: 7px 10px; border-radius: 6px; background: var(--surface);
+  font: 13px/18px var(--mono); overflow-wrap: anywhere; -webkit-user-select: all; user-select: all;
+}
+.help .text-btn { margin: 0; padding: 0 10px; min-width: 64px; flex: none; }
+.help .text-btn:hover { color: var(--accent); }
+.help-note { margin: 2px 0 0; font-size: 13px; line-height: 18px; color: var(--text-2); }
+.help-cmd .help-note { margin: 0 0 0 10px; }
+.help-claude { margin-top: 8px; }
+.help-only { margin: 6px 8px 4px 0; font-size: 14px; line-height: 20px; }
+
+@media (max-width: 720px) {
+  .tour-again { left: auto; right: 16px; transform: none; bottom: calc(16px + env(safe-area-inset-bottom)); }
+  body.has-mini .tour-again { bottom: calc(80px + env(safe-area-inset-bottom)); }
+  body.open .tour-again { display: none; }
+  .help .icon-btn { margin: 0; }
+  .help-code { font-size: 12px; }
+}

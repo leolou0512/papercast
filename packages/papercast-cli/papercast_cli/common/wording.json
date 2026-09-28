@@ -1,5 +1,5 @@
 {
-  "about": "Wording that is never wanted. The runner refuses it in script.md, and in the explainer's points and captions where 'in' says so: one repair turn naming each sentence, then script_invalid or explainer_invalid (INTERFACE 1.8.1). Only what is never wanted belongs here; what is sometimes right (a caveat, a comparison, a strong word) is left to the cut-only pass, not to a list. To grow a class, add a phrase. A phrase matches as whole words, ignoring case unless case_sensitive; ' matches both apostrophes; a trailing * is any word ending; ... is a gap of up to two words.",
+  "about": "Wording that is never wanted. The CLI refuses it in script.md, and in the explainer's points and captions where 'in' says so (one repair turn naming each sentence), and the hub refuses an upload that still has it (SPEC.md section 6). Only what is never wanted belongs here; what is sometimes right (a caveat, a comparison, a strong word) is left to the cut-only pass, not to a list. To grow a class, add a phrase. A phrase matches as whole words, ignoring case unless case_sensitive; ' matches both apostrophes; a trailing * is any word ending; ... is a gap of up to two words. The class listener_name refuses the listener's own name: the name of the person the episode is made for (the uploader) is added to its phrases at check time, so its list here may be empty.",
   "classes": [
     {
       "id": "listener_name",
@@ -7,7 +7,7 @@
       "case_sensitive": true,
       "wrong": "names the listener",
       "fix": "Delete the name: the text is about the paper and is addressed to no one.",
-      "phrases": ["Leo"]
+      "phrases": []
     },
     {
       "id": "listener_knowledge",

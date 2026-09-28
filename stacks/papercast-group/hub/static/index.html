@@ -27,11 +27,17 @@
       </div>
     </header>
     <div class="search">
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="7" cy="7" r="5"/><path d="m11 11 3.5 3.5" stroke-linecap="round"/></svg>
-      <input class="field" type="search" id="search" placeholder="Search papers or people" aria-label="Search papers" autocomplete="off">
+      <div class="s-box">
+        <svg class="s-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="7" cy="7" r="5"/><path d="m11 11 3.5 3.5" stroke-linecap="round"/></svg>
+        <input class="s-in" type="search" id="search" placeholder="Search papers, topics, people" aria-label="Search papers" aria-keyshortcuts="/" autocomplete="off" spellcheck="false" enterkeyhint="search">
+        <button type="button" class="s-clear" id="search-clear" aria-label="Clear the search" hidden></button>
+      </div>
+      <button type="button" class="icon-btn filter-btn" id="filter-btn" aria-label="Filters" aria-expanded="false" aria-controls="fpanel"></button>
       <button type="button" class="icon-btn sort-btn" id="sort-btn" aria-label="Sort" aria-haspopup="menu" aria-expanded="false"></button>
     </div>
-    <div class="filter" id="filter" hidden><span class="f-lbl">Tag: <b id="filter-tag"></b></span><button type="button" class="text-btn" id="filter-clear">Clear</button></div>
+    <div class="fpanel" id="fpanel" hidden></div>
+    <div class="filter" id="filter" hidden><div class="chips" id="chips"></div><button type="button" class="text-btn" id="filter-clear">Clear</button></div>
+    <div class="sstat" id="sstat" role="status" hidden></div>
     <ul class="rows" id="rows"></ul>
     <div class="rows-end" id="rows-end" aria-hidden="true"></div>
     <div class="mini" id="mini" role="button" tabindex="0" aria-label="Open the paper that is playing" hidden>

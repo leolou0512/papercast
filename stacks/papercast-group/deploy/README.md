@@ -29,7 +29,7 @@ Cloudflare ──tunnel──▶ cloudflared (perov) ──▶ hub 127.0.0.1:848
 | `  hub.env` (0600) | `PCG_DATA`, `PCG_AUTH`, `PCG_SECRET` (generated once), `PCG_BIND=127.0.0.1`, `PCG_PORT=8480`, `PCG_PUBLIC_URL`, `PCG_ADMIN_EMAILS`, `PCG_WORKER_TOKEN_SHA256`; for "forgot password" emails `PCG_SMTP_HOST`, `PCG_SMTP_PORT`, `PCG_SMTP_USER`, `PCG_SMTP_PASSWORD_FILE`, `PCG_SMTP_FROM` |
 | `  smtp.password` (0600) | the SMTP account's (app) password, when email is set up; never in `hub.env` |
 | `  worker.token` (0600), `worker.env` (0600) | the voice worker's token (the hub keeps only its sha256) and settings |
-| `  data/` | `hub.db` and `episodes/<episode_id>/` (the voice job is `episodes/<id>/voice/`) |
+| `  data/` | `hub.db` and `episodes/<episode_id>/` (the voice job is `episodes/<id>/voice/`); `search.db`, the search index (made from those two: deleted, the hub builds it again at its start; the backup leaves it out) |
 | `  voice/` | papercast-voice with Breeze TTS 2 and Kokoro (~13 GB), `voice/voice.json` |
 | `  worker/current.json` | the episode the worker holds (a restart carries on with it) |
 | `  backups/`, `logs/`, `run/` | nightly backups, the tunnel's and the fallback's logs, pid files |

@@ -49,9 +49,11 @@ WPM = 150
 DEFAULT_MINUTES = (15.0, 25.0)
 CLAIM_S = 6 * 3600
 CHUNK = 1 << 20
-# Manifest file keys -> the names they are stored under (SPEC.md section 3).
+# Manifest file keys -> the names they are stored under (SPEC.md section 3). paper.txt, the
+# paper's own text, is only ever read by the search (hub/search.py), never served.
 FILES = {"script": "script.md", "explainer_json": "explainer.json",
-         "explainer_html": "explainer.html", "claims": "claims.md"}
+         "explainer_html": "explainer.html", "claims": "claims.md", "paper_text": "paper.txt"}
+PAPER_TEXT_MAX = getattr(bundle, "PAPER_TEXT_MAX", 2 * MB)
 KEY_ORDER = ("arxiv_id", "doi", "source_sha256", "title_norm")
 
 _lock = threading.Lock()
@@ -775,7 +777,13 @@ def _land(req, manifest: dict, stage: Path, names: set) -> dict:
         for key, stored in FILES.items():
             n = files.get(key)
             if isinstance(n, str) and n in names:
-                shutil.copyfile(stage / n, epdir / stored)
+                if key == "paper_text":           # for the search only: kept to its limit, never refused
+                    with open(stage / n, "rb") as fh:
+                        data = fh.read(PAPER_TEXT_MAX + 4)
+                    cap = getattr(bundle, "paper_text", None)       # an older common/ has no helper
+                    (epdir / stored).write_bytes(cap(data) if cap else data[:PAPER_TEXT_MAX])
+                else:
+                    shutil.copyfile(stage / n, epdir / stored)
         (epdir / "bundle-manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
         pr = manifest.get("prefs") if isinstance(manifest.get("prefs"), dict) else {}
         settings = pr.get("settings") if isinstance(pr.get("settings"), dict) else {}

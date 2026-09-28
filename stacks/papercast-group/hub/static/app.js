@@ -16,7 +16,8 @@
     miniEp: null, speed: 1, swiped: null, swipeEnd: 0, flash: null,
     rows: new Map(), menu: null, lastFocus: null, scrubbing: null,
     build: "", reloadFor: "", typedAt: 0,
-    tag: null, sort: "added_desc", details: false,
+    sort: "added_desc", details: false,
+    f: {}, match: null, sinfo: null, qsort: null,     // filters; the search's matches and answer
     epPaper: new Map(),       // episode id -> paper id
     setTab: "prefs", set: {},
   };
@@ -28,7 +29,7 @@
     set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* private mode */ } },
     del(k) { try { localStorage.removeItem(k); } catch (e) { /* private mode */ } },
   };
-  // This tab only, and it survives location.reload(): the tag filter, the build reloaded for.
+  // This tab only, and it survives location.reload(): the search and filters, the build reloaded for.
   const tab = {
     get(k) { try { return sessionStorage.getItem(k); } catch (e) { return null; } },
     set(k, v) { try { sessionStorage.setItem(k, v); } catch (e) { /* private mode */ } },
@@ -95,6 +96,8 @@
     check: `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m2.5 7.5 3 3 6-7"/></svg>`,
     close: `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg>`,
     sort: `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3.5 5.5h13M3.5 10h9M3.5 14.5h5"/></svg>`,
+    filter: `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 4.5h13l-5.2 6.2v4.6l-2.6 1.4v-6z"/></svg>`,
+    x: (s = 12) => `<svg width="${s}" height="${s}" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="m3 3 6 6M9 3 3 9"/></svg>`,
     // the row's listened tick: a quiet ring until this person ticks it, then a filled grey disc
     tick: (on) => on
       ? `<svg width="22" height="22" viewBox="0 0 22 22" aria-hidden="true"><circle cx="11" cy="11" r="10" fill="var(--text-2)"/><path d="m6.5 11.3 3 3 6-6.3" fill="none" stroke="var(--bg)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`
@@ -309,6 +312,7 @@
   function removed(id) {
     if (!S.papers.has(id) && S.open !== id) return;
     S.papers.delete(id);
+    if (S.match) S.match.delete(id);
     if (S.audioPaper === id) unloadAudio();
     if (S.open === id) goList();
     renderList();
@@ -321,13 +325,15 @@
     indexEps(v);
     // a version that was playing and is gone (deleted elsewhere) stops
     if (S.audioPaper === v.id && !(v.episodes || []).some((e) => e.id === S.audioEp)) unloadAudio();
-    if (S.q) scheduleSearch();
+    if (searching()) scheduleSearch();       // where it now stands among the matches, if at all
     renderList();
     if (S.open === v.id) renderWin();
   }
-  // ------------------------------------------------------------------ sort and tag filter
-  // The sort is remembered on this device; the tag filter in this tab only. Both are the page's
-  // own: the hub's list is newest first.
+  // ------------------------------------------------------------------ sort, search and filters
+  // The sort is remembered on this device; the search and the filters in this tab only (they
+  // survive a reload). The hub searches and filters (GET /api/library: q, graph, tag, maker,
+  // year_from, year_to, listened); the sort is the page's own. While searching, the list is the
+  // hub's best matches first, until another sort is picked.
   const SORTS = [
     ["added_desc", "Date added (newest first)"], ["added_asc", "Date added (oldest first)"],
     ["title", "Title A–Z"], ["unlistened", "Not listened first"], ["year", "Paper year (newest first)"],
@@ -342,31 +348,242 @@
     unlistened: (a, b) => (!!a.listened - !!b.listened) || byAdded(a, b),
     year: (a, b) => ((b.year || 0) - (a.year || 0)) || byAdded(a, b),
   };
+  const FKEYS = ["graph", "tag", "maker", "yfrom", "yto", "listened"];
+  const typed = () => !!S.q.trim();
+  const filtering = () => FKEYS.some((k) => S.f[k] !== undefined);
+  const searching = () => typed() || filtering();
+  const effSort = () => (typed() ? S.qsort || "match" : S.sort);
   const sortedPapers = () => [...S.papers.values()].sort(ORDER[S.sort] || byAdded);
-  // What the list shows: the sort, then the tag filter on top of the search.
-  const shownPapers = () => sortedPapers().filter((p) => !S.tag || (p.tags || []).includes(S.tag));
-  function setSort(id) {
-    S.sort = ORDER[id] ? id : "added_desc";
-    store.set("pcg.sort", S.sort);
-    const b = $("sort-btn"), label = (SORTS.find((x) => x[0] === S.sort) || SORTS[0])[1];
-    b.classList.toggle("on", S.sort !== "added_desc");
+  // What the list shows: every paper, sorted; or, searching, the matches (in the hub's order
+  // for "Best match").
+  function shownPapers() {
+    if (!S.match) return sortedPapers();
+    const list = [];
+    for (const id of S.match.keys()) { const p = S.papers.get(id); if (p) list.push(p); }
+    const how = effSort();
+    return how === "match" ? list : list.sort(ORDER[how] || byAdded);
+  }
+  function sortLabel() {
+    const cur = effSort(), b = $("sort-btn");
+    const label = cur === "match" ? "Best match" : (SORTS.find((x) => x[0] === cur) || SORTS[0])[1];
+    b.classList.toggle("on", cur !== (typed() ? "match" : "added_desc"));
     b.setAttribute("aria-label", `Sort: ${label}`);
     b.title = `Sort: ${label}`;
+  }
+  function setSort(id) {
+    if (id === "match") S.qsort = "match";
+    else {
+      S.sort = ORDER[id] ? id : "added_desc";
+      store.set("pcg.sort", S.sort);
+      if (typed()) S.qsort = S.sort;
+    }
+    sortLabel();
     renderList();
   }
   function sortMenu() {
-    return SORTS.map(([id, label]) => el("button", { type: "button", role: "menuitemradio", "aria-checked": String(id === S.sort),
-      class: "radio", onclick: () => { closeMenu(); setSort(id); } },
-    el("span", { class: "mark", html: id === S.sort ? I.check : "" }), el("span", { text: label })));
+    const cur = effSort();
+    return (typed() ? [["match", "Best match"]] : []).concat(SORTS).map(([id, label]) => el("button", {
+      type: "button", role: "menuitemradio", "aria-checked": String(id === cur), class: "radio",
+      onclick: () => { closeMenu(); setSort(id); } },
+    el("span", { class: "mark", html: id === cur ? I.check : "" }), el("span", { text: label })));
   }
-  function setTag(t) {
-    S.tag = t || null;
-    if (S.tag) tab.set("pcg.tag", S.tag); else tab.del("pcg.tag");
-    $("filter").hidden = !S.tag;
-    $("filter-tag").textContent = S.tag || "";
+
+  // The filters: {graph: {id, name}, tag, maker: {id, name}, yfrom, yto, listened: "yes"|"no"}.
+  function readFilters() {
+    let f;
+    try { f = JSON.parse(tab.get("pcg.filters") || "{}") || {}; } catch (e) { f = {}; }
+    const out = {};
+    if (f.graph && typeof f.graph.id === "string") out.graph = { id: f.graph.id, name: String(f.graph.name || "") };
+    if (typeof f.tag === "string" && f.tag) out.tag = f.tag;
+    if (f.maker && Number.isInteger(f.maker.id)) out.maker = { id: f.maker.id, name: String(f.maker.name || "") };
+    for (const k of ["yfrom", "yto"]) if (Number.isInteger(f[k])) out[k] = f[k];
+    if (f.listened === "yes" || f.listened === "no") out.listened = f.listened;
+    const old = tab.get("pcg.tag");          // the tag filter as an older page kept it
+    if (old && !out.tag) out.tag = old;
+    tab.del("pcg.tag");
+    return out;
+  }
+  function saveFilters() {
+    if (filtering()) tab.set("pcg.filters", JSON.stringify(S.f)); else tab.del("pcg.filters");
+  }
+  function setFilter(k, v, quiet) {
+    if (v === null || v === undefined || v === "") delete S.f[k]; else S.f[k] = v;
+    let other = false;            // a year range the wrong way round: its other end goes
+    if (k === "yfrom" && S.f.yto !== undefined && S.f.yfrom > S.f.yto) { delete S.f.yto; other = true; }
+    if (k === "yto" && S.f.yfrom !== undefined && S.f.yto < S.f.yfrom) { delete S.f.yfrom; other = true; }
+    saveFilters();
+    renderFilters(quiet && !other);
     S.limit = PAGE;
-    renderList();
+    loadList();
     $("list-pane").scrollTop = 0;
+  }
+  const setTag = (t) => setFilter("tag", t || null);
+  function clearFilters() {
+    S.f = {};
+    saveFilters();
+    renderFilters();
+    loadList();
+  }
+  // One chip per filter, under the search; a tap takes that one away.
+  function chips() {
+    const f = S.f, out = [];
+    if (f.graph) out.push(["graph", `Topic: ${f.graph.name || "a graph"}`]);
+    if (f.tag) out.push(["tag", `Tag: ${f.tag}`]);
+    if (f.maker) out.push(["maker", `By ${f.maker.name || "someone"}`]);
+    if (f.yfrom !== undefined || f.yto !== undefined) {
+      out.push(["year", f.yfrom === undefined ? `Up to ${f.yto}` : f.yto === undefined ? `From ${f.yfrom}`
+        : f.yfrom === f.yto ? `Year ${f.yfrom}` : `${f.yfrom}–${f.yto}`]);
+    }
+    if (f.listened) out.push(["listened", f.listened === "no" ? "Not listened" : "Listened"]);
+    return out;
+  }
+  function renderFilters(quiet) {
+    const cs = chips();
+    $("filter").hidden = !cs.length;
+    $("chips").replaceChildren(...cs.map(([k, label]) => el("button", {
+      type: "button", class: "chip", "data-k": k, title: "Remove this filter", "aria-label": `${label}, remove this filter`,
+      onclick: () => { if (k === "year") { delete S.f.yfrom; setFilter("yto", null); } else setFilter(k, null); },
+    }, el("span", { class: "chip-t", text: label }), el("span", { class: "chip-x", html: I.x() }))));
+    $("filter-btn").classList.toggle("on", cs.length > 0);
+    if (!quiet && !$("fpanel").hidden) buildPanel();
+  }
+  // The filter section: opened by the funnel; the choices come from the hub (the graphs, and
+  // the tags, people and years of the papers in the library).
+  S.facets = null; S.graphs = null;
+  async function togglePanel(open) {
+    const pn = $("fpanel"), b = $("filter-btn");
+    const on = open === undefined ? pn.hidden : !!open;
+    pn.hidden = !on;
+    b.setAttribute("aria-expanded", String(on));
+    if (!on) return;
+    if (!S.facets) pn.replaceChildren(el("p", { class: "f-wait", text: "Loading…" }));
+    else buildPanel();
+    try {
+      const [g, fc] = await Promise.all([api("GET", "/api/graphs").catch(() => ({ graphs: [] })), api("GET", "/api/search/facets")]);
+      S.graphs = listOf(g, "graphs").filter((x) => x && typeof x.id === "string");
+      S.facets = fc;
+    } catch (e) {
+      if (!S.facets && !pn.hidden) pn.replaceChildren(el("p", { class: "f-wait", text: e.message }));
+      return;
+    }
+    if (!pn.hidden) buildPanel();
+  }
+  function pick(id, label, opts, value, onchange) {
+    const want = value === undefined || value === null ? "" : String(value);
+    if (!opts.some(([v]) => String(v) === want)) opts.push([want, want]);
+    const s = el("select", { class: "pick", id, "aria-label": label },
+      opts.map(([v, t]) => el("option", { value: String(v), text: t, selected: String(v) === want })));
+    s.addEventListener("change", () => onchange(s.value));
+    return s;
+  }
+  function buildPanel() {
+    const pn = $("fpanel"), fc = S.facets || { tags: [], makers: [], years: {} };
+    const graphs = S.graphs || [], f = S.f;
+    const row = (label, ...kids) => el("div", { class: "f-row" }, el("span", { class: "f-l", "aria-hidden": "true", text: label }), ...kids);
+    const gopts = [["", "Any topic"]].concat(graphs.map((g) => [g.id, g.name]));
+    if (f.graph && !graphs.some((g) => g.id === f.graph.id)) gopts.push([f.graph.id, f.graph.name || "a graph"]);
+    const gsel = pick("f-graph", "Topic", gopts, f.graph && f.graph.id, (v) => {
+      const g = graphs.find((x) => x.id === v) || (f.graph && f.graph.id === v ? f.graph : null);
+      setFilter("graph", g ? { id: g.id, name: g.name } : null, true);
+    });
+    const tsel = pick("f-tag", "Tag", [["", "Any tag"]].concat((fc.tags || []).map((t) => [t.tag, `${t.tag} (${t.n})`])), f.tag,
+      (v) => setFilter("tag", v || null, true));
+    const msel = pick("f-maker", "Made by", [["", "Anyone"]].concat((fc.makers || []).map((m) => [String(m.id), m.me ? `${m.name} (you)` : m.name])),
+      f.maker && f.maker.id, (v) => {
+        const m = (fc.makers || []).find((x) => String(x.id) === v);
+        setFilter("maker", m ? { id: m.id, name: m.name } : null, true);
+      });
+    const ys = [];
+    const y0 = fc.years && fc.years.min, y1 = fc.years && fc.years.max;
+    if (Number.isInteger(y0) && Number.isInteger(y1)) for (let y = y1; y >= y0 && ys.length < 200; y--) ys.push([String(y), String(y)]);
+    const year = (id, label, k) => pick(id, label, [["", "Any"]].concat(ys), f[k], (v) => setFilter(k, v ? parseInt(v, 10) : null, true));
+    const seg = el("div", { class: "seg f-seg", role: "radiogroup", "aria-label": "Listened" },
+      [["", "All"], ["no", "Not listened"], ["yes", "Listened"]].map(([v, t]) => el("button", {
+        type: "button", role: "radio", "aria-checked": String((f.listened || "") === v), "data-v": v,
+        onclick: () => {
+          for (const b of seg.children) b.setAttribute("aria-checked", String(b.dataset.v === v));
+          setFilter("listened", v || null, true);
+        },
+      }, t)));
+    pn.replaceChildren(row("Topic", gsel), row("Tag", tsel), row("Made by", msel),
+      row("Year", el("div", { class: "f-yr" }, year("f-yfrom", "From year", "yfrom"), el("span", { class: "f-to", text: "to" }), year("f-yto", "To year", "yto"))),
+      row("Listened", seg));
+  }
+
+  // The search box: results as it is typed; a clear button; "/" from anywhere on the page
+  // goes to it; Escape empties it (then leaves it); Enter searches at once.
+  function wireSearch() {
+    const sb = $("search"), clr = $("search-clear");
+    clr.innerHTML = I.x(16);
+    $("filter-btn").innerHTML = I.filter;
+    sb.value = S.q;
+    clr.hidden = !S.q;
+    const changed = () => {
+      const had = typed();
+      S.q = sb.value;
+      if (S.q) tab.set("pcg.q", S.q); else tab.del("pcg.q");
+      clr.hidden = !S.q;
+      S.typedAt = Date.now();
+      if (had !== typed()) { if (!typed()) S.qsort = null; sortLabel(); }
+      scheduleSearch();
+    };
+    sb.addEventListener("input", changed);
+    sb.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault(); e.stopPropagation();
+        if (sb.value) { sb.value = ""; changed(); } else sb.blur();
+      } else if (e.key === "Enter") {
+        loadList();
+        if (phone()) sb.blur();             // the keyboard goes away, the results stay
+      }
+    });
+    clr.addEventListener("click", () => { sb.value = ""; changed(); sb.focus(); });
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "/" || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
+      const t = e.target;
+      if (t && t.closest && t.closest("input, textarea, select, [contenteditable], .menu, #map")) return;
+      if (!$("map").hidden || !$("overlay").hidden || (phone() && document.body.classList.contains("open"))) return;
+      e.preventDefault();
+      sb.focus();
+      sb.select();
+    });
+    $("filter-btn").addEventListener("click", (e) => { e.stopPropagation(); togglePanel(); });
+    $("filter-clear").addEventListener("click", clearFilters);
+  }
+  // A title, a snippet: text nodes, and <mark> elements for what matched (never HTML).
+  function marked(parts) {
+    const out = [];
+    (Array.isArray(parts) ? parts : []).forEach((x, i) => {
+      const t = typeof x === "string" ? x : "";
+      if (t) out.push(i % 2 ? el("mark", { text: t }) : document.createTextNode(t));
+    });
+    return out;
+  }
+  // The count and, when a word was corrected, what was searched for instead.
+  function renderStat() {
+    const box = $("sstat");
+    if (!S.match || !S.loaded) { box.hidden = true; box.replaceChildren(); return; }
+    let n = 0;
+    for (const id of S.match.keys()) if (S.papers.has(id)) n++;
+    const info = S.sinfo || {}, kids = [];
+    if (info.used && typed()) kids.push(el("span", { class: "fix" }, "Showing results for ", el("b", { text: info.used })), " · ");
+    kids.push(`${n} ${n === 1 ? "paper" : "papers"}`);
+    if (info.indexing && info.indexing.total) kids.push(` · still reading the papers’ text (${info.indexing.done} of ${info.indexing.total})`);
+    box.replaceChildren(...kids);
+    box.hidden = false;
+  }
+  // Rows past the first page come without their snippet: asked for when they are drawn.
+  S.snipWant = new Set(); S.snipTimer = null;
+  function wantSnips() { if (!S.snipTimer && S.snipWant.size) S.snipTimer = setTimeout(flushSnips, 60); }
+  async function flushSnips() {
+    S.snipTimer = null;
+    const ids = [...S.snipWant].slice(0, 50), key = S.listKey, q = S.q;
+    for (const id of ids) S.snipWant.delete(id);
+    let j;
+    try { j = await api("GET", `/api/library?q=${encodeURIComponent(q)}&ids=${ids.map(encodeURIComponent).join(",")}`); } catch (e) { return; }
+    if (key !== S.listKey || !S.match) return;
+    for (const v of j.papers || []) if (v.match && S.match.has(v.id)) { S.match.set(v.id, v.match); updateRow(v.id); }
+    wantSnips();
   }
 
   function ring(p) {
@@ -444,12 +661,19 @@
     const by = c ? whoLine(c) : "", nv = n > 1 ? `${n} versions` : "";
     const nc = S.social ? S.social.count(p.id) : 0;       // comments (social.js)
     const canDel = !!(c && c.can_delete), audio = anyAudio(p), hasMenu = canDel || canQueue(c);
+    // Searching: the title with what matched marked, and where else it matched, in a few words.
+    const m = S.match ? S.match.get(p.id) || null : null;
+    if (m && m.more && !m.asked) { m.asked = true; S.snipWant.add(p.id); }
+    const hit = m && m.lead ? [m.lead, m.parts || []] : null;
     // Everything the row shows, in one string: when the row shows it already, it is left as it is.
-    const sig = JSON.stringify([title, p.added_at, rg, sub, by, nv, ptags, ptags.includes(S.tag) ? S.tag : null, audio, !!p.listened, canDel, hasMenu, nc]);
+    const sig = JSON.stringify([title, p.added_at, rg, sub, by, nv, ptags, ptags.includes(S.f.tag) ? S.f.tag : null, audio, !!p.listened, canDel,
+      hasMenu, nc, m ? m.title : null, hit]);
     if (r.sig === sig) return;
     r.sig = sig;
     const tnode = el("p", { class: "row-title", title: title || null });
-    titleInto(tnode, p);
+    if (title && m && Array.isArray(m.title) && m.title.length) tnode.replaceChildren(...marked(m.title));
+    else titleInto(tnode, p);
+    const hitl = hit ? el("div", { class: "row-hit" }, el("span", { class: "lead", text: hit[0] }), ...marked(hit[1])) : null;
     const line = el("div", { class: `row-sub t${sub.cls ? ` ${sub.cls}` : ""}` }, el("span", { class: "st", text: sub.text }),
       nv ? el("span", { class: "nv", text: `· ${nv}` }) : null,
       nc ? el("span", { class: "nc", text: `· ${nc} comment${nc === 1 ? "" : "s"}` }) : null);
@@ -461,8 +685,8 @@
     if (open && hasMenu) S.menu.anchor = more;       // the row's open menu closes onto the new button
     // Tags: small plain words; a tap shows only the papers with that tag (again: all of them).
     const tags = ptags.length ? el("div", { class: "row-tags" }, ptags.map((t) =>
-      el("button", { type: "button", class: `tag${t === S.tag ? " on" : ""}`, title: t === S.tag ? "Show all papers" : `Only “${t}”`,
-        onclick: (e) => { e.stopPropagation(); if (swipeBusy()) return; setTag(t === S.tag ? null : t); } }, el("span", { text: t })))) : null;
+      el("button", { type: "button", class: `tag${t === S.f.tag ? " on" : ""}`, title: t === S.f.tag ? "Show all papers" : `Only “${t}”`,
+        onclick: (e) => { e.stopPropagation(); if (swipeBusy()) return; setTag(t === S.f.tag ? null : t); } }, el("span", { text: t })))) : null;
     inner.classList.toggle("tagged", !!tags);
     // This person's own tick, only by their tap; on a paper with an episode to listen to.
     const tick = audio ? el("button", { type: "button", class: "tick", role: "checkbox", "aria-checked": String(!!p.listened),
@@ -470,7 +694,7 @@
       onclick: (e) => { e.stopPropagation(); if (swipeBusy()) return; const q = S.papers.get(p.id) || p; setListened(q.id, !q.listened); } })
       : el("span", { class: "tick-sp" });
     inner.replaceChildren(el("div", { class: "ring", html: rg }),
-      el("div", { class: "row-text" }, tnode, line, byl, tags), tick, more);
+      el("div", { class: "row-text" }, tnode, hitl, line, byl, tags), tick, more);
     inner.setAttribute("aria-label", [title || sub.text, by, nv].filter(Boolean).join(", "));
   }
   // A tap that ends a swipe, or one that only closes an open swipe, does nothing else.
@@ -483,7 +707,7 @@
   // its end (wireList), and always as far down as the open paper's row. A row is filled again
   // only when what it shows has changed (fillRow), so a paper event touches that one row.
   const PAGE = window.IntersectionObserver ? 50 : Infinity;     // an old browser: every row at once
-  S.limit = PAGE; S.more = false; S.nearEnd = false; S.endIO = null; S.listQ = "";
+  S.limit = PAGE; S.more = false; S.nearEnd = false; S.endIO = null; S.listKey = null; S.shownKey = null;
   function renderList() {
     // Under the map the list is not seen: it is brought up to date when the map closes, so a
     // paper event does not stall the map.
@@ -511,7 +735,7 @@
     let empty = ul.querySelector(".empty-list");
     if (!items.length && S.loaded) {
       if (!empty) ul.append(empty = el("li", { class: "empty-list" }));
-      empty.textContent = S.tag ? `No papers tagged “${S.tag}”${S.q ? " match" : ""}.` : S.q ? "No matches."
+      empty.textContent = typed() ? "No matches." : filtering() ? "No papers match these filters."
         : "No episodes yet. They appear here as people add papers with papercast add.";
     } else if (empty) empty.remove();
     if (S.flash && S.rows.has(S.flash)) {
@@ -520,6 +744,8 @@
       requestAnimationFrame(() => requestAnimationFrame(() => li.classList.remove("fade")));
     }
     S.flash = null;
+    renderStat();
+    wantSnips();
     renderMini();
     mapSync();
     if (S.more && S.nearEnd) checkEnd();
@@ -586,22 +812,50 @@
     S.swiped = null;
   }
 
+  // As it is typed, the search goes to the hub 150 ms after the last key; a filter at once.
   let searchTimer = null;
-  function scheduleSearch() { clearTimeout(searchTimer); searchTimer = setTimeout(loadList, 180); }
+  function scheduleSearch() { clearTimeout(searchTimer); searchTimer = setTimeout(loadList, 150); }
+  function listParams() {
+    const u = new URLSearchParams(), f = S.f;
+    u.set("q", S.q);
+    if (f.graph) u.set("graph", f.graph.id);
+    if (f.tag) u.set("tag", f.tag);
+    if (f.maker) u.set("maker", String(f.maker.id));
+    if (f.yfrom !== undefined) u.set("year_from", String(f.yfrom));
+    if (f.yto !== undefined) u.set("year_to", String(f.yto));
+    if (f.listened) u.set("listened", f.listened);
+    return u.toString();
+  }
   async function loadList() {
-    const q = S.q;
+    clearTimeout(searchTimer);
+    const key = listParams(), on = searching();
+    S.listKey = key;
     try {
-      const j = await api("GET", `/api/library?q=${encodeURIComponent(q)}`);
-      if (q !== S.q) return;          // a newer search is on its way
-      S.papers = new Map(j.papers.map((p) => [p.id, pinEdits(p)]));
-      for (const p of S.papers.values()) indexEps(p);
-      if (q !== S.listQ) { S.listQ = q; S.limit = PAGE; }      // a new search: its first page
+      const j = await api("GET", `/api/library?${key}`);
+      if (key !== S.listKey) return;          // a newer search is on its way
+      if (on) {
+        // the matches, in the hub's order; the papers already known here stay (the one playing)
+        S.match = new Map();
+        for (const p of j.papers) {
+          const m = p.match || null;
+          delete p.match;
+          S.papers.set(p.id, pinEdits(p));
+          indexEps(p);
+          S.match.set(p.id, m);
+        }
+        S.sinfo = j.search || null;
+      } else {
+        S.match = null; S.sinfo = null;
+        S.papers = new Map(j.papers.map((p) => [p.id, pinEdits(p)]));
+        for (const p of S.papers.values()) indexEps(p);
+      }
+      if (key !== S.shownKey) { S.shownKey = key; S.limit = PAGE; }      // a new search: its first page
       S.loaded = true;
       renderList();
       if (S.open) {
-        if (!S.papers.has(S.open) && !S.q) goList(); else renderWin();
+        if (!S.papers.has(S.open) && !on) goList(); else renderWin();
       }
-    } catch (e) { toast(e.message); }
+    } catch (e) { if (key === S.listKey) toast(e.message); }
   }
   // A paper or episode event names what changed; those papers alone are read again, in one
   // request (a big burst, or one the page cannot place, reads the whole list). One that is not
@@ -2382,11 +2636,14 @@
     S.build = S.cfg.build || "";        // the build this page's code came with
     S.social = window.PaperSocial ? window.PaperSocial.mount(socialCtx()) : null;     // comments and the board
     wireList();
-    setSort(store.get("pcg.sort"));
+    S.q = tab.get("pcg.q") || "";
+    S.f = readFilters();
+    const sort = store.get("pcg.sort");
+    S.sort = ORDER[sort] ? sort : "added_desc";        // a search the tab kept is shown best match first
+    sortLabel();
     $("sort-btn").addEventListener("click", (e) => { e.stopPropagation(); openMenu(e.currentTarget, "sort", sortMenu()); });
-    $("filter-clear").addEventListener("click", () => setTag(null));
-    setTag(tab.get("pcg.tag"));
-    $("search").addEventListener("input", (e) => { S.q = e.target.value.trim(); scheduleSearch(); });
+    wireSearch();
+    renderFilters();
     $("w-listened").addEventListener("click", () => { const p = S.papers.get(S.open); if (p) setListened(p.id, !p.listened); });
     wirePlayer();
     wireQueue();
@@ -2409,6 +2666,7 @@
       if (e.key !== "Escape") return;
       if (S.menu) { const a = S.menu.anchor; closeMenu(); a.focus(); } else if (!$("overlay").hidden) closeExplainer();
       else if (S.swiped) closeSwipe();
+      else if (!$("fpanel").hidden && $("fpanel").contains(document.activeElement)) { togglePanel(false); $("filter-btn").focus(); }
     });
     window.addEventListener("hashchange", () => openFromHash());
     $("map-btn").addEventListener("click", openMap);

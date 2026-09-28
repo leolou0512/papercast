@@ -21,6 +21,7 @@
   --danger: #B3261E;
   --toast-bg: #1C1C1C; --toast-fg: #F2F2F2; --toast-link: #FF8A5C;
   --scrim: rgba(0,0,0,.32);
+  --mark: #FBE3C4;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   color-scheme: light;
@@ -32,6 +33,7 @@
     --quote: #3A3A3A; --accent: #FF7A45; --on-accent: #0E0E0E;
     --alive: #4CC273; --warn: #F0B458; --danger: #FF8A80;
     --toast-bg: #2A2A2A; --toast-fg: #F2F2F2; --toast-link: #FF9A6A; --scrim: rgba(0,0,0,.6);
+    --mark: #4A2E17;
     color-scheme: dark;
   }
 }
@@ -41,6 +43,7 @@
   --quote: #3A3A3A; --accent: #FF7A45; --on-accent: #0E0E0E;
   --alive: #4CC273; --warn: #F0B458; --danger: #FF8A80;
   --toast-bg: #2A2A2A; --toast-fg: #F2F2F2; --toast-link: #FF9A6A; --scrim: rgba(0,0,0,.6);
+  --mark: #4A2E17;
   color-scheme: dark;
 }
 
@@ -100,17 +103,65 @@ svg { display: block; }
 .btn-accent:hover:not(:disabled) { filter: brightness(1.06); }
 .btn-accent.big { white-space: nowrap; height: 44px; font-size: 16px; padding: 0 20px; border: 0; border-radius: 6px; margin: 0; }
 
+/* The search: the field's line is drawn by .s-box::before, so the input (44 px tall) and the
+   clear button sit side by side inside it and neither covers the other's tap area. */
 .search { padding: 0 16px 8px; position: relative; display: flex; align-items: center; gap: 8px; }
-.search input { flex: 1; min-width: 0; padding-left: 35px; }
-.search > svg { position: absolute; left: 28px; top: 10px; color: var(--text-2); pointer-events: none; }
-.sort-btn { color: var(--text-2); }
-.sort-btn:hover { color: var(--text); }
-.sort-btn.on { color: var(--accent); }
-/* the tag filter: one line under the search, with Clear */
-.filter { display: flex; align-items: center; gap: 4px; min-height: 44px; margin-top: -4px; padding: 0 16px; position: relative; font-size: 14px; line-height: 20px; color: var(--text-2); }
-.filter .f-lbl { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.filter b { color: var(--text); font-weight: 600; }
-.filter .text-btn { margin: 0; padding: 0 8px; min-width: 44px; color: var(--accent); font-weight: 500; }
+.s-box { flex: 1; min-width: 0; position: relative; display: flex; align-items: center; height: 44px; }
+.s-box::before {
+  content: ""; position: absolute; left: 0; right: 0; top: 4px; bottom: 4px; border-radius: 6px;
+  box-shadow: inset 0 0 0 1px var(--input-line); background: var(--bg); pointer-events: none;
+}
+.s-box:focus-within::before { box-shadow: inset 0 0 0 1px var(--accent); }
+.s-icon { position: absolute; left: 12px; top: 14px; color: var(--text-2); pointer-events: none; z-index: 1; }
+.s-in {
+  position: relative; flex: 1; min-width: 0; height: 44px; border: 0; margin: 0; background: transparent; color: var(--text);
+  font: 14px/20px var(--sans); padding: 0 4px 0 35px; -webkit-appearance: none; appearance: none;
+}
+.s-in:focus, .s-in:focus-visible { outline: none; }
+.s-in::placeholder { color: var(--text-2); }
+.s-in::-webkit-search-cancel-button, .s-in::-webkit-search-decoration { -webkit-appearance: none; appearance: none; display: none; }
+.s-clear { position: relative; flex: none; width: 44px; height: 44px; display: grid; place-items: center; color: var(--text-2); border-radius: 6px; }
+.s-clear:hover { color: var(--text); }
+.sort-btn, .filter-btn { color: var(--text-2); }
+.sort-btn:hover, .filter-btn:hover { color: var(--text); }
+.sort-btn.on, .filter-btn.on, .filter-btn[aria-expanded="true"] { color: var(--accent); }
+/* the filter section: a few plain choices under the search */
+.fpanel { padding: 0 16px 8px; display: flex; flex-direction: column; gap: 4px; }
+.f-row { display: flex; align-items: center; gap: 12px; min-height: 44px; }
+.f-l { flex: none; width: 56px; font-size: 13px; line-height: 18px; color: var(--text-2); }
+.f-row .pick { flex: 1; min-width: 0; background: var(--bg); }
+.f-yr { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; }
+.f-yr .pick { flex: 1; min-width: 0; }
+.f-to { font-size: 13px; color: var(--text-2); }
+.seg.f-seg { flex: 1; min-width: 0; gap: 2px; flex-wrap: nowrap; }
+.seg.f-seg button {        /* drawn 32 px tall, a 44 px tap */
+  padding: 0 10px; font-size: 13px; white-space: nowrap; border: 6px solid transparent; border-width: 6px 0;
+  background-clip: padding-box; border-radius: 16px / 22px; box-shadow: none; background-color: var(--surface);
+}
+.seg.f-seg button:hover { background-color: var(--sel); }
+.seg.f-seg button[aria-checked="true"] { background-color: var(--accent); background-clip: padding-box; }
+.f-wait { margin: 4px 0 8px; font-size: 13px; color: var(--text-2); }
+/* the filters in use, one chip each (a tap removes it), and Clear */
+.filter { display: flex; flex-wrap: wrap; align-items: center; column-gap: 6px; padding: 0 16px 4px; position: relative; font-size: 13px; line-height: 18px; }
+.chips { display: contents; }          /* the chips and Clear flow as one line of words */
+.chip {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 100%; height: 44px; padding: 0 10px 0 12px;
+  border: 7px solid transparent; border-width: 7px 0; background-clip: padding-box; border-radius: 15px / 22px;
+  background-color: var(--surface); color: var(--text); font-size: 13px; text-align: left;
+}
+.chip:hover { background-color: var(--sel); }
+.chip-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip-x { flex: none; color: var(--text-2); display: grid; }
+.filter .text-btn { margin: 0; padding: 0 6px; min-width: 44px; color: var(--accent); font-weight: 500; flex: none; font-size: 13px; }
+/* the count, and the query as corrected */
+.sstat { padding: 0 16px 6px; font-size: 13px; line-height: 18px; color: var(--text-2); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.sstat b { color: var(--text); font-weight: 600; }
+mark { background: var(--mark); color: inherit; border-radius: 2px; padding: 0 1px; margin: 0 -1px; }
+.row-hit {
+  font-size: 13px; line-height: 18px; color: var(--text-2); margin-top: 2px; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.row-hit mark { color: var(--text); }
 
 .rows { list-style: none; margin: 0; padding: 4px 0 120px; }
 .row { position: relative; overflow: hidden; transition: opacity .15s ease; }
@@ -405,6 +456,7 @@ svg { display: block; }
   body.open .window { transform: none; visibility: visible; transition: transform .25s ease; }
   .phone-top { display: flex; justify-content: space-between; align-items: center; height: 48px; padding: 4px 4px 0; background: var(--surface); }
   .icon-btn { width: 44px; height: 44px; margin: -4px; }
+  .s-in { font-size: 16px; }         /* 16 px: the phone does not zoom in on it */
   .head-btns { gap: 12px; }
   .phone-top .icon-btn { margin: 0; }
   .menu button, .menu a { height: 44px; }

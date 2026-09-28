@@ -14,10 +14,13 @@ from . import checks, prefs
 MANIFEST_VERSION = 1
 MAX_BYTES = 50 * 1024 * 1024
 REQUIRED_FILES = ("script", "explainer_json", "explainer_html")
-OPTIONAL_FILES = ("claims",)
+# paper_text: the paper's own text as plain UTF-8 (what pdftotext made of the PDF), for the
+# hub's search only: never shown to anyone. At most PAPER_TEXT_MAX; the client cuts it there.
+OPTIONAL_FILES = ("claims", "paper_text")
+PAPER_TEXT_MAX = 2 * 1024 * 1024
 # Per file, when the caller knows the sizes (SPEC.md section 6; the JSON as Leo's runner).
 FILE_MAX = {"script": checks.SCRIPT_MAX_BYTES, "explainer_json": checks.EXPLAINER_JSON_MAX,
-            "explainer_html": checks.HTML_MAX_BYTES, "claims": 64 * 1024}
+            "explainer_html": checks.HTML_MAX_BYTES, "claims": 64 * 1024, "paper_text": PAPER_TEXT_MAX}
 MANIFEST_MAX = 1024 * 1024
 MAX_LINKS = 2000
 MAX_AUTHORS = 5000
@@ -42,6 +45,16 @@ def safe_name(name) -> bool:
     """A plain file name at the bundle's root: no slash, backslash or "..", no leading dot or
     dash, at most 100 characters of letters, digits, dot, dash and underscore."""
     return isinstance(name, str) and bool(SAFE_NAME.match(name)) and ".." not in name
+
+
+def paper_text(data: bytes) -> bytes:
+    """A paper's text as the bundle carries it: UTF-8 (anything else replaced), at most
+    PAPER_TEXT_MAX bytes, cut between two characters."""
+    text = data[:PAPER_TEXT_MAX + 4].decode("utf-8", "replace").replace("\x00", "")
+    out = text.encode("utf-8")
+    if len(out) > PAPER_TEXT_MAX:
+        out = out[:PAPER_TEXT_MAX].decode("utf-8", "ignore").encode("utf-8")
+    return out
 
 
 def _int(v) -> bool:

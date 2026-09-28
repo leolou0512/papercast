@@ -1162,6 +1162,10 @@
   function renderSettings() {
     const me = S.me || {};
     $("set-who").textContent = [me.name, me.email, me.role].filter(Boolean).join(" · ");
+    // Behind Cloudflare Access, signing out is Access's own page (it ends the Access session).
+    if (S.cfg && S.cfg.auth === "cf-access" && !$("set-signout")) {
+      $("set-who").after(el("p", { class: "muted" }, el("a", { id: "set-signout", href: "/cdn-cgi/access/logout", text: "Sign out" })));
+    }
     $("set-tabs").replaceChildren(...tabsFor().map(([id, label]) => el("button", {
       type: "button", class: "tab", role: "tab", "aria-selected": String(id === S.setTab), id: `tab-${id}`,
       onclick: () => { location.hash = `settings=${id}`; },

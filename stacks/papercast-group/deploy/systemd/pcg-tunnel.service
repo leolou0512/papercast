@@ -1,0 +1,17 @@
+# papercast-group: the Cloudflare tunnel that carries papercast.<domain> to the hub on 127.0.0.1.
+# The token (a tunnel made in the domain owner's Cloudflare dashboard) is read from a 600 file,
+# never from the command line. A systemd USER unit, installed by deploy/cloudflare.sh.
+[Unit]
+Description=papercast-group Cloudflare tunnel
+After=pcg-hub.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/cloudflared tunnel --no-autoupdate run --token-file @H@/tunnel.token
+Restart=always
+RestartSec=10
+Nice=10
+
+[Install]
+WantedBy=default.target

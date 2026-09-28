@@ -188,62 +188,37 @@ cloudflared also prints), `PCG_PUBLIC_URL` set and the hub restarted with it, `d
 time limit (`--minutes 1`: ended after 60 s) both putting the old value back, nothing left
 running; and with the real cloudflared, the refusal reported and `PCG_PUBLIC_URL` untouched.
 
-## Production: a named tunnel, Cloudflare Access (written up, not done: no account yet)
+## Production: papercast.virtualatoms.org (Cloudflare tunnel + Access)
 
-What Leo does once, on his own Cloudflare account and a domain on it (say `example.org`; the
-hub at `papers.example.org`):
+The domain's owner does two things in his Cloudflare dashboard; perov needs no open port, since
+the tunnel connects out (checked 2026-09-28: `region1/2.v2.argotunnel.com` and
+`<team>.cloudflareaccess.com` are reachable from perov; only the free quick tunnel's
+`trycloudflare.com` is blocked by the college's DNS).
 
-1. **The tunnel.** On perov, as leo:
-   ```bash
-   cloudflared tunnel login                       # browser: pick example.org; writes ~/.cloudflared/cert.pem
-   cloudflared tunnel create papercast-group      # writes ~/.cloudflared/<tunnel-id>.json (the tunnel's secret)
-   cloudflared tunnel route dns papercast-group papers.example.org
-   ```
-   `~/.cloudflared/config.yml`:
-   ```yaml
-   tunnel: papercast-group
-   credentials-file: /home/leo/.cloudflared/<tunnel-id>.json
-   ingress:
-     - hostname: papers.example.org
-       service: http://127.0.0.1:8480
-     - service: http_status:404
-   ```
-   and a user unit `~/.config/systemd/user/pcg-tunnel.service` (the same shape as pcg-hub:
-   `ExecStart=%h/.local/bin/cloudflared --no-autoupdate tunnel run papercast-group`,
-   `Restart=always`, `Nice=10`), `systemctl --user enable --now pcg-tunnel`. Retire the quick
-   tunnel then: cloudflared reads `~/.cloudflared/config.yml` for every command, so `tunnel.sh`
-   is for before that file exists (untested with one present).
-2. **Access in front** (Zero Trust dashboard → Access → Applications → Add → Self-hosted):
-   application `papers.example.org` (whole host), session 30 days, identity: **One-time PIN**
-   (email login, no identity provider needed) or Google; policy **Allow**, include *Emails*: the
-   group's addresses (or *Emails ending in* the institution's domain). Note the application's
-   **Audience (AUD) tag** and the team name (`<team>.cloudflareaccess.com`).
-3. **Bypass for the token-protected paths.** Two more self-hosted applications, more specific
-   than the first, each with one policy **Bypass**, include *Everyone*:
-   `papers.example.org/api/cli/` (the CLI: `papercast login`'s start and poll, uploads; every
-   request there carries a `pcg_` token or is the device flow's poll secret) and
-   `papers.example.org/api/voice/` (only if a voice worker ever runs off perov: the local worker
-   talks to 127.0.0.1 and never passes through Cloudflare). The CLI's approve page is `/cli`,
-   not under `/api/cli/`, so it stays behind Access: approving a device needs the email login.
-4. **The hub** (`hub.env`, then `systemctl --user restart pcg-hub`):
-   ```
-   PCG_AUTH=cf-access
-   PCG_CF_TEAM=<team>                    # <team>.cloudflareaccess.com
-   PCG_CF_AUD=<the application's AUD tag>
-   PCG_PUBLIC_URL=https://papers.example.org
-   PCG_ADMIN_EMAILS=<Leo's address>
-   ```
-   The hub checks `Cf-Access-Jwt-Assertion` on every browser request (RS256 against the team's
-   published keys, `aud`, `exp`) and takes the identity from its `email`: SPEC section 2.
-5. **Check** from outside: `curl -sI https://papers.example.org/` → 302 to the Access login;
-   `curl -s https://papers.example.org/api/cli/me` → 401 from the hub (bypassed, no token);
-   with a token → the user.
+1. **The tunnel.** Zero Trust → Networks → Tunnels → Create a tunnel → Cloudflared, named
+   `papercast`. Public hostname: subdomain `papercast`, domain `virtualatoms.org`, service
+   `HTTP` → `127.0.0.1:8480` (the hub, next to cloudflared on perov). Cloudflare adds the DNS
+   record itself (`papercast CNAME <tunnel id>.cfargotunnel.com`, proxied); a record alone would
+   not work, as the tunnel must be in the same account as the domain. He sends the **tunnel token**.
+2. **The login.** Zero Trust → Access → Applications → Add → Self-hosted: name `Papercast`,
+   domain `papercast.virtualatoms.org`, policy **Allow** with the group's emails (or an email
+   domain), login method One-time PIN (and Google if wanted). A second self-hosted application
+   for the path `papercast.virtualatoms.org/api/cli/*`, policy **Bypass**, Everyone: the CLI
+   talks to the hub with its own device token there (the voice worker talks to the hub on
+   127.0.0.1, not through the tunnel, so it needs no bypass). He sends the **team name**
+   (`<team>.cloudflareaccess.com`) and the first application's **AUD tag** (its Overview page).
 
-Why it holds: the hub listens on 127.0.0.1 only, so the tunnel is the only way in from outside;
-Access decides who reaches the page; the CLI and worker paths are protected by the hub's own
-tokens (stored as sha256). Other users on perov can reach 127.0.0.1:8480 too, but not forge an
-Access JWT, a session cookie or a token; the data directory and every secret file are 0600/0700.
-Never run `PCG_AUTH=header` (tests only: it trusts a header) on perov with real data.
+Then on perov:
+
+    umask 077; cat > ~/papercast-group/tunnel.token      # paste the token, Enter, Ctrl-D
+    bash ~/papercast-group/app/papercast-group/deploy/cloudflare.sh tunnel
+    bash ~/papercast-group/app/papercast-group/deploy/cloudflare.sh login --team <team> --aud <AUD> \
+         --url https://papercast.virtualatoms.org --admin <the email Leo logs in with>
+
+From then on everyone signs in with Cloudflare's email code; a person seen for the first time is
+a viewer, and an admin makes them a contributor in Settings → Users. Contributors log the CLI in
+with `papercast login --server https://papercast.virtualatoms.org` (approve in the browser).
+`cloudflare.sh local` goes back to the hub's own invite links; `cloudflare.sh status` shows the mode.
 
 ## Uninstall
 

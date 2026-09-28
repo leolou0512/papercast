@@ -94,7 +94,7 @@ relocate_voice() {
 
 prepare() {
     [ -d "$OLD" ] || die "no $OLD"
-    say "disk"; df -h "$S" /
+    say "disk"; df -h "$(dirname "$S")" /
     sudo bash "$HERE/install.sh" --system --account-only --admin-user "$(id -un)"
     say "binaries: $S/bin"
     local b

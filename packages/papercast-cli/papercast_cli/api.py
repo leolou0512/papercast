@@ -264,16 +264,23 @@ class Api:
         answers 404/405 and the claim simply expires after 6 h."""
         return self.delete(f"/api/cli/claims/{urllib.parse.quote(claim_id)}", retries=1)
 
-    def upload(self, bundle_path: str) -> dict:
-        """POST the bundle (tar.gz): {"episode_id", "paper_id", "state": "checking"}."""
-        size = os.path.getsize(bundle_path)
-        if size > UPLOAD_MAX:
-            raise PapercastError(f"The bundle is {size / 1e6:.1f} MB; the hub takes at most "
-                                 f"{UPLOAD_MAX // (1024 * 1024)} MB")
-        with open(bundle_path, "rb") as fh:
-            data = fh.read()
-        return self.request("POST", "/api/cli/episodes", data=data,
-                            content_type="application/gzip", timeout=600, retries=2).body
+    def upload(self, bundle_path: str, data: bytes | None = None, ctype: str = "application/gzip") -> dict:
+        """POST the bundle (tar.gz): {"episode_id", "paper_id", "state": "checking"}. Either
+        upload(<local file>) or, as the pipeline calls it, upload(<hub path>, <bytes>, <type>)."""
+        path = "/api/cli/episodes"
+        if data is None:
+            size = os.path.getsize(bundle_path)
+            if size > UPLOAD_MAX:
+                raise PapercastError(f"The bundle is {size / 1e6:.1f} MB; the hub takes at most "
+                                     f"{UPLOAD_MAX // (1024 * 1024)} MB")
+            with open(bundle_path, "rb") as fh:
+                data = fh.read()
+        else:
+            path = bundle_path or path
+            if len(data) > UPLOAD_MAX:
+                raise PapercastError(f"The bundle is {len(data) / 1e6:.1f} MB; the hub takes at most "
+                                     f"{UPLOAD_MAX // (1024 * 1024)} MB")
+        return self.request("POST", path, data=data, content_type=ctype, timeout=600, retries=2).body
 
     def episodes(self, mine: bool = True, **kw) -> list:
         """The caller's episodes with their state (a list; the hub may wrap it in "episodes")."""

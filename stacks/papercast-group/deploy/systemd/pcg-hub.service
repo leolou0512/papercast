@@ -1,0 +1,27 @@
+# papercast-group hub: the web page, the CLI's API and the voice queue, on 127.0.0.1 only (the
+# Cloudflare tunnel is the way in). A systemd USER unit, installed by deploy/install.sh (@H@ is
+# the install, /home/leo/papercast-group on perov); no sudo, nothing system-wide.
+[Unit]
+Description=papercast-group hub (127.0.0.1:8480)
+Documentation=file://@H@/app/papercast-group/deploy/README.md
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+EnvironmentFile=@H@/hub.env
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=@H@/app/papercast-group
+ExecStart=@H@/venv/bin/python -m hub.app
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+# Shared machine: stay out of other people's way.
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+UMask=0077
+# The hub itself is small (stdlib HTTP, SQLite, the layout's numpy): a runaway stops here.
+MemoryMax=4G
+
+[Install]
+WantedBy=default.target

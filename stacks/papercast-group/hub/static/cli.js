@@ -71,6 +71,15 @@
 
   async function start() {
     const code = normCode(new URLSearchParams(location.search).get("code"));
+    // With passwords, a browser that is not signed in (or still has the first password) goes
+    // through the sign-in page and comes back here, code and all.
+    let st = null;
+    try { st = await api("GET", "/api/auth/state"); } catch (err) { /* an older hub: /api/me decides */ }
+    if (st && st.mode === "password" && (!st.signed_in || st.must_change)) {
+      const back = encodeURIComponent(location.pathname + location.search);
+      location.replace((st.signed_in ? "/set-password?next=" : "/signin?next=") + back);
+      return;
+    }
     let me;
     try {
       me = await api("GET", "/api/me");

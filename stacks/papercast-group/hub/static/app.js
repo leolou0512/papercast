@@ -67,9 +67,19 @@
     try { j = await r.json(); } catch (e) { /* not JSON */ }
     if (!r.ok) {
       const err = new Error((j && j.message) || `HTTP ${r.status}`);
-      err.code = j && j.error; err.status = r.status; throw err;
+      err.code = j && j.error; err.status = r.status;
+      if (passwordMode() || !S.cfg) signedOut(err);
+      throw err;
     }
     return j;
+  }
+  // With passwords, a session that ended (a new password, "sign out everywhere", removal) sends
+  // the page to the sign-in page, which brings it back here.
+  const passwordMode = () => !!(S.cfg && S.cfg.auth === "password");
+  function signedOut(err) {
+    const back = encodeURIComponent(location.pathname + location.search + location.hash);
+    if (err.status === 401 && err.code === "login_required") location.replace(`/signin?next=${back}`);
+    else if (err.status === 403 && err.code === "must_change_password") location.replace(`/set-password?next=${back}`);
   }
 
   // ------------------------------------------------------------------ icons (constants)
@@ -1134,14 +1144,14 @@
   // ------------------------------------------------------------------ settings
   // Preferences (how this person's own versions are made), Devices (where papercast is logged
   // in as them), and for admins Users and the Base prompt. Each tab reads the hub when opened.
-  const TABS = [["prefs", "Preferences"], ["devices", "Devices"], ["users", "Users", true], ["base", "Base prompt", true]];
+  const TABS = [["prefs", "Preferences"], ["devices", "Devices"], ["account", "Account", false, true], ["users", "Users", true], ["base", "Base prompt", true]];
   const PREF_TEXT = {
     maths: ["Maths", { words: "In words", "key-steps": "Key steps", full: "Full derivations" },
       "In words only, the key steps, or the whole derivation walked through (the equations go on the explainer page)."],
     emphasis: ["What gets more time", { balanced: "Balanced", theory: "Theory", method: "Method", practice: "Practice" }, ""],
     background: ["What the listener already knows", { newcomer: "New to the field", field: "Works in the field", specialist: "Specialist" }, ""],
   };
-  const tabsFor = () => TABS.filter((t) => !t[2] || isAdmin());
+  const tabsFor = () => TABS.filter((t) => (!t[2] || isAdmin()) && (!t[3] || passwordMode()));
   function openSettings(which) {
     S.open = null;
     closeExplainer(); closeMenu();
@@ -1172,7 +1182,7 @@
     }, label)));
     const body = $("set-body");
     body.replaceChildren(el("p", { class: "muted intro", id: "set-loading", text: "Loading…" }));
-    ({ prefs: prefsTab, devices: devicesTab, users: usersTab, base: baseTab })[S.setTab](body);
+    ({ prefs: prefsTab, devices: devicesTab, account: accountTab, users: passwordMode() ? peopleTab : usersTab, base: baseTab })[S.setTab](body);
   }
   const stillOn = (t) => S.view === "settings" && S.setTab === t;
   const failed = (body, e) => body.replaceChildren(el("p", { class: "err", text: e.message }));
@@ -1315,6 +1325,221 @@
     body.replaceChildren(...kids);
   }
 
+  // Password sign-in (PCG_AUTH=password): this person's name, password and sessions.
+  function pwField(id, label, auto) {
+    const f = el("input", { class: "field", type: "password", id, autocomplete: auto, maxlength: "256" });
+    f.setAttribute("aria-labelledby", `${id}-l`);
+    return [el("span", { class: "fld-l", id: `${id}-l`, text: label }), f];
+  }
+  async function accountTab(body) {
+    const me = S.me || {};
+    const name = el("input", { class: "field", id: "acct-name", maxlength: "60", autocomplete: "name", "aria-label": "Your name" });
+    name.value = me.name || "";
+    const nameMsg = el("span", { class: "ok", id: "acct-name-msg", role: "status" });
+    const nameSave = el("button", { type: "button", class: "btn-accent", id: "acct-name-save", text: "Save" });
+    nameSave.addEventListener("click", async () => {
+      nameSave.disabled = true;
+      try {
+        const r = await api("PUT", "/api/me", { name: name.value });
+        S.me.name = r.name; name.value = r.name;
+        $("set-who").textContent = [S.me.name, S.me.email, S.me.role].filter(Boolean).join(" · ");
+        nameMsg.className = "ok"; nameMsg.textContent = "Saved";
+      } catch (e) { nameMsg.className = "err"; nameMsg.textContent = e.message; }
+      nameSave.disabled = false;
+    });
+    const [curL, cur] = pwField("acct-cur", "Current password", "current-password");
+    const [newL, nw] = pwField("acct-new", "New password", "new-password");
+    const user = el("input", { type: "text", autocomplete: "username", value: me.username || "", hidden: true, readonly: true, "aria-hidden": "true", tabindex: "-1" });
+    const pwMsg = el("p", { class: "err", id: "acct-pw-msg", role: "status" });
+    const pwSave = el("button", { type: "submit", class: "btn-accent", id: "acct-pw-save", text: "Change password" });
+    const form = el("form", { id: "acct-pw", novalidate: true }, user, curL, cur, newL, nw,
+      el("p", { class: "muted", text: "At least 10 characters, and not your username. Every other browser signed in as you is signed out." }),
+      el("div", { class: "save-row" }, pwSave), pwMsg);
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      pwMsg.className = "err"; pwMsg.textContent = "";
+      pwSave.disabled = true;
+      try {
+        await api("POST", "/api/auth/password", { current: cur.value, password: nw.value });
+        cur.value = ""; nw.value = "";
+        pwMsg.className = "ok"; pwMsg.textContent = "Changed. Every other browser is signed out.";
+      } catch (err) { pwMsg.textContent = err.message; }
+      pwSave.disabled = false;
+    });
+    const out = el("button", { type: "button", class: "btn-accent", id: "acct-out", text: "Sign out" });
+    const all = el("button", { type: "button", class: "text-btn danger", id: "acct-out-all", text: "Sign out everywhere" });
+    out.addEventListener("click", async () => {
+      out.disabled = true;
+      try { await api("POST", "/api/auth/signout"); } catch (e) { /* the cookie is cleared either way */ }
+      location.replace("/signin");
+    });
+    let armed = false;
+    all.addEventListener("click", async () => {
+      if (!armed) { armed = true; all.textContent = "Sign out everywhere now"; return; }
+      all.disabled = true;
+      try { await api("POST", "/api/auth/signout-all"); location.replace("/signin"); } catch (e) { all.disabled = false; toast(e.message); }
+    });
+    body.replaceChildren(
+      el("p", { class: "intro", text: "Your name as the group sees it, your password, and where you are signed in." }),
+      el("p", { class: "pref-h", text: "Name" }), el("div", { class: "invite first" }, name, nameSave), nameMsg,
+      el("p", { class: "pref-h sec", text: "Change password" }), form,
+      el("p", { class: "pref-h sec", text: "Sign out" }),
+      el("p", { class: "muted", text: "Sign out everywhere ends every browser session of yours, this one too. papercast on your computers stays logged in: remove those under Devices." }),
+      el("div", { class: "save-row" }, out, all));
+  }
+
+  // Users with password sign-in: the group's list of Imperial addresses. Adding a short code
+  // makes the account at once (username = the short code, which is also the first password,
+  // replaced at the first sign-in); removing one disables the account, ending its sessions and
+  // devices, and keeps what they made.
+  const EVENTS = {
+    signin: "signed in", signin_failed: "sign-in failed", signin_limited: "sign-ins paused after too many failures",
+    signout_all: "signed out everywhere", password_changed: "changed the password", password_change_failed: "typed a wrong current password",
+    reset_asked: "asked for a new password", reset_unknown: "asked for a new password: not on the list", reset_limited: "asked for too many links",
+    link_sent: "password link emailed", email_failed: "email failed", link_made: "password link made", link_used: "set a password with a link",
+    reset_default: "reset to the first password", allowed: "added to the list", removed: "removed from the list",
+    role: "role changed", disabled: "disabled changed",
+  };
+  const CODE_RX = /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/;
+  function codeOf(v) {
+    const s = v.trim().toLowerCase();
+    if (!s) return { err: "" };
+    const m = /^(.*)@ic\.ac\.uk$/.exec(s);
+    if (s.includes("@") && !m) return { err: "Only @ic.ac.uk here: type the short code, like yl6719." };
+    const c = m ? m[1] : s;
+    return CODE_RX.test(c) && c.length <= 64 ? { code: c } : { err: "A short code is letters and digits, maybe with dots or hyphens, like yl6719." };
+  }
+  async function peopleTab(body) {
+    let j, lg;
+    try { [j, lg] = await Promise.all([api("GET", "/api/admin/users"), api("GET", "/api/admin/auth-log?limit=100")]); }
+    catch (e) { if (stillOn("users")) failed(body, e); return; }
+    if (!stillOn("users")) return;
+    const users = listOf(j, "users");
+    const again = () => { if (stillOn("users")) peopleTab(body); };
+    const ROLES = ["viewer", "contributor", "admin"];
+
+    // add: the short code, with @ic.ac.uk fixed after it
+    const code = el("input", { class: "field", id: "add-code", autocomplete: "off", autocapitalize: "off", spellcheck: "false",
+      maxlength: "80", placeholder: "short code, like yl6719", "aria-label": "Short code", enterkeyhint: "done" });
+    const add = el("button", { type: "submit", class: "btn-accent", id: "add-go", text: "Add", disabled: true });
+    const addMsg = el("p", { class: "muted", id: "add-msg", role: "status" });
+    code.addEventListener("input", () => {
+      const c = codeOf(code.value);
+      add.disabled = !c.code;
+      addMsg.className = c.err ? "err" : "muted"; addMsg.textContent = c.err || "";
+    });
+    const addForm = el("form", { class: "invite first", id: "add-form", novalidate: true },
+      el("div", { class: "addr" }, code, el("span", { class: "suffix", "aria-hidden": "true", text: "@ic.ac.uk" })), add);
+    addForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const c = codeOf(code.value);
+      if (!c.code) return;
+      add.disabled = true;
+      try {
+        const r = await api("POST", "/api/admin/allowed", { email: c.code });
+        S.set.added = r.state === "already" ? `${r.email} is already on the list.`
+          : `Added ${r.email}. Tell them: username ${r.username}, first password ${r.username}${r.user && !r.user.must_change ? " (or the one they had)" : ""}.`;
+        again();
+      } catch (err) { addMsg.className = "err"; addMsg.textContent = err.message; add.disabled = false; }
+    });
+    if (S.set.added) { addMsg.className = "ok"; addMsg.textContent = S.set.added; S.set.added = null; }
+
+    const put = async (u, change, undo) => {
+      try {
+        const r = await api("PUT", `/api/admin/users/${encodeURIComponent(u.id)}`, change);
+        Object.assign(u, change, r && r.id !== undefined ? r : {});
+        toast(`Saved ${u.username || u.name}`, null, 3000);
+      } catch (e) { undo(); toast(e.message); }
+    };
+    // what opens under a row: a password link to copy, or a confirm step
+    function panel(li, kids) {
+      const old = li.querySelector(".it-more");
+      if (old) old.remove();
+      if (kids) li.append(el("div", { class: "it-more" }, kids));
+    }
+    async function linkFor(u, li) {
+      try {
+        const r = await api("POST", `/api/admin/users/${u.id}/reset-link`);
+        const out = el("input", { class: "field", type: "text", readonly: true, id: `link-${u.id}`, "aria-label": `Password link for ${u.username}` });
+        out.value = r.url;
+        const copy = el("button", { type: "button", class: "text-btn", text: "Copy", onclick: () => {
+          try { navigator.clipboard.writeText(out.value).then(() => toast("Copied", null, 2000), () => out.select()); } catch (e) { out.select(); }
+        } });
+        panel(li, [out, copy, el("button", { type: "button", class: "text-btn", text: "Close", onclick: () => panel(li) }),
+          el("p", { class: "muted", text: `Works once, for 24 hours: send it to ${u.username} yourself.` })]);
+      } catch (e) { toast(e.message); }
+    }
+    function resetDefault(u, li) {
+      const go = el("button", { type: "button", class: "btn-accent", text: "Reset" });
+      go.addEventListener("click", async () => {
+        go.disabled = true;
+        try { await api("POST", `/api/admin/users/${u.id}/reset-default`); toast(`${u.username} has the first password again`, null, 4000); again(); }
+        catch (e) { go.disabled = false; toast(e.message); }
+      });
+      panel(li, [el("p", { class: "muted", text: `Sets the password back to ${u.username} and ends every session and device of theirs.` }),
+        go, el("button", { type: "button", class: "text-btn", text: "Cancel", onclick: () => panel(li) })]);
+    }
+    function remove(u, li) {
+      const word = el("input", { class: "field", id: `del-${u.id}`, autocomplete: "off", autocapitalize: "off", spellcheck: "false",
+        placeholder: "delete", "aria-label": "Type delete to confirm" });
+      const go = el("button", { type: "button", class: "btn-accent danger", id: `del-go-${u.id}`, text: "Remove", disabled: true });
+      word.addEventListener("input", () => { go.disabled = word.value.trim().toLowerCase() !== "delete"; });
+      go.addEventListener("click", async () => {
+        go.disabled = true;
+        try {
+          await api("DELETE", "/api/admin/allowed", { email: u.email, confirm: word.value });
+          toast(`Removed ${u.email}`, null, 4000);
+          again();
+        } catch (e) { go.disabled = false; toast(e.message); }
+      });
+      panel(li, [el("p", { class: "muted", text: `Type delete to remove ${u.email}. They can no longer sign in, and their sessions and devices end; the episodes and graph edits they made stay, still theirs.` }),
+        word, go, el("button", { type: "button", class: "text-btn", text: "Cancel", onclick: () => panel(li) })]);
+      word.focus();
+    }
+
+    const listed = users.filter((u) => u.on_list);
+    const ul = el("ul", { class: "items", id: "users" }, listed.map((u) => {
+      const li = el("li", { class: "item", "data-id": String(u.id) });
+      const role = el("select", { class: "pick", "aria-label": `Role of ${u.username || u.name}` },
+        ROLES.map((r) => el("option", { value: r, text: r[0].toUpperCase() + r.slice(1), selected: u.role === r })));
+      role.addEventListener("change", () => { const was = u.role; put(u, { role: role.value }, () => { role.value = was; }); });
+      const mine = u.id === S.me.id;
+      const more = el("button", { type: "button", class: "icon-btn", "aria-label": `More for ${u.username || u.name}`, "aria-haspopup": "menu", html: I.more });
+      more.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openMenu(more, `user-${u.id}`, [mItem("Make a password link", () => linkFor(u, li))]
+          .concat(mine ? [] : [mItem("Reset to the first password", () => resetDefault(u, li)), mItem("Remove…", () => remove(u, li), "danger")]));
+      });
+      const sub = [u.name && u.name !== u.username ? u.username : u.email,
+        u.default_password ? el("span", { class: "warn", text: "first password" }) : null,
+        u.last_login_at ? `last signed in ${when(u.last_login_at)}` : "never signed in",
+        u.reset_asked_at ? el("span", { class: "warn", text: `asked for a new password ${when(u.reset_asked_at)}` }) : null,
+        u.disabled ? el("span", { class: "warn", text: "disabled" }) : null,
+        u.note && u.note !== "bootstrap" ? u.note : null].filter(Boolean);
+      const s = el("div", { class: "it-s" });
+      sub.forEach((x, i) => { if (i) s.append(" · "); s.append(x); });
+      li.append(el("div", { class: "it-main" }, el("div", { class: "it-t", text: `${u.name || u.username}${mine ? " (you)" : ""}` }), s),
+        el("div", { class: "it-ctl" }, role, more));
+      return li;
+    }));
+    const off = users.filter((u) => !u.on_list);
+    const events = (lg && lg.events) || [];
+    const evs = el("ul", { class: "events", id: "auth-log" }, events.slice(0, 50).map((e) => {
+      const who = e.user ? (e.user.username || e.user.name) : (e.email || "");
+      const bits = [who, EVENTS[e.kind] || e.kind, e.actor ? `by ${e.actor.name}` : "", e.detail || "", e.ip || ""].filter(Boolean);
+      return el("li", { class: "ev", "data-kind": e.kind }, el("span", { class: "ev-t t", text: when(e.at) }), el("span", { class: "ev-x", text: bits.join(" · ") }));
+    }));
+    if (!events.length) evs.append(el("li", { class: "muted", text: "Nothing yet." }));
+    body.replaceChildren(...[
+      el("p", { class: "intro", text: "Only Imperial addresses on this list can sign in. Contributors also add papers with papercast; admins also manage people and the base prompt." }),
+      el("p", { class: "pref-h", text: "Add someone" }), addForm, addMsg,
+      el("p", { class: "muted", text: "They sign in with the short code as username and as first password, and choose their own straight away. They start as contributors." }),
+      el("p", { class: "pref-h sec", text: `On the list (${listed.length})` }), ul,
+      j && j.email === false ? el("p", { class: "muted", id: "no-email", text: "This hub cannot send email yet, so someone who forgets their password shows up here as “asked for a new password”: reset them to the first password, or make them a password link." }) : null,
+      off.length ? el("p", { class: "muted", id: "off-list", text: `Not on the list, so they cannot sign in: ${off.map((u) => u.username || u.email).join(", ")}. Add one again to bring the account back.` }) : null,
+      el("p", { class: "pref-h sec", text: "Sign-ins and changes" }), evs].filter(Boolean));
+  }
+
   async function baseTab(body) {
     let j;
     try { j = await api("GET", "/api/admin/base"); } catch (e) { if (stillOn("base")) failed(body, e); return; }
@@ -1377,6 +1602,7 @@
       if (S.es !== es) return;
       setOffline(true);
       if (es.readyState !== EventSource.CLOSED) return;
+      if (passwordMode()) api("GET", "/api/config").catch(() => {});     // a session that ended: to the sign-in page
       S.esRetry = setTimeout(() => { if (S.es === es) connect(); }, Math.min(30000, 2000 * 2 ** Math.min(4, S.esFails++)));
     });
     const on = (t, fn) => es.addEventListener(t, (e) => {

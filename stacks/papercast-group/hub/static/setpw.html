@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<title>New password · papercast</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/auth.css">
+<script src="/setpw.js" defer></script>
+</head>
+<body>
+<main class="box">
+  <h1 id="title">Set a new password</h1>
+  <p class="msg" id="msg" aria-live="polite">Loading…</p>
+
+  <form id="setpw" hidden novalidate>
+    <span class="lbl" id="username-l">Username</span>
+    <input class="field" id="username" aria-labelledby="username-l" name="username" autocomplete="username" readonly>
+    <span class="lbl" id="password-l">New password</span>
+    <div class="pw">
+      <input class="field" id="password" aria-labelledby="password-l" name="password" type="password" autocomplete="new-password" maxlength="256"
+             enterkeyhint="done" aria-describedby="rules">
+      <button type="button" class="text-btn show" id="show" aria-controls="password" aria-pressed="false">Show</button>
+    </div>
+    <p class="sub" id="rules">At least 10 characters, and not your username. A few words you will remember make a good one.</p>
+    <div class="row wrap">
+      <button type="submit" class="btn-accent" id="save">Save and sign in</button>
+      <button type="button" class="text-btn" id="out" hidden>Sign out</button>
+    </div>
+  </form>
+
+  <div id="dead" hidden>
+    <div class="row"><a class="btn-accent link-btn" id="to-signin" href="/signin">Go to sign in</a></div>
+  </div>
+</main>
+</body>
+</html>

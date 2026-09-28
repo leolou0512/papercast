@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<title>Sign in · papercast</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/auth.css">
+<script src="/signin.js" defer></script>
+</head>
+<body>
+<main class="box">
+  <h1 id="title">Sign in to papercast</h1>
+  <p class="msg" id="msg" aria-live="polite">Loading…</p>
+
+  <form id="signin" hidden novalidate>
+    <span class="lbl" id="login-l">Username or email</span>
+    <input class="field" id="login" aria-labelledby="login-l" name="username" autocomplete="username" autocapitalize="off" spellcheck="false"
+           maxlength="200" enterkeyhint="next">
+    <span class="lbl" id="password-l">Password</span>
+    <div class="pw">
+      <input class="field" id="password" aria-labelledby="password-l" name="password" type="password" autocomplete="current-password" maxlength="256"
+             enterkeyhint="go">
+      <button type="button" class="text-btn show" id="show" aria-controls="password" aria-pressed="false">Show</button>
+    </div>
+    <div class="row wrap">
+      <button type="submit" class="btn-accent" id="go">Sign in</button>
+      <button type="button" class="text-btn" id="forgot-open">Forgot your password?</button>
+    </div>
+    <p class="sub hint">New here? Ask an admin to add you.</p>
+  </form>
+
+  <form id="forgot" hidden novalidate>
+    <p class="sub" id="forgot-sub"></p>
+    <span class="lbl" id="email-l">Email</span>
+    <input class="field" id="email" aria-labelledby="email-l" type="email" autocomplete="email" autocapitalize="off" spellcheck="false"
+           maxlength="200" enterkeyhint="send">
+    <div class="row wrap">
+      <button type="submit" class="btn-accent" id="send">Send the link</button>
+      <button type="button" class="text-btn" id="forgot-back">Back to sign in</button>
+    </div>
+  </form>
+
+  <div id="asked" hidden>
+    <div class="row"><button type="button" class="text-btn" id="asked-back">Back to sign in</button></div>
+  </div>
+</main>
+</body>
+</html>

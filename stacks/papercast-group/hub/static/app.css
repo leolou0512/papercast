@@ -333,6 +333,24 @@ svg { display: block; }
 }
 .invite { margin-top: 24px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .invite .field { flex: 1; min-width: 200px; margin: 0; }
+.invite.first { margin-top: 0; }
+.pref-h.sec { margin-top: 32px; }
+.fld-l { display: block; font-size: 13px; line-height: 18px; color: var(--text-2); margin: 12px 0 4px; }
+#acct-pw .field { width: 100%; max-width: 360px; display: block; }
+#acct-name { max-width: 360px; }
+.set-body .text-btn.danger { color: var(--danger); }
+.btn-accent.danger { background-color: var(--danger); }
+.addr { flex: 1; min-width: 200px; display: flex; align-items: center; gap: 6px; }
+.addr .field { flex: 1; min-width: 0; margin: -4px 0; }
+.addr .suffix { font-size: 14px; color: var(--text-2); }
+.it-s .warn { color: var(--warn); }
+.it-more { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 4px 0 2px; }
+.it-more .muted { flex-basis: 100%; margin: 0; }
+.it-more .field { flex: 1; min-width: 180px; }
+.events { list-style: none; margin: 8px 0 0; padding: 0; }
+.ev { display: flex; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--hairline); font-size: 13px; line-height: 18px; }
+.ev-t { flex: none; min-width: 72px; color: var(--text-2); }
+.ev-x { min-width: 0; overflow-wrap: anywhere; }
 .vers { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .guide {
   white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/20px var(--mono); background: var(--surface);

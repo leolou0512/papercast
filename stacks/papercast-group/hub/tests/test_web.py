@@ -397,7 +397,10 @@ class Web(unittest.TestCase):
         from hub.app import PAGE_CSP
         st, got, h = self.r.req("GET", "/", raw=True)
         self.assertEqual((st, h["Content-Security-Policy"]), (200, PAGE_CSP))
-        self.assertEqual(self.r.req("GET", "/", user=None)[0], 401)
+        # signed out, the page is the sign-in page (a 303 to /signin), not a JSON 401
+        st2, body2, _ = self.r.req("GET", "/", user=None, raw=True)
+        self.assertEqual(st2, 200)
+        self.assertIn(b'src="/signin.js"', body2)
         html = got.decode()
         self.assertNotRegex(html, r"<script(?![^>]*\bsrc=)")           # no inline script
         self.assertNotRegex(html, r"<style|\sstyle=|\son[a-z]+=")       # no inline style or handler

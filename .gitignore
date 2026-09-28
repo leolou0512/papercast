@@ -9,3 +9,5 @@ hub.env
 worker.env
 worker.token
 data/
+tunnel.token
+smtp.password

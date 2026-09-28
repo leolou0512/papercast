@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Copy this checkout to perov (val-perovskite) for deploy/install.sh: the repo without .git, into
-# ~/papercast-group/repo/ there, with the commit it came from in repo/.revision.
+# Copy what perov needs to ~/papercast-group/repo/ there, for deploy/install.sh: only committed
+# files (git archive of HEAD), and only the parts the group hub uses (stacks/papercast-group,
+# packages/papercast-cli, stacks/papercast/voice for install-voice.sh). Never the working tree:
+# it holds ignored files (secrets/, .env) that must not leave stibnite.
 #
 #   bash stacks/papercast-group/tools/sync_to_perov.sh [user@host]
 #
@@ -8,10 +10,14 @@
 set -euo pipefail
 DEST=${1:-leo@100.97.205.90}
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
-rev=$(git -C "$REPO" describe --always --dirty 2>/dev/null || echo unknown)
-branch=$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)
+rev=$(git -C "$REPO" rev-parse --short HEAD)
+branch=$(git -C "$REPO" rev-parse --abbrev-ref HEAD)
+if ! git -C "$REPO" diff --quiet HEAD -- stacks/papercast-group packages/papercast-cli stacks/papercast/voice; then
+    echo "note: uncommitted changes are not synced (HEAD $rev is)" >&2
+fi
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+git -C "$REPO" archive HEAD stacks/papercast-group packages/papercast-cli stacks/papercast/voice | tar -x -C "$tmp"
 ssh -o BatchMode=yes "$DEST" 'umask 077; mkdir -p ~/papercast-group/repo && chmod 700 ~/papercast-group'
-rsync -a --delete --exclude .git --exclude .claude --exclude __pycache__ --exclude '*.pyc' \
-    "$REPO/" "$DEST:papercast-group/repo/"
+rsync -a --delete "$tmp/" "$DEST:papercast-group/repo/"
 echo "$rev ($branch, synced $(date -u +%Y-%m-%dT%H:%M:%SZ))" | ssh -o BatchMode=yes "$DEST" 'cat > ~/papercast-group/repo/.revision'
-echo "synced $REPO ($rev) -> $DEST:papercast-group/repo"
+echo "synced $rev ($branch) -> $DEST:papercast-group/repo"

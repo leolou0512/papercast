@@ -1,0 +1,1442 @@
+// papercast-group: Leo's one page ("Now Playing", stacks/papercast/web/static/app.js) for a
+// group. The list and the player as Leo's; no chat, no adding (that is `papercast add`, on each
+// person's own machine). A paper can have several versions, each made by one person with their
+// preferences; the row shows who made the one that plays, the window lists them all. Listened
+// and positions are each person's own. Nothing is fetched from anywhere else, and every string
+// that came from a paper or a person is inserted as text, never as HTML. The page's CSP (no
+// inline script, no inline style) is the second fence behind that.
+"use strict";
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const A = () => $("audio");
+  const S = {
+    cfg: null, me: {}, papers: new Map(), q: "", open: null, view: "list",
+    es: null, lastId: "", esRetry: null, esFails: 0, offTimer: null,
+    audioEp: null, audioPaper: null, audioReady: null, afterReady: null, dirty: false,
+    miniEp: null, speed: 1, swiped: null, swipeEnd: 0, flash: null,
+    rows: new Map(), menu: null, lastFocus: null, scrubbing: null,
+    build: "", reloadFor: "", typedAt: 0,
+    tag: null, sort: "added_desc", details: false,
+    epPaper: new Map(),       // episode id -> paper id
+    setTab: "prefs", set: {},
+  };
+  const SPEEDS = [1, 1.25, 1.5, 1.75, 2, 0.75];
+  const phone = () => window.matchMedia("(max-width: 720px)").matches;
+  const isAdmin = () => S.me && S.me.role === "admin";
+  const store = {
+    get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* private mode */ } },
+    del(k) { try { localStorage.removeItem(k); } catch (e) { /* private mode */ } },
+  };
+  // This tab only, and it survives location.reload(): the tag filter, the build reloaded for.
+  const tab = {
+    get(k) { try { return sessionStorage.getItem(k); } catch (e) { return null; } },
+    set(k, v) { try { sessionStorage.setItem(k, v); } catch (e) { /* private mode */ } },
+    del(k) { try { sessionStorage.removeItem(k); } catch (e) { /* private mode */ } },
+  };
+  // What is one person's on a shared device (positions, which version plays) is kept under
+  // their id.
+  const mine = (k) => `pcg.${S.me && S.me.id !== undefined ? S.me.id : 0}.${k}`;
+
+  // `html` is only ever given this file's own icon strings.
+  function el(tag, attrs, ...kids) {
+    const e = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (v === null || v === undefined || v === false) continue;
+      if (k === "class") e.className = v;
+      else if (k === "text") e.textContent = v;
+      else if (k === "html") e.innerHTML = v;
+      else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+      else e.setAttribute(k, v === true ? "" : v);
+    }
+    for (const c of kids.flat()) if (c !== null && c !== undefined && c !== false) e.append(c);
+    return e;
+  }
+
+  // Every request carries X-PCG (the hub's CSRF fence, SPEC section 2).
+  async function api(method, path, body, more) {
+    const opt = { method, headers: { "X-PCG": "1" }, credentials: "same-origin" };
+    if (more && more.keepalive) opt.keepalive = true;
+    if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
+    let r;
+    try { r = await fetch(path, opt); } catch (e) {
+      const err = new Error("The hub did not answer (or the sign-in expired: reload the page).");
+      err.code = "network"; throw err;
+    }
+    let j = null;
+    try { j = await r.json(); } catch (e) { /* not JSON */ }
+    if (!r.ok) {
+      const err = new Error((j && j.message) || `HTTP ${r.status}`);
+      err.code = j && j.error; err.status = r.status; throw err;
+    }
+    return j;
+  }
+
+  // ------------------------------------------------------------------ icons (constants)
+  const I = {
+    play: (s = 20) => `<svg width="${s}" height="${s}" viewBox="0 0 20 20" aria-hidden="true"><path d="M6 3.8v12.4a.8.8 0 0 0 1.2.7l10-6.2a.8.8 0 0 0 0-1.4l-10-6.2A.8.8 0 0 0 6 3.8Z" fill="currentColor"/></svg>`,
+    pause: (s = 20) => `<svg width="${s}" height="${s}" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><rect x="4.5" y="3.5" width="4" height="13" rx="1"/><rect x="11.5" y="3.5" width="4" height="13" rx="1"/></svg>`,
+    skip: (n, fwd) => `<svg width="32" height="32" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <g ${fwd ? 'transform="translate(32 0) scale(-1 1)"' : ""}><path d="M16 5a11 11 0 1 1-10.4 7.4"/><path d="M19 2 15.6 5 19 8"/></g>
+      <text x="16" y="20" text-anchor="middle" font-size="9.5" font-weight="700" fill="currentColor" stroke="none" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif">${n}</text></svg>`,
+    more: `<svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><circle cx="4.5" cy="10" r="1.6"/><circle cx="10" cy="10" r="1.6"/><circle cx="15.5" cy="10" r="1.6"/></svg>`,
+    back: `<svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4 7 11l7 7"/></svg>`,
+    doc: `<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M4 1.8h6.5L14 5.3v10.9H4z"/><path d="M6.5 8.5h5M6.5 11h5M6.5 13.5h3" stroke-linecap="round"/></svg>`,
+    check: `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m2.5 7.5 3 3 6-7"/></svg>`,
+    close: `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg>`,
+    sort: `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3.5 5.5h13M3.5 10h9M3.5 14.5h5"/></svg>`,
+    // the row's listened tick: a quiet ring until this person ticks it, then a filled grey disc
+    tick: (on) => on
+      ? `<svg width="22" height="22" viewBox="0 0 22 22" aria-hidden="true"><circle cx="11" cy="11" r="10" fill="var(--text-2)"/><path d="m6.5 11.3 3 3 6-6.3" fill="none" stroke="var(--bg)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`
+      : `<svg width="22" height="22" viewBox="0 0 22 22" aria-hidden="true"><circle cx="11" cy="11" r="9.75" fill="none" stroke="var(--track)" stroke-width="1.5"/><path d="m6.5 11.3 3 3 6-6.3" fill="none" stroke="var(--track)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  };
+
+  // ------------------------------------------------------------------ formatting
+  const pad = (n) => String(n).padStart(2, "0");
+  function hms(s) {
+    s = Math.max(0, Math.floor(s || 0));
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60;
+    return h ? `${h}:${pad(m)}:${pad(x)}` : `${m}:${pad(x)}`;
+  }
+  const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  function when(iso) {
+    if (!iso) return "";
+    const d = new Date(iso);
+    if (isNaN(d)) return "";
+    const now = new Date(), hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    if (d.toDateString() === now.toDateString()) return hm;
+    if (now - d < 6 * 86400000 && now - d > 0) return `${DAYS[d.getDay()]} ${hm}`;
+    return `${d.getDate()} ${MONTHS[d.getMonth()]}${d.getFullYear() !== now.getFullYear() ? ` ${d.getFullYear()}` : ""}`;
+  }
+  function day(iso) {
+    const d = new Date(iso || "");
+    return isNaN(d) ? "" : `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+  }
+  // The paper's title, or "" when it is not known: then a short grey bar, never an id.
+  const displayTitle = (p) => (typeof p.title === "string" ? p.title : "");
+  function titleInto(node, p) {
+    const t = displayTitle(p);
+    if (t) node.textContent = t;
+    else node.replaceChildren(el("span", { class: "tbar", "aria-label": "Title not known" }));
+    return t;
+  }
+  function shortAuthors(p) {
+    const a = p.authors || [];
+    const last = (n) => String(n).trim().split(/\s+/).slice(-1)[0];
+    if (!a.length) return "";
+    if (a.length === 1) return last(a[0]);
+    if (a.length === 2) return `${last(a[0])} and ${last(a[1])}`;
+    return `${last(a[0])} et al.`;
+  }
+  const short = (t, n = 26) => (t.length > n ? `${t.slice(0, n - 2).trimEnd()}…` : t);
+  const makerName = (e) => (e && e.made_by && e.made_by.name) || "someone";
+  // "by Alice · derivations": who made a version, and the preferences it was made with.
+  const whoLine = (e) => [`by ${makerName(e)}`, e.prefs_summary].filter(Boolean).join(" · ");
+  function speakPct(e) {
+    let x = Number(e.progress);
+    if (!isFinite(x)) return 0;
+    if (x <= 1) x *= 100;       // the voice worker's progress is a fraction
+    return Math.max(0, Math.min(100, Math.round(x)));
+  }
+
+  // ------------------------------------------------------------------ versions
+  function indexEps(p) { for (const e of p.episodes || []) S.epPaper.set(e.id, p.id); }
+  function epById(eid) {
+    const p = S.papers.get(S.epPaper.get(eid));
+    return (p && (p.episodes || []).find((e) => e.id === eid)) || null;
+  }
+  const anyAudio = (p) => (p.episodes || []).some((e) => e.has_audio);
+  // The version that plays: the one picked in the window on this device; else the one in the
+  // player; else one part-way through (where this person left it); else their own; else the
+  // first made. Versions with audio come before those still being made.
+  function chosen(p) {
+    const eps = (p && p.episodes) || [];
+    if (!eps.length) return null;
+    const pk = store.get(mine(`pick.${p.id}`));
+    let c = pk && eps.find((e) => e.id === pk);
+    if (c) return c;
+    if (S.audioPaper === p.id && (c = eps.find((e) => e.id === S.audioEp))) return c;
+    const ready = eps.filter((e) => e.has_audio);
+    let best = null, bestAt = -1;
+    for (const e of ready) {
+      const n = newestPos(e, localPos(e.id)), d = e.duration_s || 0;
+      if (n.s > 0 && (!d || n.s < d - 2) && n.at > bestAt) { best = e; bestAt = n.at; }
+    }
+    if (best) return best;
+    const pool = ready.length ? ready : eps;
+    return pool.find((e) => e.mine) || pool[0];
+  }
+
+  // ------------------------------------------------------------------ positions
+  // {s, at}: the position and when it was taken (ms). The hub keeps each person's; this device
+  // keeps its own copy too, for when the hub cannot be reached. The newer one wins, so the phone
+  // resumes where the desktop stopped.
+  const posKey = (eid) => mine(`pos.${eid}`);
+  function localPos(eid) {
+    const raw = store.get(posKey(eid));
+    if (raw === null) return null;
+    try {
+      const v = JSON.parse(raw);
+      if (v && typeof v.s === "number" && v.s >= 0) return { s: v.s, at: Number(v.at) || 0 };
+    } catch (e) { /* junk */ }
+    return null;
+  }
+  function newestPos(e, l) {
+    const n = { s: e.position_s || 0, at: e.position_at || 0 };
+    return l && l.at > n.at ? l : n;
+  }
+  function durOf(e) {
+    const a = A();
+    if (S.audioEp === e.id && isFinite(a.duration) && a.duration > 0) return a.duration;
+    return e.duration_s || 0;
+  }
+  function posOf(e) {
+    const a = A();
+    if (S.audioEp === e.id && S.audioReady === e.id) return a.ended ? durOf(e) : a.currentTime;
+    return newestPos(e, localPos(e.id)).s;
+  }
+  const isPlaying = (eid) => !!eid && S.audioEp === eid && !A().paused && !A().ended;
+
+  // ------------------------------------------------------------------ toast
+  let toastTimer = null;
+  function toast(msg, action, ms) {
+    const t = $("toast"), b = $("toast-act");
+    $("toast-msg").textContent = msg;
+    t.classList.toggle("one", !!action);
+    b.hidden = !action;
+    b.onclick = null;
+    if (action) {
+      b.textContent = action.label;
+      b.onclick = () => { hideToast(); action.fn(); };
+    }
+    t.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(hideToast, ms || (action ? 10000 : 6000));
+  }
+  function hideToast() { clearTimeout(toastTimer); $("toast").hidden = true; }
+
+  // ------------------------------------------------------------------ listened
+  // Each person's own tick: shown at once, stored on the hub. Changes to one paper go one after
+  // another, and until the last is answered what was set is what the page shows: an event or
+  // an answer that left before the newest change cannot bring an older tick back.
+  S.edits = new Map();      // id -> {listened, n: requests in flight, chain, failed, last}
+  function pinEdits(v) {
+    const e = v && S.edits.get(v.id);
+    if (e && "listened" in e) v.listened = e.listened;
+    return v;
+  }
+  function setListened(id, on) {
+    const p = S.papers.get(id);
+    if (!p) return;
+    const e = S.edits.get(id) || { n: 0, chain: Promise.resolve(), failed: null, last: null };
+    S.edits.set(id, e);
+    e.listened = !!on; e.n++;
+    p.listened = !!on;
+    renderList();
+    if (S.open === id) renderWin();
+    const body = { listened: !!on };
+    e.chain = e.chain.then(() => api("PUT", `/api/papers/${id}/listened`, body))
+      .then((v) => { e.last = v; }, (err) => { e.failed = err; })
+      .then(async () => {
+        if (--e.n) return;
+        S.edits.delete(id);
+        let v = e.last;
+        if (e.failed) {
+          toast(e.failed.message);
+          try { v = await api("GET", `/api/papers/${id}`); } catch (x) { v = null; }
+        }
+        if (v && v.id && S.papers.has(id)) upsert(v);
+      });
+  }
+
+  // ------------------------------------------------------------------ deleting a version
+  // Its maker or an admin: gone from the list at once; the hub keeps it 30 days, and Undo
+  // brings it back.
+  async function deleteVersion(eid) {
+    const pid = S.epPaper.get(eid), p = S.papers.get(pid);
+    const e = p && (p.episodes || []).find((x) => x.id === eid);
+    if (!e) return;
+    closeMenu(); closeSwipe();
+    const rest = p.episodes.filter((x) => x.id !== eid);
+    const order = shownPapers().map((x) => x.id);
+    if (S.audioEp === eid) unloadAudio();
+    if (store.get(mine(`pick.${pid}`)) === eid) store.del(mine(`pick.${pid}`));
+    if (rest.length) S.papers.set(pid, Object.assign({}, p, { episodes: rest }));
+    else {
+      S.papers.delete(pid);
+      if (S.open === pid) {
+        const i = order.indexOf(pid), others = order.filter((x) => x !== pid);
+        const next = phone() ? null : others[Math.min(i, others.length - 1)];
+        if (next) location.hash = `p=${next}`; else goList();
+      }
+    }
+    renderList();
+    if (S.open === pid) renderWin();
+    try {
+      await api("DELETE", `/api/episodes/${eid}`);
+      const what = rest.length ? `Deleted ${e.mine ? "your" : `${makerName(e)}’s`} version`
+        : displayTitle(p) ? `Deleted “${short(displayTitle(p))}”` : "Deleted";
+      toast(what, { label: "Undo", fn: () => undelete(eid) }, 10000);
+    } catch (err) {
+      if (err.status !== 404) { S.papers.set(pid, p); renderList(); if (S.open === pid) renderWin(); }
+      toast(err.message);
+    }
+  }
+  async function undelete(eid) {
+    try {
+      const v = await api("POST", `/api/episodes/${eid}/undelete`, {});
+      S.flash = v.id;
+      upsert(v);
+    } catch (e) {
+      toast(e.code === "undo_expired" ? "Too late: it is deleted." : e.message);
+    }
+  }
+
+  function removed(id) {
+    if (!S.papers.has(id) && S.open !== id) return;
+    S.papers.delete(id);
+    if (S.audioPaper === id) unloadAudio();
+    if (S.open === id) goList();
+    renderList();
+  }
+
+  // ------------------------------------------------------------------ the list
+  function upsert(v) {
+    pinEdits(v);
+    S.papers.set(v.id, v);
+    indexEps(v);
+    // a version that was playing and is gone (deleted elsewhere) stops
+    if (S.audioPaper === v.id && !(v.episodes || []).some((e) => e.id === S.audioEp)) unloadAudio();
+    if (S.q) scheduleSearch();
+    renderList();
+    if (S.open === v.id) renderWin();
+  }
+  // ------------------------------------------------------------------ sort and tag filter
+  // The sort is remembered on this device; the tag filter in this tab only. Both are the page's
+  // own: the hub's list is newest first.
+  const SORTS = [
+    ["added_desc", "Date added (newest first)"], ["added_asc", "Date added (oldest first)"],
+    ["title", "Title A–Z"], ["unlistened", "Not listened first"], ["year", "Paper year (newest first)"],
+  ];
+  const byAdded = (a, b) => (b.added_at || "").localeCompare(a.added_at || "") || b.id.localeCompare(a.id);
+  const collator = new Intl.Collator("en", { sensitivity: "base", numeric: true });
+  const ORDER = {
+    added_desc: byAdded,
+    added_asc: (a, b) => byAdded(b, a),
+    // a paper whose title is not known goes last
+    title: (a, b) => (!displayTitle(a) - !displayTitle(b)) || collator.compare(displayTitle(a), displayTitle(b)) || byAdded(a, b),
+    unlistened: (a, b) => (!!a.listened - !!b.listened) || byAdded(a, b),
+    year: (a, b) => ((b.year || 0) - (a.year || 0)) || byAdded(a, b),
+  };
+  const sortedPapers = () => [...S.papers.values()].sort(ORDER[S.sort] || byAdded);
+  // What the list shows: the sort, then the tag filter on top of the search.
+  const shownPapers = () => sortedPapers().filter((p) => !S.tag || (p.tags || []).includes(S.tag));
+  function setSort(id) {
+    S.sort = ORDER[id] ? id : "added_desc";
+    store.set("pcg.sort", S.sort);
+    const b = $("sort-btn"), label = (SORTS.find((x) => x[0] === S.sort) || SORTS[0])[1];
+    b.classList.toggle("on", S.sort !== "added_desc");
+    b.setAttribute("aria-label", `Sort: ${label}`);
+    b.title = `Sort: ${label}`;
+    renderList();
+  }
+  function sortMenu() {
+    return SORTS.map(([id, label]) => el("button", { type: "button", role: "menuitemradio", "aria-checked": String(id === S.sort),
+      class: "radio", onclick: () => { closeMenu(); setSort(id); } },
+    el("span", { class: "mark", html: id === S.sort ? I.check : "" }), el("span", { text: label })));
+  }
+  function setTag(t) {
+    S.tag = t || null;
+    if (S.tag) tab.set("pcg.tag", S.tag); else tab.del("pcg.tag");
+    $("filter").hidden = !S.tag;
+    $("filter-tag").textContent = S.tag || "";
+    S.limit = PAGE;
+    renderList();
+    $("list-pane").scrollTop = 0;
+  }
+
+  function ring(p) {
+    const c = chosen(p) || {};
+    const r = 19, C = 2 * Math.PI * r;
+    const arc = (frac, color) =>
+      `<circle cx="22" cy="22" r="${r}" fill="none" stroke="${color}" stroke-width="3" stroke-linecap="round" stroke-dasharray="${(C * frac).toFixed(1)} ${C.toFixed(1)}" transform="rotate(-90 22 22)"/>`;
+    const track = (color = "var(--track)", extra = "") => `<circle cx="22" cy="22" r="${r}" fill="none" stroke="${color}" stroke-width="3" ${extra}/>`;
+    let body = "", center = "";
+    const st = c.state;
+    if (c.has_audio) {
+      const d = durOf(c), t = posOf(c), f = d ? Math.min(1, t / d) : 0, played = d && t >= d - 2;
+      body = track() + (played ? arc(1, "var(--text-2)") : f > 0 ? arc(f, "var(--accent)") : "");
+      center = played ? `<path d="m16.5 22.5 4 4 7-8" fill="none" stroke="var(--text-2)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`
+        : isPlaying(c.id) ? `<rect x="16" y="15" width="4" height="14" rx="1" fill="var(--text)"/><rect x="24" y="15" width="4" height="14" rx="1" fill="var(--text)"/>`
+          : `<path d="M18.5 15.8v12.4l10-6.2z" fill="var(--text)" stroke="var(--text)" stroke-width="1.2" stroke-linejoin="round"/>`;
+    } else if (st === "speaking") {
+      const pct = speakPct(c);
+      body = track() + arc(pct / 100, "var(--text-2)");
+      center = `<text x="22" y="26" text-anchor="middle" font-size="11" font-weight="600" fill="var(--text-2)" font-family="Arial, sans-serif">${pct}</text>`;
+    } else if (st === "waiting-for-gpu") {
+      body = track("var(--warn)", 'stroke-dasharray="3 5.2" opacity=".75"');
+    } else if (st === "failed" || st === "ready") {
+      body = track("var(--danger)", 'opacity=".55"');
+      center = `<path d="M22 14.5v9" stroke="var(--danger)" stroke-width="2.4" stroke-linecap="round"/><circle cx="22" cy="28.5" r="1.5" fill="var(--danger)"/>`;
+    } else {
+      body = track() + `<g class="spin">${arc(0.25, "var(--text-2)")}</g>`;
+    }
+    return `<svg width="44" height="44" viewBox="0 0 44 44" aria-hidden="true">${body}${center}</svg>`;
+  }
+
+  // One short line for a version: how long, how much is left, or how far it has got.
+  function stateLine(e) {
+    if (!e) return { text: "" };
+    if (e.has_audio) {
+      const d = durOf(e), t = posOf(e);
+      if (!d) return { text: "Ready" };
+      if (t >= d - 2) return { text: "Played" };
+      if (t > 0) return { text: `${Math.max(1, Math.round((d - t) / 60))} min left` };
+      return { text: `${Math.max(1, Math.round(d / 60))} min` };
+    }
+    const st = e.state;
+    if (st === "speaking") return { text: `Speaking ${speakPct(e)}%` };
+    if (st === "waiting-for-gpu") return { text: "Waiting for GPU", cls: "warn" };
+    if (st === "failed") return { text: "Voice failed", cls: "danger" };
+    if (st === "ready") return { text: "Audio missing", cls: "danger" };
+    if (st === "checking") return { text: "Checking…" };
+    return { text: st || "" };
+  }
+
+  function rowNode(id) {
+    let r = S.rows.get(id);
+    if (r) return r;
+    const li = el("li", { class: "row", "data-id": id });
+    const del = el("button", { type: "button", class: "row-del", tabindex: "-1", text: "Delete",
+      onclick: (e) => { e.stopPropagation(); const c = chosen(S.papers.get(id)); if (c && c.can_delete) deleteVersion(c.id); } });
+    const inner = el("div", { class: "row-in", tabindex: "0", role: "button" });
+    inner.addEventListener("click", () => {
+      if (swipeBusy()) return;
+      openPaper(id);
+    });
+    inner.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target === inner) openPaper(id); });
+    wireSwipe(inner, id);
+    li.append(del, inner);
+    r = { li, inner, del, sig: null };
+    S.rows.set(id, r);
+    return r;
+  }
+  function fillRow(p) {
+    const r = rowNode(p.id), { li, inner } = r;
+    li.classList.toggle("sel", p.id === S.open);
+    li.classList.toggle("listened", !!p.listened);
+    const c = chosen(p), n = (p.episodes || []).length;
+    const title = displayTitle(p), rg = ring(p), sub = stateLine(c), ptags = p.tags || [];
+    const by = c ? whoLine(c) : "", nv = n > 1 ? `${n} versions` : "";
+    const canDel = !!(c && c.can_delete), audio = anyAudio(p);
+    // Everything the row shows, in one string: when the row shows it already, it is left as it is.
+    const sig = JSON.stringify([title, p.added_at, rg, sub, by, nv, ptags, ptags.includes(S.tag) ? S.tag : null, audio, !!p.listened, canDel]);
+    if (r.sig === sig) return;
+    r.sig = sig;
+    const tnode = el("p", { class: "row-title", title: title || null });
+    titleInto(tnode, p);
+    const line = el("div", { class: `row-sub t${sub.cls ? ` ${sub.cls}` : ""}` }, el("span", { class: "st", text: sub.text }),
+      nv ? el("span", { class: "nv", text: `· ${nv}` }) : null);
+    const byl = by ? el("div", { class: "row-by" }, el("span", { text: by })) : null;
+    const open = S.menu && S.menu.for === `row:${p.id}`;
+    const more = canDel ? el("button", { type: "button", class: "more", "aria-label": "More", "aria-haspopup": "menu",
+      "aria-expanded": open ? "true" : "false", html: I.more,
+      onclick: (e) => { e.stopPropagation(); openMenu(e.currentTarget, `row:${p.id}`, rowMenu(p)); } }) : el("span", { class: "more-sp" });
+    if (open && canDel) S.menu.anchor = more;       // the row's open menu closes onto the new button
+    // Tags: small plain words; a tap shows only the papers with that tag (again: all of them).
+    const tags = ptags.length ? el("div", { class: "row-tags" }, ptags.map((t) =>
+      el("button", { type: "button", class: `tag${t === S.tag ? " on" : ""}`, title: t === S.tag ? "Show all papers" : `Only “${t}”`,
+        onclick: (e) => { e.stopPropagation(); if (swipeBusy()) return; setTag(t === S.tag ? null : t); } }, el("span", { text: t })))) : null;
+    inner.classList.toggle("tagged", !!tags);
+    // This person's own tick, only by their tap; on a paper with an episode to listen to.
+    const tick = audio ? el("button", { type: "button", class: "tick", role: "checkbox", "aria-checked": String(!!p.listened),
+      "aria-label": "Listened", title: p.listened ? "Listened" : "Mark as listened", html: I.tick(!!p.listened),
+      onclick: (e) => { e.stopPropagation(); if (swipeBusy()) return; const q = S.papers.get(p.id) || p; setListened(q.id, !q.listened); } })
+      : el("span", { class: "tick-sp" });
+    inner.replaceChildren(el("div", { class: "ring", html: rg }),
+      el("div", { class: "row-text" }, tnode, line, byl, tags), tick, more);
+    inner.setAttribute("aria-label", [title || sub.text, by, nv].filter(Boolean).join(", "));
+  }
+  // A tap that ends a swipe, or one that only closes an open swipe, does nothing else.
+  function swipeBusy() {
+    if (Date.now() - S.swipeEnd < 400) return true;
+    if (S.swiped) { closeSwipe(); return true; }
+    return false;
+  }
+  // The list draws the first PAGE rows of its order, PAGE more whenever it is scrolled near
+  // its end (wireList), and always as far down as the open paper's row. A row is filled again
+  // only when what it shows has changed (fillRow), so a paper event touches that one row.
+  const PAGE = window.IntersectionObserver ? 50 : Infinity;     // an old browser: every row at once
+  S.limit = PAGE; S.more = false; S.nearEnd = false; S.endIO = null; S.listQ = "";
+  function renderList() {
+    // Under the map the list is not seen: it is brought up to date when the map closes, so a
+    // paper event does not stall the map.
+    if (!$("map").hidden) { S.listStale = true; mapSync(); return; }
+    const ul = $("rows");
+    const items = shownPapers();
+    const at = S.open ? items.findIndex((p) => p.id === S.open) : -1;
+    if (at >= S.limit) S.limit = Math.ceil((at + 1) / PAGE) * PAGE;
+    const shown = items.slice(0, S.limit);
+    S.more = items.length > shown.length;
+    // A row once drawn is kept while its paper is in the list, drawn or not: drawn again, it
+    // costs nothing unless it changed.
+    for (const [id, r] of S.rows) if (!S.papers.has(id)) { r.li.remove(); S.rows.delete(id); if (S.swiped === id) S.swiped = null; }
+    shown.forEach(fillRow);
+    // Put in order, moving only what is out of place: a page loaded at the end is appended,
+    // and nothing above it moves.
+    let next = ul.firstElementChild;
+    for (const p of shown) {
+      const li = S.rows.get(p.id).li;
+      if (li === next) next = li.nextElementSibling; else ul.insertBefore(li, next);
+    }
+    while (next && next.classList.contains("row")) { const n = next.nextElementSibling; next.remove(); next = n; }
+    const sw = S.swiped && S.rows.get(S.swiped);
+    if (sw && !sw.li.isConnected) closeSwipe();
+    let empty = ul.querySelector(".empty-list");
+    if (!items.length && S.loaded) {
+      if (!empty) ul.append(empty = el("li", { class: "empty-list" }));
+      empty.textContent = S.tag ? `No papers tagged “${S.tag}”${S.q ? " match" : ""}.` : S.q ? "No matches."
+        : "No episodes yet. They appear here as people add papers with papercast add.";
+    } else if (empty) empty.remove();
+    if (S.flash && S.rows.has(S.flash)) {
+      const li = S.rows.get(S.flash).li;
+      li.classList.add("fade");
+      requestAnimationFrame(() => requestAnimationFrame(() => li.classList.remove("fade")));
+    }
+    S.flash = null;
+    renderMini();
+    mapSync();
+    if (S.more && S.nearEnd) checkEnd();
+  }
+  function updateRow(id) { const p = S.papers.get(id); if (p && S.rows.has(id)) fillRow(p); }
+  // The sentinel under the rows comes within 800 px of the list's bottom edge: the next page.
+  // The observer tells only of changes, so after each page it is asked again (checkEnd): a
+  // tall screen may still see the end, and it loads on until the rows fill it.
+  function wireList() {
+    if (!window.IntersectionObserver) return;
+    S.endIO = new IntersectionObserver((es) => {
+      S.nearEnd = es[es.length - 1].isIntersecting;
+      if (S.nearEnd && S.more) { S.limit += PAGE; renderList(); }
+    }, { root: $("list-pane"), rootMargin: "0px 0px 800px 0px" });
+    S.endIO.observe($("rows-end"));
+  }
+  function checkEnd() { if (S.endIO) { S.endIO.unobserve($("rows-end")); S.endIO.observe($("rows-end")); } }
+
+  // Swipe left on a touch screen shows Delete (like Mail) on a version this person may delete;
+  // a mouse gets the ⋯ menu instead.
+  function wireSwipe(inner, id) {
+    let x0 = null, y0 = null, base = 0, dx = 0, mode = null, pid = null;
+    inner.addEventListener("pointerdown", (e) => {
+      if (e.pointerType === "mouse") return;
+      const c = chosen(S.papers.get(id));
+      if (!c || !c.can_delete) return;
+      x0 = e.clientX; y0 = e.clientY; dx = 0; mode = null; pid = e.pointerId;
+      base = S.swiped === id ? -88 : 0;
+    });
+    inner.addEventListener("pointermove", (e) => {
+      if (x0 === null || e.pointerId !== pid) return;
+      const mx = e.clientX - x0, my = e.clientY - y0;
+      if (!mode) {
+        if (Math.abs(mx) > 8 && Math.abs(mx) > Math.abs(my)) {
+          mode = "h";
+          try { inner.setPointerCapture(e.pointerId); } catch (x) { /* already gone */ }
+          inner.classList.add("drag");
+          if (S.swiped && S.swiped !== id) closeSwipe();
+        } else if (Math.abs(my) > 8) { mode = "v"; }
+      }
+      if (mode === "h") { dx = Math.max(-140, Math.min(0, base + mx)); inner.style.transform = `translateX(${dx}px)`; }
+    });
+    const end = () => {
+      if (x0 === null) return;
+      if (mode === "h") {
+        inner.classList.remove("drag");
+        S.swipeEnd = Date.now();
+        if (dx < -44) openSwipe(id); else closeSwipe();
+      }
+      x0 = null; mode = null;
+    };
+    inner.addEventListener("pointerup", end);
+    inner.addEventListener("pointercancel", () => { if (mode === "h") { inner.classList.remove("drag"); if (S.swiped === id) openSwipe(id); else closeSwipe(); } x0 = null; mode = null; });
+  }
+  function openSwipe(id) {
+    const r = S.rows.get(id);
+    if (!r) return;
+    S.swiped = id;
+    r.inner.style.transform = "translateX(-88px)";
+    r.del.tabIndex = 0;
+  }
+  function closeSwipe() {
+    for (const [, r] of S.rows) { if (r.inner.style.transform) r.inner.style.transform = ""; if (r.del.tabIndex !== -1) r.del.tabIndex = -1; }
+    S.swiped = null;
+  }
+
+  let searchTimer = null;
+  function scheduleSearch() { clearTimeout(searchTimer); searchTimer = setTimeout(loadList, 180); }
+  async function loadList() {
+    const q = S.q;
+    try {
+      const j = await api("GET", `/api/library?q=${encodeURIComponent(q)}`);
+      if (q !== S.q) return;          // a newer search is on its way
+      S.papers = new Map(j.papers.map((p) => [p.id, pinEdits(p)]));
+      for (const p of S.papers.values()) indexEps(p);
+      if (q !== S.listQ) { S.listQ = q; S.limit = PAGE; }      // a new search: its first page
+      S.loaded = true;
+      renderList();
+      if (S.open) {
+        if (!S.papers.has(S.open) && !S.q) goList(); else renderWin();
+      }
+    } catch (e) { toast(e.message); }
+  }
+  // A paper or episode event names what changed; those papers alone are read again, in one
+  // request (a big burst, or one the page cannot place, reads the whole list). One that is not
+  // in the answer has left the library.
+  S.touch = new Set(); S.touchTimer = null;
+  function touched(pid) {
+    if (!pid) { scheduleSearch(); return; }
+    S.touch.add(pid);
+    if (!S.touchTimer) S.touchTimer = setTimeout(flushTouched, 150);
+  }
+  async function flushTouched() {
+    S.touchTimer = null;
+    const ids = [...S.touch];
+    S.touch.clear();
+    if (ids.length > 40) { loadList(); return; }
+    let j;
+    try { j = await api("GET", `/api/library?ids=${ids.map(encodeURIComponent).join(",")}`); } catch (e) { return; }
+    const got = new Set();
+    for (const v of j.papers || []) { got.add(v.id); upsert(v); }
+    for (const id of ids) if (!got.has(id)) removed(id);
+  }
+
+  // ------------------------------------------------------------------ offline, a newer build
+  function setOffline(on) {
+    clearTimeout(S.offTimer);
+    const o = $("offline");
+    if (!on) { o.hidden = true; return; }
+    S.offTimer = setTimeout(() => { o.textContent = "The hub is not answering · reconnecting…"; o.hidden = false; }, 4000);
+  }
+  // The hub's build (a hash of these static files) comes in /api/config and the event stream's
+  // hello, also the first after the stream reconnects. This page never keeps running code older
+  // than the hub's: when the build changes it reloads itself. Not while audio plays (at the next
+  // pause or end), not mid-keystroke, and not over unsaved settings.
+  function checkBuild(b) {
+    if (!S.build || !b || b === S.build || S.reloadFor === b) return;
+    S.reloadFor = b;
+    maybeReload();
+  }
+  function maybeReload() {
+    if (!S.reloadFor) return;
+    const a = A();
+    if (S.audioEp && a.getAttribute("src") && !a.paused && !a.ended) return;   // the pause or end calls again
+    if (Date.now() - S.typedAt < 3000 || settingsDirty()) { setTimeout(maybeReload, 2000); return; }
+    // Once per target build: if the hub answered the reload with the old build again, stay.
+    if (tab.get("pcg.reloaded") === S.reloadFor) return;
+    tab.set("pcg.reloaded", S.reloadFor);
+    savePosition(true, true);
+    location.reload();
+  }
+
+  // ------------------------------------------------------------------ opening and closing
+  function openPaper(id) { closeSwipe(); if (location.hash === `#p=${id}`) openFromHash(true); else location.hash = `p=${id}`; }
+  function goList() {
+    if (location.hash) history.replaceState(null, "", location.pathname + location.search);
+    closeWin();
+  }
+  function openFromHash(force) {
+    const s = /^#settings(?:=([a-z]+))?$/.exec(location.hash);
+    if (s) return openSettings(s[1]);
+    const m = /(?:^|[#&])p=(p_[a-z0-9]{4,32})/.exec(location.hash);
+    const id = m ? m[1] : null;
+    if (!id) return closeWin();
+    if (id === S.open && S.view === "paper" && !force) { document.body.classList.add("open"); return; }
+    openWin(id);
+  }
+  function showView(v) {
+    S.view = v;
+    $("nothing").hidden = v !== "list";
+    $("paper").hidden = v !== "paper";
+    $("settings").hidden = v !== "settings";
+    document.body.classList.toggle("open", v !== "list");
+    if (v === "settings") $("set-btn").setAttribute("aria-current", "page"); else $("set-btn").removeAttribute("aria-current");
+  }
+  async function openWin(id) {
+    if (S.open !== id) { S.open = id; S.details = false; closeExplainer(); closeMenu(); }
+    showView("paper");
+    store.set("pcg.last", id);
+    if (!S.papers.has(id)) {
+      try { upsert(await api("GET", `/api/papers/${id}`)); } catch (e) { toast(e.message); return goList(); }
+      if (S.open !== id) return;
+    }
+    renderList();
+    // A paper that is playing keeps playing while another one is looked at.
+    const c = chosen(S.papers.get(id));
+    if (c && !isPlaying(S.audioEp)) loadAudio(c.id);
+    renderWin();
+    $("win").scrollTop = 0; onScroll();
+  }
+  function closeWin() {
+    S.open = null;
+    closeExplainer(); closeMenu();
+    showView("list");
+    document.title = "Papers";
+    renderList();
+  }
+
+  // ------------------------------------------------------------------ the paper map
+  // map.js (window.PaperMap) draws it, with the group's graphs; it is loaded the first time the
+  // map is opened. The papers it colours (the Listened tick) are the live ones here.
+  S.map = null; S.mapPapers = null; S.mapLoad = null;
+  function mapCode() {
+    if (window.PaperMap && window.PaperMap.mount) return Promise.resolve(window.PaperMap);
+    if (!S.mapLoad) {
+      S.mapLoad = new Promise((resolve, reject) => {
+        const css = el("link", { rel: "stylesheet", href: "/map.css" });
+        const js = el("script", { src: "/map.js" });
+        js.addEventListener("load", () => (window.PaperMap && window.PaperMap.mount ? resolve(window.PaperMap) : reject(new Error("no map"))));
+        js.addEventListener("error", () => reject(new Error("no map")));
+        document.head.append(css, js);
+      }).catch((e) => { S.mapLoad = null; for (const n of document.head.querySelectorAll('link[href="/map.css"], script[src="/map.js"]')) n.remove(); throw e; });
+    }
+    return S.mapLoad;
+  }
+  async function openMap() {
+    const host = $("map");
+    if (!host.hidden) return;
+    closeMenu(); closeSwipe();
+    let PM;
+    try { PM = await mapCode(); } catch (e) { toast("The map is not available yet."); return; }
+    host.hidden = false;
+    try { history.pushState({ pmap: 1 }, ""); } catch (e) { /* no history here */ }
+    if (S.map) { mapSync(); if (S.map.show) S.map.show(); return; }
+    try {
+      const all = await api("GET", "/api/library?q=");
+      S.mapPapers = new Map(all.papers.map((p) => [p.id, pinEdits(p)]));
+      for (const [id, p] of S.papers) S.mapPapers.set(id, p);
+      S.map = PM.mount(host, { api: "", graphs: true, editable: true, me: S.me, papers: S.mapPapers,
+        onOpen: (id) => { closeMap(true); openPaper(id); }, onClose: () => closeMap() }) || {};
+      if (host.hidden && S.map.hide) S.map.hide();
+    } catch (e) { closeMap(); toast(e.message); }
+  }
+  function closeMap(quiet) {
+    const host = $("map");
+    if (host.hidden) return;
+    host.hidden = true;
+    if (S.map && S.map.hide) S.map.hide();
+    if (S.listStale) { S.listStale = false; renderList(); }
+    if (!quiet && history.state && history.state.pmap) history.back();
+  }
+  function mapSync() {
+    if (!S.map || $("map").hidden) return;
+    for (const [id, p] of S.papers) S.mapPapers.set(id, p);
+    if (S.map.changed) S.map.changed();
+  }
+  // Every live event also goes to the map (graph and log events are its own): as
+  // map.event(kind, data) when it has one, and as a "papercast:event" on window.
+  function toMap(kind, d) {
+    if (S.map && typeof S.map.event === "function") { try { S.map.event(kind, d); } catch (e) { /* the map's own trouble */ } }
+    window.dispatchEvent(new CustomEvent("papercast:event", { detail: { kind, data: d } }));
+  }
+
+  // ------------------------------------------------------------------ the window
+  function renderWin() {
+    const p = S.papers.get(S.open);
+    if (!p || S.view !== "paper") return;
+    const c = chosen(p);
+    const title = titleInto($("w-title"), p);
+    document.title = title ? `${title} · Papers` : "Papers";
+    // The first author only; the ⋯ menu opens the paper's link.
+    $("w-by").replaceChildren(shortAuthors(p));
+    $("w-maker").textContent = c ? whoLine(c) : "";
+    const det = $("w-details");
+    det.hidden = !S.details;
+    if (S.details) {
+      const who = (p.authors || []).join(", ");
+      det.textContent = [p.year ? `${who}${who ? " " : ""}(${p.year})` : who, p.added_at ? `added ${day(p.added_at)}` : "",
+        c && c.duration_s ? `${Math.round(c.duration_s / 60)} min` : "", p.arxiv_id ? `arXiv ${p.arxiv_id}` : "",
+        c && c.model ? c.model : ""].filter(Boolean).join(" · ");
+    }
+    const tags = p.tags || [];
+    $("w-tags").hidden = !tags.length;
+    $("w-tags").textContent = tags.join(" · ");
+    const lb = $("w-listened");
+    lb.hidden = !anyAudio(p);
+    lb.setAttribute("aria-checked", String(!!p.listened));
+    lb.querySelector(".box").innerHTML = p.listened ? I.check : "";
+    $("player").hidden = !(c && c.has_audio);
+    $("x-open").disabled = !(c && c.has_explainer);
+    titleInto($("s-title"), p);
+    renderState(c);
+    renderVersions(p, c);
+    renderPlayer();
+    onScroll();
+  }
+
+  function renderState(c) {
+    const box = $("w-state");
+    if (!c || c.has_audio) { box.hidden = true; box.replaceChildren(); return; }
+    const big = (text, cls) => el("div", { class: `big t${cls ? ` ${cls}` : ""}`, text });
+    const detail = (text) => (text ? el("div", { class: "detail", text }) : null);
+    const kids = [];
+    const st = c.state;
+    if (st === "speaking") {
+      const pct = speakPct(c);
+      const bar = el("div", { class: "bar" }, el("i"));
+      bar.firstChild.style.width = `${pct}%`;
+      kids.push(big(`Speaking ${pct}%`), bar, detail("Recording the voice."));
+    } else if (st === "waiting-for-gpu") {
+      kids.push(big("Waiting for GPU", "warn"), detail("In the voice queue. It starts by itself when the GPU has room."));
+    } else if (st === "failed") {
+      kids.push(big("Couldn't record the voice", "danger"), detail(c.state_detail || "The voice worker gave up on it."));
+    } else if (st === "ready") {
+      kids.push(big("The audio is missing", "danger"), detail("The hub has no audio file for this version."));
+    } else {
+      kids.push(big("Checking…"), detail("The hub is checking the upload."));
+    }
+    if (c.has_explainer) {
+      kids.push(el("div", { class: "act" }, el("button", { type: "button", class: "explain", html: `${I.doc}<span>Explainer</span>`, onclick: openExplainer })));
+    }
+    box.hidden = false;
+    box.replaceChildren(...kids.filter(Boolean));
+  }
+
+  // The versions of one paper, oldest first: a tap picks the one that plays (remembered here).
+  function renderVersions(p, c) {
+    const eps = p.episodes || [];
+    const sec = $("versions"), box = $("vlist");
+    if (eps.length < 2) { sec.hidden = true; box.replaceChildren(); box.dataset.sig = ""; return; }
+    sec.hidden = false;
+    const lines = eps.map((e) => [e.id, makerName(e), e.mine, e.prefs_summary, stateLine(e), c && c.id === e.id]);
+    const sig = JSON.stringify([p.id, lines]);
+    if (box.dataset.sig === sig) return;
+    box.dataset.sig = sig;
+    box.replaceChildren(...lines.map(([id, name, own, sum, st, on]) => el("button", {
+      type: "button", class: "ver", role: "radio", "aria-checked": String(!!on), "data-ep": id,
+      onclick: () => pickVersion(p.id, id),
+    }, el("span", { class: "mark", "aria-hidden": "true" }),
+    el("span", { class: "v-main" }, el("span", { class: "v-who", text: `by ${name}${own ? " (you)" : ""}` }),
+      sum ? el("span", { class: "v-sum", text: sum }) : null),
+    el("span", { class: `v-st t${st.cls ? ` ${st.cls}` : ""}`, text: st.text }))));
+  }
+  function pickVersion(pid, eid) {
+    const p = S.papers.get(pid);
+    const e = p && (p.episodes || []).find((x) => x.id === eid);
+    if (!e) return;
+    store.set(mine(`pick.${pid}`), eid);
+    // Into the player at once, unless another paper is playing: then it waits for Play.
+    if (e.has_audio && S.audioEp !== eid) {
+      const was = S.audioPaper === pid && isPlaying(S.audioEp);
+      if (was || !isPlaying(S.audioEp)) {
+        loadAudio(eid);
+        if (was) A().play().catch(() => {});
+      }
+    }
+    renderWin();
+    updateRow(pid);
+  }
+
+  // ------------------------------------------------------------------ audio player
+  let lastSaved = 0, lastRowTick = 0;
+  function loadAudio(eid, then) {
+    const e = epById(eid), pid = S.epPaper.get(eid), a = A();
+    if (!e || !e.has_audio) return false;
+    const src = `/audio/${eid}.mp3`;
+    if (S.audioEp === eid && a.getAttribute("src") === src) {
+      if (then && S.audioReady === eid) then(a); else if (then) S.afterReady = then;
+      return true;
+    }
+    if (S.audioEp) { savePosition(true); const old = S.audioPaper; a.pause(); S.audioEp = null; S.audioPaper = null; if (old) updateRow(old); }
+    S.audioEp = eid; S.audioPaper = pid; S.audioReady = null; S.afterReady = null; S.dirty = false;
+    a.src = src;
+    a.playbackRate = S.speed;
+    // The hub's position, fresh: the list may have been loaded before another device played.
+    const fresh = api("GET", `/api/papers/${pid}`).then((v) => {
+      if (v && v.id && S.papers.has(v.id)) { S.papers.set(v.id, pinEdits(v)); indexEps(v); }
+      return v;
+    }).catch(() => null);
+    a.addEventListener("loadedmetadata", async () => {
+      const v = await fresh;
+      if (S.audioEp !== eid || a.getAttribute("src") !== src) return;
+      const q = (v && (v.episodes || []).find((x) => x.id === eid)) || e;
+      const { s } = newestPos(q, localPos(eid));
+      if (s > 0 && s < (a.duration || Infinity) - 2) a.currentTime = s;
+      a.playbackRate = S.speed;
+      S.audioReady = eid;          // only now may a position be saved: before, it would be 0
+      if (!a.paused) S.dirty = true;
+      if (then) then(a);
+      if (S.afterReady) { const f = S.afterReady; S.afterReady = null; f(a); }
+      renderPlayer(); updateRow(pid);
+    }, { once: true });
+    if ("mediaSession" in navigator) {
+      const p = S.papers.get(pid) || {};
+      try { navigator.mediaSession.metadata = new MediaMetadata({ title: displayTitle(p) || "Papers", artist: shortAuthors(p), album: whoLine(e) }); } catch (x) { /* old browser */ }
+    }
+    renderMini();
+    return true;
+  }
+  function unloadAudio() {
+    const a = A();
+    savePosition(true);
+    a.pause(); a.removeAttribute("src"); a.load();
+    const old = S.audioPaper;
+    S.audioEp = null; S.audioPaper = null; S.audioReady = null;
+    if (old) updateRow(old);
+    renderMini();
+  }
+  // To the hub while playing every 10 s, and at once on a pause, a seek or the end; a burst of
+  // seeks is one request (half a second after the last). Leaving the page, it goes as a
+  // keepalive request, so it arrives after the tab has gone.
+  let putWant = null, putTimer = null;
+  function putPosition(eid, s, at, leaving) {
+    if (putWant && putWant.eid !== eid) flushPosition(false);
+    putWant = { eid, s, at };
+    if (leaving) { flushPosition(true); return; }
+    if (!putTimer) putTimer = setTimeout(() => flushPosition(false), 500);
+  }
+  function flushPosition(leaving) {
+    clearTimeout(putTimer); putTimer = null;
+    const w = putWant;
+    putWant = null;
+    if (w) api("PUT", `/api/episodes/${w.eid}/position`, { s: w.s, at: w.at }, { keepalive: !!leaving }).catch(() => {});
+  }
+  function savePosition(force, leaving) {
+    const a = A(), eid = S.audioEp;
+    // Saved only once it was played or moved here: opening a paper must not change its place.
+    if (!eid || !S.dirty || S.audioReady !== eid || !a.getAttribute("src") || !isFinite(a.currentTime) || a.readyState < 1) {
+      if (leaving) flushPosition(true);
+      return;
+    }
+    // A finished episode is stored at its end: the list says "Played", and it starts over.
+    const s = a.ended ? (a.duration || a.currentTime) : a.currentTime, now = Date.now();
+    store.set(posKey(eid), JSON.stringify({ s, at: now }));
+    const e = epById(eid);
+    if (e) { e.position_s = s; e.position_at = now; }
+    if (force || now - lastSaved > 10000) {
+      lastSaved = now;
+      putPosition(eid, s, now, leaving);
+    }
+  }
+  function withAudio(eid, fn) { loadAudio(eid, fn); }
+  function openEp() { const p = S.papers.get(S.open); return p ? chosen(p) : null; }
+  function togglePlay(eid) {
+    const a = A();
+    const e = eid ? epById(eid) : openEp();
+    if (!e || !e.has_audio) return;
+    if (S.audioEp === e.id && a.getAttribute("src")) {
+      if (a.paused || a.ended) a.play().catch((x) => toast(`Cannot play: ${x.message}`)); else a.pause();
+      return;
+    }
+    loadAudio(e.id);
+    a.play().catch((x) => { if (x.name !== "AbortError") toast(`Cannot play: ${x.message}`); });
+  }
+  function seekTo(e, t) {
+    withAudio(e.id, (a) => {
+      S.dirty = true;
+      const d = a.duration || durOf(e);
+      a.currentTime = Math.max(0, Math.min(d || 0, t));
+      savePosition(true); renderPlayer(); updateRow(S.epPaper.get(e.id));
+    });
+  }
+  function skip(delta) {
+    const e = openEp();
+    if (!e || !e.has_audio) return;
+    withAudio(e.id, (a) => { S.dirty = true; a.currentTime = Math.max(0, Math.min(a.duration || 0, a.currentTime + delta)); savePosition(true); renderPlayer(); });
+  }
+  function renderPlayer() {
+    const e = openEp();
+    if (e && e.has_audio && S.view === "paper") {
+      const d = durOf(e), t = S.scrubbing !== null ? S.scrubbing * d : posOf(e), f = d ? Math.min(1, t / d) : 0;
+      const playing = isPlaying(e.id);
+      $("fill").style.width = `${f * 100}%`;
+      $("thumb").style.left = `${f * 100}%`;
+      $("p-el").textContent = hms(t);
+      $("p-rem").textContent = `−${hms(Math.max(0, d - t))}`;
+      const sc = $("scrub");
+      sc.setAttribute("aria-valuemax", String(Math.round(d)));
+      sc.setAttribute("aria-valuenow", String(Math.round(t)));
+      sc.setAttribute("aria-valuetext", `${hms(t)} of ${hms(d)}`);
+      const pb = $("p-play"), sp = $("s-play");
+      if (pb.dataset.on !== String(playing)) {
+        pb.dataset.on = String(playing);
+        pb.innerHTML = playing ? I.pause(24) : I.play(24); pb.setAttribute("aria-label", playing ? "Pause" : "Play");
+        sp.innerHTML = playing ? I.pause(16) : I.play(16); sp.setAttribute("aria-label", playing ? "Pause" : "Play");
+      }
+      $("s-sub").textContent = `${hms(t)} · ${Math.max(1, Math.round((d - t) / 60))} min left`;
+      $("s-prog").style.width = `${f * 100}%`;
+    }
+    renderMini();
+  }
+  // The mini player's episode: the one loaded in <audio>, else (after a reload) the one
+  // listened to most recently that is part-way through.
+  function miniEpisode() {
+    const a = A();
+    if (S.audioEp && a.getAttribute("src")) return epById(S.audioEp);
+    let best = null, bestAt = -1;
+    for (const p of S.papers.values()) {
+      for (const e of p.episodes || []) {
+        if (!e.has_audio) continue;
+        const n = newestPos(e, localPos(e.id)), d = e.duration_s || 0;
+        if (!(n.s > 0 && d && n.s < d - 2)) continue;
+        if (n.at > bestAt) { best = e; bestAt = n.at; }
+      }
+    }
+    return best;
+  }
+  function renderMini() {
+    const e = miniEpisode();
+    const d = e ? durOf(e) : 0, t = e ? posOf(e) : 0;
+    const on = !!(e && (isPlaying(e.id) || (t > 0 && t < d - 2)));
+    S.miniEp = on ? e.id : null;
+    document.body.classList.toggle("has-mini", on);
+    $("mini").hidden = !on;
+    if (!on) return;
+    titleInto($("mini-title"), S.papers.get(S.epPaper.get(e.id)) || {});
+    $("mini-sub").textContent = `${Math.max(1, Math.round((d - t) / 60))} min left · ${whoLine(e)}`;
+    $("mini-prog").style.width = d ? `${100 * Math.min(1, t / d)}%` : "0";
+    const playing = isPlaying(e.id), mp = $("mini-play");
+    if (mp.dataset.on !== String(playing)) {
+      mp.dataset.on = String(playing);
+      mp.innerHTML = playing ? I.pause(22) : I.play(22); mp.setAttribute("aria-label", playing ? "Pause" : "Play");
+    }
+  }
+  function setSpeed(v) {
+    S.speed = v;
+    A().playbackRate = v;
+    $("p-speed").textContent = `${v}×`;
+    store.set("pcg.speed", String(v));
+  }
+  function wirePlayer() {
+    const a = A();
+    $("p-play").innerHTML = I.play(24); $("s-play").innerHTML = I.play(16); $("mini-play").innerHTML = I.play(22);
+    $("p-back").innerHTML = I.skip(15, false); $("p-fwd").innerHTML = I.skip(30, true);
+    $("x-icon").innerHTML = I.doc;
+    $("p-play").addEventListener("click", () => togglePlay());
+    $("s-play").addEventListener("click", () => togglePlay());
+    $("p-back").addEventListener("click", () => skip(-15));
+    $("p-fwd").addEventListener("click", () => skip(30));
+    $("p-speed").addEventListener("click", () => setSpeed(SPEEDS[(SPEEDS.indexOf(S.speed) + 1) % SPEEDS.length]));
+    $("mini").addEventListener("click", (e) => {
+      if (e.target.closest("#mini-play")) { if (S.miniEp) togglePlay(S.miniEp); return; }
+      if (S.miniEp) openPaper(S.epPaper.get(S.miniEp));
+    });
+    $("mini").addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.id === "mini" && S.miniEp) openPaper(S.epPaper.get(S.miniEp)); });
+    const sc = $("scrub");
+    const frac = (x) => { const r = sc.getBoundingClientRect(); return Math.max(0, Math.min(1, (x - r.left) / (r.width || 1))); };
+    sc.addEventListener("pointerdown", (e) => { sc.setPointerCapture(e.pointerId); S.scrubbing = frac(e.clientX); renderPlayer(); });
+    sc.addEventListener("pointermove", (e) => { if (S.scrubbing !== null && sc.hasPointerCapture(e.pointerId)) { S.scrubbing = frac(e.clientX); renderPlayer(); } });
+    const commit = () => {
+      if (S.scrubbing === null) return;
+      const e = openEp(), f = S.scrubbing;
+      S.scrubbing = null;
+      if (e) seekTo(e, f * durOf(e));
+    };
+    sc.addEventListener("pointerup", commit);
+    sc.addEventListener("pointercancel", () => { S.scrubbing = null; renderPlayer(); });
+    sc.addEventListener("keydown", (ev) => {
+      const e = openEp();
+      if (!e) return;
+      const k = { ArrowLeft: -15, ArrowDown: -15, ArrowRight: 30, ArrowUp: 30 }[ev.key];
+      if (k) { ev.preventDefault(); skip(k); } else if (ev.key === "Home") { ev.preventDefault(); seekTo(e, 0); } else if (ev.key === "End") { ev.preventDefault(); seekTo(e, durOf(e) - 1); }
+    });
+    for (const ev of ["play", "pause", "durationchange", "ended", "seeked"]) a.addEventListener(ev, () => { renderPlayer(); if (S.audioPaper) updateRow(S.audioPaper); });
+    a.addEventListener("timeupdate", () => {
+      savePosition(false);
+      if (S.audioPaper === S.open) renderPlayer(); else renderMini();
+      const now = Date.now();
+      if (now - lastRowTick > 5000 && S.audioPaper) { lastRowTick = now; updateRow(S.audioPaper); }
+    });
+    a.addEventListener("playing", () => { if (S.audioReady === S.audioEp) S.dirty = true; });
+    // A reload waiting for the pause goes 1.5 s after it: the position is saved, and a quick
+    // pause and play again is not cut off.
+    a.addEventListener("pause", () => { savePosition(true); if (S.reloadFor) setTimeout(maybeReload, 1500); });
+    a.addEventListener("ended", () => { savePosition(true); if (S.reloadFor) setTimeout(maybeReload, 1500); });
+    a.addEventListener("error", () => { if (a.getAttribute("src")) toast("The audio could not be loaded."); });
+    window.addEventListener("pagehide", () => savePosition(true, true));
+    if ("mediaSession" in navigator) {
+      const ms = navigator.mediaSession;
+      try {
+        ms.setActionHandler("play", () => a.play());
+        ms.setActionHandler("pause", () => a.pause());
+        ms.setActionHandler("seekbackward", () => { a.currentTime = Math.max(0, a.currentTime - 15); });
+        ms.setActionHandler("seekforward", () => { a.currentTime = Math.min(a.duration || 0, a.currentTime + 30); });
+      } catch (e) { /* unsupported action */ }
+    }
+    const saved = parseFloat(store.get("pcg.speed") || "1");
+    setSpeed(SPEEDS.includes(saved) ? saved : 1);
+  }
+  // The large player shrinks to the slim bar once it has scrolled away.
+  function onScroll() {
+    const w = $("win"), pz = $("pz"), e = openEp();
+    $("strip").classList.toggle("on", S.view === "paper" && !!(e && e.has_audio) && w.scrollTop > pz.offsetTop + pz.offsetHeight - 72);
+  }
+
+  // ------------------------------------------------------------------ explainer overlay
+  function openExplainer() {
+    const e = openEp();
+    if (!e || !e.has_explainer) return;
+    S.lastFocus = document.activeElement;
+    $("x-frame").src = `/x/${e.id}/explainer.html`;
+    $("overlay").hidden = false;
+    $("x-close").focus();
+  }
+  function closeExplainer() {
+    if ($("overlay").hidden) return;
+    $("overlay").hidden = true;
+    $("x-frame").src = "about:blank";
+    if (S.lastFocus && S.lastFocus.focus) S.lastFocus.focus();
+  }
+
+  // ------------------------------------------------------------------ menus
+  function closeMenu() {
+    if (!S.menu) return;
+    S.menu.node.remove();
+    if (S.menu.anchor) S.menu.anchor.setAttribute("aria-expanded", "false");
+    S.menu = null;
+  }
+  function openMenu(anchor, key, items) {
+    const same = S.menu && S.menu.for === key;
+    closeMenu();
+    if (same || !items.length) return;
+    anchor.setAttribute("aria-expanded", "true");
+    const node = el("div", { class: "menu", role: "menu" }, items);
+    document.body.append(node);
+    const r = anchor.getBoundingClientRect(), mw = node.offsetWidth, mh = node.offsetHeight;
+    const top = r.bottom + 4 + mh > window.innerHeight - 8 ? Math.max(8, r.top - 4 - mh) : r.bottom + 4;
+    node.style.top = `${top}px`;
+    node.style.left = `${Math.max(8, Math.min(window.innerWidth - mw - 8, r.right - mw))}px`;
+    S.menu = { node, anchor, for: key };
+    const first = node.querySelector("button, a");
+    if (first) first.focus({ preventScroll: true });
+  }
+  const mItem = (label, fn, cls) => el("button", { type: "button", role: "menuitem", class: cls || null, text: label, onclick: () => { closeMenu(); fn(); } });
+  const delLabel = (e) => (e.mine ? "Delete my version" : `Delete ${makerName(e)}’s version`);
+  function rowMenu(p) {
+    const c = chosen(p);
+    return c && c.can_delete ? [mItem(delLabel(c), () => deleteVersion(c.id), "danger")] : [];
+  }
+  function paperLink(p) {
+    if (p.url && /^https?:\/\//i.test(p.url)) return p.url;
+    if (p.arxiv_id && /^[\w./-]+$/.test(p.arxiv_id)) return `https://arxiv.org/abs/${p.arxiv_id}`;
+    if (p.doi && /^10\.\S+$/.test(p.doi)) return `https://doi.org/${p.doi}`;
+    return "";
+  }
+  function winMenu() {
+    const p = S.papers.get(S.open);
+    if (!p) return [];
+    const c = chosen(p);
+    const items = [mItem(S.details ? "Hide details" : "Details", () => { S.details = !S.details; renderWin(); })];
+    const link = paperLink(p);
+    if (link) items.push(el("a", { role: "menuitem", href: link, target: "_blank", rel: "noopener noreferrer", text: "Open paper link", onclick: closeMenu }));
+    if (c && c.can_delete) items.push(mItem(delLabel(c), () => deleteVersion(c.id), "danger"));
+    return items;
+  }
+
+  // ------------------------------------------------------------------ settings
+  // Preferences (how this person's own versions are made), Devices (where papercast is logged
+  // in as them), and for admins Users and the Base prompt. Each tab reads the hub when opened.
+  const TABS = [["prefs", "Preferences"], ["devices", "Devices"], ["users", "Users", true], ["base", "Base prompt", true]];
+  const PREF_TEXT = {
+    maths: ["Maths", { words: "In words", "key-steps": "Key steps", full: "Full derivations" },
+      "In words only, the key steps, or the whole derivation walked through (the equations go on the explainer page)."],
+    emphasis: ["What gets more time", { balanced: "Balanced", theory: "Theory", method: "Method", practice: "Practice" }, ""],
+    background: ["What the listener already knows", { newcomer: "New to the field", field: "Works in the field", specialist: "Specialist" }, ""],
+  };
+  const tabsFor = () => TABS.filter((t) => !t[2] || isAdmin());
+  function openSettings(which) {
+    S.open = null;
+    closeExplainer(); closeMenu();
+    const ok = tabsFor().map((t) => t[0]);
+    S.setTab = ok.includes(which) ? which : ok.includes(S.setTab) ? S.setTab : "prefs";
+    showView("settings");
+    document.title = "Settings · Papers";
+    renderList();
+    renderSettings();
+    $("win").scrollTop = 0;
+  }
+  function settingsDirty() {
+    if (S.view !== "settings") return false;        // left, the draft is gone anyway
+    const pr = S.set.prefs;
+    return !!((pr && pr.draft && JSON.stringify(pr.draft) !== JSON.stringify({ settings: pr.saved.settings, note: pr.saved.note }))
+      || (S.set.base && S.set.base.editing));
+  }
+  function renderSettings() {
+    const me = S.me || {};
+    $("set-who").textContent = [me.name, me.email, me.role].filter(Boolean).join(" · ");
+    $("set-tabs").replaceChildren(...tabsFor().map(([id, label]) => el("button", {
+      type: "button", class: "tab", role: "tab", "aria-selected": String(id === S.setTab), id: `tab-${id}`,
+      onclick: () => { location.hash = `settings=${id}`; },
+    }, label)));
+    const body = $("set-body");
+    body.replaceChildren(el("p", { class: "muted intro", id: "set-loading", text: "Loading…" }));
+    ({ prefs: prefsTab, devices: devicesTab, users: usersTab, base: baseTab })[S.setTab](body);
+  }
+  const stillOn = (t) => S.view === "settings" && S.setTab === t;
+  const failed = (body, e) => body.replaceChildren(el("p", { class: "err", text: e.message }));
+  // Answers whose shape is another module's: a list, or an object holding one.
+  const listOf = (j, ...keys) => (Array.isArray(j) ? j : (keys.map((k) => j && j[k]).find(Array.isArray) || []));
+
+  async function prefsTab(body) {
+    let j;
+    try { j = await api("GET", "/api/prefs"); } catch (e) { if (stillOn("prefs")) failed(body, e); return; }
+    if (!stillOn("prefs")) return;
+    const st = S.set.prefs = { saved: j, draft: { settings: Object.assign({}, j.settings), note: j.note || "" } };
+    const sumLine = el("p", { class: "muted", id: "pref-summary" });
+    const msg = el("span", { class: "ok", id: "pref-msg", role: "status" });
+    const save = el("button", { type: "button", class: "btn-accent", id: "pref-save", text: "Save", disabled: true });
+    const dirty = () => { save.disabled = !settingsDirty(); if (!save.disabled) { msg.textContent = ""; msg.className = "ok"; } };
+    const summary = () => {
+      const s = st.saved.summary;
+      sumLine.textContent = `Your versions show as “by ${S.me.name || "you"}${s ? ` · ${s}` : ""}”.`;
+    };
+    const groups = Object.keys(j.choices || {}).map((k) => {
+      const [label, names, help] = PREF_TEXT[k] || [k, {}, ""];
+      const seg = el("div", { class: "seg", role: "radiogroup", "aria-label": label });
+      const draw = () => seg.replaceChildren(...j.choices[k].map((v) => el("button", {
+        type: "button", role: "radio", "aria-checked": String(st.draft.settings[k] === v), "data-v": v,
+        onclick: () => { st.draft.settings[k] = v; draw(); dirty(); },
+      }, names[v] || v)));
+      draw();
+      return el("div", { class: "pref", "data-k": k }, el("p", { class: "pref-h", text: label }), seg,
+        help ? el("p", { class: "muted", text: help }) : null);
+    });
+    const max = j.note_max || 500;
+    const note = el("textarea", { class: "field note", id: "pref-note", maxlength: String(max), rows: "4",
+      placeholder: "Anything else, in a sentence or two", "aria-label": "A note for the agent" });
+    note.value = st.draft.note;
+    const count = el("div", { class: "counter t", text: `${note.value.length} / ${max}` });
+    note.addEventListener("input", () => { st.draft.note = note.value; count.textContent = `${note.value.length} / ${max}`; S.typedAt = Date.now(); dirty(); });
+    save.addEventListener("click", async () => {
+      save.disabled = true;
+      try {
+        const r = await api("PUT", "/api/prefs", { settings: st.draft.settings, note: st.draft.note });
+        st.saved = r;
+        st.draft = { settings: Object.assign({}, r.settings), note: r.note || "" };
+        if (note.value !== st.draft.note) note.value = st.draft.note;
+        msg.className = "ok"; msg.textContent = "Saved";
+        summary();
+      } catch (e) {
+        msg.className = "err"; msg.textContent = e.message;
+        save.disabled = false;
+      }
+    });
+    summary();
+    body.replaceChildren(
+      el("p", { class: "intro", text: "How the versions you make with papercast add are written. They decide what gets more time; the rules every episode follows stay the same." }),
+      ...groups,
+      el("div", { class: "pref" }, el("p", { class: "pref-h", text: "Note" }), note, count),
+      sumLine,
+      el("div", { class: "save-row" }, save, msg));
+  }
+
+  async function devicesTab(body) {
+    let j;
+    try { j = await api("GET", "/api/tokens"); } catch (e) { if (stillOn("devices")) failed(body, e); return; }
+    if (!stillOn("devices")) return;
+    const live = listOf(j, "tokens", "devices").filter((t) => !t.revoked_at);
+    const ul = el("ul", { class: "items", id: "devices" });
+    const draw = () => {
+      ul.replaceChildren(...live.map((t) => {
+        let armed = false;
+        const b = el("button", { type: "button", class: "text-btn danger", text: "Revoke", "aria-label": `Revoke ${t.name || "this device"}` });
+        b.addEventListener("click", async () => {
+          if (!armed) { armed = true; b.textContent = "Revoke now"; return; }
+          b.disabled = true;
+          try {
+            await api("DELETE", `/api/tokens/${encodeURIComponent(t.id)}`);
+            live.splice(live.indexOf(t), 1);
+            draw();
+            toast(`Revoked ${t.name || "the device"}`);
+          } catch (e) { b.disabled = false; toast(e.message); }
+        });
+        return el("li", { class: "item", "data-id": String(t.id) },
+          el("div", { class: "it-main" }, el("div", { class: "it-t", text: t.name || "A device" }),
+            el("div", { class: "it-s", text: [t.created_at ? `added ${day(t.created_at)}` : "", t.last_used_at ? `last used ${when(t.last_used_at)}` : "never used"].filter(Boolean).join(" · ") })),
+          b);
+      }));
+      if (!live.length) ul.replaceChildren(el("li", { class: "muted intro", text: "None yet. Run papercast login on your computer to add one." }));
+    };
+    draw();
+    body.replaceChildren(el("p", { class: "intro", text: "Computers where papercast is logged in as you. Revoke one you no longer use: it stops working at once." }), ul);
+  }
+
+  async function usersTab(body) {
+    let j;
+    try { j = await api("GET", "/api/admin/users"); } catch (e) { if (stillOn("users")) failed(body, e); return; }
+    if (!stillOn("users")) return;
+    const users = listOf(j, "users");
+    const ROLES = ["viewer", "contributor", "admin"];
+    const put = async (u, change, undo) => {
+      try {
+        const r = await api("PUT", `/api/admin/users/${encodeURIComponent(u.id)}`, change);
+        Object.assign(u, change, r && r.id !== undefined ? r : {});
+        toast(`Saved ${u.name || u.email}`, null, 3000);
+      } catch (e) { undo(); toast(e.message); }
+    };
+    const ul = el("ul", { class: "items", id: "users" }, users.map((u) => {
+      const role = el("select", { class: "pick", "aria-label": `Role of ${u.name || u.email}` },
+        ROLES.map((r) => el("option", { value: r, text: r[0].toUpperCase() + r.slice(1), selected: u.role === r })));
+      role.addEventListener("change", () => { const was = u.role; put(u, { role: role.value }, () => { role.value = was; }); });
+      const dis = el("button", { type: "button", class: "lbox", role: "checkbox", "aria-checked": String(!!u.disabled),
+        "aria-label": `${u.name || u.email} disabled` }, el("span", { class: "box", "aria-hidden": "true", html: u.disabled ? I.check : "" }), el("span", { text: "Disabled" }));
+      dis.addEventListener("click", () => {
+        const to = !u.disabled;
+        const show = (v) => { dis.setAttribute("aria-checked", String(v)); dis.firstChild.innerHTML = v ? I.check : ""; };
+        show(to);
+        put(u, { disabled: to }, () => show(!to));
+      });
+      return el("li", { class: "item", "data-id": String(u.id) },
+        el("div", { class: "it-main" }, el("div", { class: "it-t", text: `${u.name || u.email}${u.id === S.me.id ? " (you)" : ""}` }),
+          el("div", { class: "it-s", text: [u.email, u.created_at ? `since ${day(u.created_at)}` : ""].filter(Boolean).join(" · ") })),
+        el("div", { class: "it-ctl" }, role, dis));
+    }));
+    const kids = [el("p", { class: "intro", text: "Viewers listen and edit graphs; contributors also add papers with papercast; admins also manage people and the base prompt." }), ul];
+    // Invite links are the local sign-in's (with Cloudflare Access, people sign in by email).
+    if (S.cfg && S.cfg.auth === "local") {
+      const irole = el("select", { class: "pick", "aria-label": "Role for the invite" },
+        ROLES.map((r) => el("option", { value: r, text: r[0].toUpperCase() + r.slice(1), selected: r === "viewer" })));
+      const out = el("input", { class: "field", type: "text", readonly: true, id: "invite-link", "aria-label": "Invite link", hidden: true });
+      const copy = el("button", { type: "button", class: "text-btn", text: "Copy", hidden: true,
+        onclick: () => { try { navigator.clipboard.writeText(out.value).then(() => toast("Copied", null, 2000), () => out.select()); } catch (e) { out.select(); } } });
+      const make = el("button", { type: "button", class: "btn-accent", text: "Make an invite link", onclick: async () => {
+        try {
+          const r = await api("POST", "/api/admin/invites", { role: irole.value });
+          const link = (r && (r.url || r.link)) || (r && r.token ? `${location.origin}/join/${r.token}` : "");
+          out.value = link; out.hidden = copy.hidden = !link;
+        } catch (e) { toast(e.message); }
+      } });
+      kids.push(el("p", { class: "pref-h", text: "Invite someone" }),
+        el("div", { class: "invite" }, irole, make), el("div", { class: "invite" }, out, copy),
+        el("p", { class: "muted", text: "One use, for 7 days." }));
+    }
+    body.replaceChildren(...kids);
+  }
+
+  async function baseTab(body) {
+    let j;
+    try { j = await api("GET", "/api/admin/base"); } catch (e) { if (stillOn("base")) failed(body, e); return; }
+    if (!stillOn("base")) return;
+    const versions = j.versions || [];
+    const st = S.set.base = { versions, show: versions.length ? versions[0].version : null, editing: false };
+    const draw = () => {
+      if (!stillOn("base")) return;
+      const newest = versions[0];
+      const kids = [el("p", { class: "intro", text: "The guideline every episode is written from, before each maker's preferences. A new version is used for episodes started after it; an episode keeps the version it was made with." })];
+      if (st.editing) {
+        const g = el("textarea", { class: "field editor", id: "base-text", "aria-label": "Guideline", spellcheck: "false" });
+        g.value = newest ? newest.guideline : "";
+        const w = el("textarea", { class: "field editor small", id: "base-wording", "aria-label": "Wording list (JSON)", spellcheck: "false" });
+        w.value = newest ? JSON.stringify(newest.wording, null, 2) : "";
+        for (const t of [g, w]) t.addEventListener("input", () => { S.typedAt = Date.now(); });
+        const err = el("p", { class: "err", id: "base-err", role: "status" });
+        const n = (newest ? newest.version : 0) + 1;
+        const saveB = el("button", { type: "button", class: "btn-accent", id: "base-save", text: `Save as v${n}` });
+        saveB.addEventListener("click", async () => {
+          saveB.disabled = true; err.textContent = "";
+          try {
+            const r = await api("POST", "/api/admin/base", { guideline: g.value, wording: w.value.trim() ? w.value : null });
+            versions.unshift(r);
+            st.show = r.version; st.editing = false;
+            toast(`Base prompt v${r.version} saved`, null, 3000);
+            draw();
+          } catch (e) { err.textContent = e.message; saveB.disabled = false; }
+        });
+        kids.push(el("p", { class: "pref-h", text: `New version (v${n})` }), g,
+          el("p", { class: "pref-h", text: "Wording that is never wanted (JSON)" }), w,
+          el("div", { class: "save-row" }, saveB, el("button", { type: "button", class: "text-btn", text: "Cancel", onclick: () => { st.editing = false; draw(); } })), err);
+      } else if (!versions.length) {
+        kids.push(el("p", { class: "muted", text: "No base prompt yet." }));
+      } else {
+        const v = versions.find((x) => x.version === st.show) || newest;
+        kids.push(el("div", { class: "seg vers", role: "radiogroup", "aria-label": "Versions" }, versions.map((x) => el("button", {
+          type: "button", role: "radio", "aria-checked": String(x.version === v.version), text: `v${x.version}`,
+          onclick: () => { st.show = x.version; draw(); },
+        }))),
+        el("p", { class: "muted", id: "base-meta", text: [`v${v.version}`, day(v.created_at), v.created_by && v.created_by.name ? `by ${v.created_by.name}` : "", v === newest ? "in use" : ""].filter(Boolean).join(" · ") }),
+        el("pre", { class: "guide", id: "base-view", text: v.guideline }));
+      }
+      if (!st.editing) kids.push(el("div", { class: "save-row" }, el("button", { type: "button", class: "btn-accent", id: "base-new", text: "New version", onclick: () => { st.editing = true; draw(); } })));
+      body.replaceChildren(...kids);
+    };
+    draw();
+  }
+
+  // ------------------------------------------------------------------ live events
+  function connect() {
+    if (S.es) S.es.close();
+    clearTimeout(S.esRetry);
+    const es = new EventSource(S.lastId ? `/api/events?last=${encodeURIComponent(S.lastId)}` : "/api/events");
+    S.es = es;
+    // EventSource retries a dropped connection by itself, but an answer that is not the stream
+    // (a proxy's 502 while the hub restarts) closes it for good: reopen it.
+    es.addEventListener("open", () => { S.esFails = 0; setOffline(false); });
+    es.addEventListener("error", () => {
+      if (S.es !== es) return;
+      setOffline(true);
+      if (es.readyState !== EventSource.CLOSED) return;
+      S.esRetry = setTimeout(() => { if (S.es === es) connect(); }, Math.min(30000, 2000 * 2 ** Math.min(4, S.esFails++)));
+    });
+    const on = (t, fn) => es.addEventListener(t, (e) => {
+      if (e.lastEventId) S.lastId = e.lastEventId;
+      let d = null; try { d = JSON.parse(e.data); } catch (x) { return; }
+      d = d || {};
+      fn(d);
+      if (t !== "hello" && t !== "resync" && t !== "graph" && t !== "log") toMap(t, d);
+    });
+    on("hello", (d) => checkBuild(d.build));
+    on("resync", () => loadList());
+    on("paper", (d) => touched(d.paper_id || d.id || (d.paper && d.paper.id)));
+    on("episode", (d) => touched(d.paper_id || (d.paper && d.paper.id) || S.epPaper.get(d.episode_id || d.id)));
+    on("graph", (d) => toMap("graph", d));
+    on("log", (d) => toMap("log", d));
+  }
+
+  // ------------------------------------------------------------------ start
+  async function start() {
+    $("back").innerHTML = I.back; $("s-back").innerHTML = I.back; $("set-back").innerHTML = I.back;
+    $("w-more").innerHTML = I.more; $("w-more-phone").innerHTML = I.more;
+    $("x-close").innerHTML = I.close;
+    $("sort-btn").innerHTML = I.sort;
+    try { S.cfg = await api("GET", "/api/config"); } catch (e) { toast(e.message); return; }
+    S.me = S.cfg.me || {};
+    S.build = S.cfg.build || "";        // the build this page's code came with
+    wireList();
+    setSort(store.get("pcg.sort"));
+    $("sort-btn").addEventListener("click", (e) => { e.stopPropagation(); openMenu(e.currentTarget, "sort", sortMenu()); });
+    $("filter-clear").addEventListener("click", () => setTag(null));
+    setTag(tab.get("pcg.tag"));
+    $("search").addEventListener("input", (e) => { S.q = e.target.value.trim(); scheduleSearch(); });
+    $("w-listened").addEventListener("click", () => { const p = S.papers.get(S.open); if (p) setListened(p.id, !p.listened); });
+    wirePlayer();
+    $("back").addEventListener("click", goList);
+    $("s-back").addEventListener("click", goList);
+    $("set-back").addEventListener("click", goList);
+    $("set-btn").addEventListener("click", () => { if (S.view === "settings") goList(); else location.hash = "settings"; });
+    $("w-more").addEventListener("click", (e) => { e.stopPropagation(); openMenu(e.currentTarget, "win", winMenu()); });
+    $("w-more-phone").addEventListener("click", (e) => { e.stopPropagation(); openMenu(e.currentTarget, "win", winMenu()); });
+    $("x-open").addEventListener("click", openExplainer);
+    $("x-close").addEventListener("click", closeExplainer);
+    $("overlay").addEventListener("click", (e) => { if (e.target === $("overlay")) closeExplainer(); });
+    $("win").addEventListener("scroll", onScroll, { passive: true });
+    document.addEventListener("click", (e) => { if (S.menu && !S.menu.node.contains(e.target) && !S.menu.anchor.contains(e.target)) closeMenu(); });
+    document.addEventListener("pointerdown", (e) => {
+      if (S.swiped && !e.target.closest(`.row[data-id="${S.swiped}"]`)) closeSwipe();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape") return;
+      if (S.menu) { const a = S.menu.anchor; closeMenu(); a.focus(); } else if (!$("overlay").hidden) closeExplainer();
+      else if (S.swiped) closeSwipe();
+    });
+    window.addEventListener("hashchange", () => openFromHash());
+    $("map-btn").addEventListener("click", openMap);
+    window.addEventListener("popstate", () => closeMap(true));
+    connect();          // first: nothing that changes while the list loads is missed
+    await loadList();
+    if (location.hash) openFromHash();
+    else {
+      // On a wide screen the window is never an empty pane: the last paper opened here, if any.
+      const last = store.get("pcg.last");
+      if (!phone() && last && S.papers.has(last)) { history.replaceState(null, "", `#p=${last}`); openFromHash(); }
+    }
+  }
+  document.addEventListener("DOMContentLoaded", start);
+})();

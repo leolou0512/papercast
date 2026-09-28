@@ -73,7 +73,9 @@ for req in proto.requests():
         with open(env["FAKE_LOG"], "a") as fh:
             fh.write(json.dumps({"engine": spec["name"], "idx": idx, "text": req["text"],
                                  "pid": os.getpid(), "gpu": env.get("CUDA_VISIBLE_DEVICES"),
-                                 "t": time.time(), "dtype": spec.get("dtype")}) + "\n")
+                                 "t": time.time(), "dtype": spec.get("dtype"),
+                                 "voice": spec.get("voice"), "instruction": spec.get("instruction"),
+                                 "seed": spec.get("seed")}) + "\n")
     time.sleep(float(env.get("FAKE_DELAY_S", "0.05")))
     marker = os.path.join(env.get("FAKE_STATE", "/tmp"), f"oom-{spec['name']}-{idx}")
     if idx in oom_at and not os.path.exists(marker):

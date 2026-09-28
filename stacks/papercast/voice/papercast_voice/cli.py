@@ -3,6 +3,9 @@
     papercast-voice info                   one JSON line, < 2 s, never touches the GPU
     papercast-voice run <job dir>          voice one episode (exit 0 = status.json phase done)
     papercast-voice check <script.md>      how a script would be chunked, or why it is refused
+    papercast-voice timings <job dir> [--out FILE]
+                                           out/timings.json for a voiced job whose chunk WAVs
+                                           are still there (one JSON line: ok, segments, path)
     papercast-voice slots [<state dir>]    the line for GPU slots and who holds each slot (read only)
     papercast-voice measure-cpu [...]      time the CPU voice at several worker/thread splits
     papercast-voice measure-episode <dir>  words per minute and speed from a finished episode
@@ -73,6 +76,30 @@ def check(path: str) -> int:
     return 0
 
 
+def timings_cmd(args: list[str]) -> int:
+    from . import timings
+    vdir, out = args[0], None
+    if len(args) == 3 and args[1] == "--out":
+        out = args[2]
+    elif len(args) != 1:
+        print(__doc__, file=sys.stderr)
+        return 2
+    try:
+        doc = timings.from_job_dir(vdir, load())
+    except (timings.TimingsError, OSError, ValueError, KeyError) as e:
+        print(json.dumps({"ok": False, "problem": f"{e.__class__.__name__}: {e}"
+                          if not isinstance(e, timings.TimingsError) else str(e)}))
+        return 2
+    name = doc.pop("chunks", None)
+    if out is None:
+        os.makedirs(os.path.join(vdir, "out"), mode=0o700, exist_ok=True)
+        out = os.path.join(vdir, "out", "timings.json")
+    timings.write(out, doc)
+    print(json.dumps({"ok": True, "path": out, "segments": len(doc["segments"]),
+                      "duration_s": doc["duration_s"], "chunks": name}))
+    return 0
+
+
 def slots(state_dir: str) -> dict:
     """The line and the slots, read only: ticket names, and each slot's lock holder (the pid a
     FileLock writes into its file) when it is held."""
@@ -107,6 +134,8 @@ def main(argv: list[str]) -> int:
         return Job(argv[1], load()).run()
     if argv[:1] == ["check"] and len(argv) == 2:
         return check(argv[1])
+    if argv[:1] == ["timings"] and len(argv) in (2, 4):
+        return timings_cmd(argv[1:])
     if argv[:1] == ["slots"] and len(argv) <= 2:
         print(json.dumps(slots(argv[1] if len(argv) == 2 else "/home/leo/papercast/state")))
         return 0

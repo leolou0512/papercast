@@ -54,17 +54,31 @@ def trim(x: np.ndarray, sr: int, threshold_db: float, pad_s: float) -> np.ndarra
     return x[a:b]
 
 
-def join(paths: list[str], gaps_s: list[float], out_wav: str, *, lead_in_s: float,
-         threshold_db: float, pad_s: float) -> dict:
-    """Write the episode as one float WAV, streaming (one chunk in memory at a time)."""
+def pauses(y: np.ndarray, sr: int, floor_db: float = -35.0, min_s: float = 0.15) -> list:
+    """The silences inside a trimmed chunk (where its sentences part), as (start_s, end_s) from
+    its start: runs of 10 ms frames more than |floor_db| below its loudest frame, at least min_s
+    long, not touching either end."""
+    hop = max(1, int(0.01 * sr))
+    n = len(y) // hop
+    if n < 3:
+        return []
+    rms = np.sqrt(np.mean(y[: n * hop].reshape(n, hop) ** 2, axis=1) + 1e-12)
+    quiet = 20 * np.log10(rms / (rms.max() + 1e-12)) <= floor_db
+    edges = np.flatnonzero(np.diff(np.concatenate(([0], quiet.astype(np.int8), [0]))))
+    out = []
+    for a, b in zip(edges[::2], edges[1::2]):
+        if a > 0 and b < n and (b - a) * hop / sr >= min_s:
+            out.append((a * hop / sr, b * hop / sr))
+    return out
+
+
+def _trimmed(paths: list[str], gaps_s: list[float], threshold_db: float, pad_s: float):
+    """(sample rate, [(trimmed chunk, samples of the pause after it)] one chunk at a time)."""
     if len(paths) != len(gaps_s) or not paths:
         raise EncodeError("nothing to join")
     sr0 = sf.info(paths[0]).samplerate
-    total = 0
-    with sf.SoundFile(out_wav, "w", samplerate=sr0, channels=1, subtype="FLOAT", format="WAV") as out:
-        lead = np.zeros(int(lead_in_s * sr0), dtype=np.float32)
-        out.write(lead)
-        total += len(lead)
+
+    def gen():
         for p, g in zip(paths, gaps_s):
             x, sr = load_mono(p)
             if sr != sr0:
@@ -72,11 +86,47 @@ def join(paths: list[str], gaps_s: list[float], out_wav: str, *, lead_in_s: floa
             y = trim(x, sr, threshold_db, pad_s)
             if len(y) == 0:
                 raise EncodeError(f"chunk {p} is silent")
-            gap = np.zeros(int(g * sr), dtype=np.float32)
+            yield y, int(g * sr)
+    return sr0, gen()
+
+
+def join(paths: list[str], gaps_s: list[float], out_wav: str, *, lead_in_s: float,
+         threshold_db: float, pad_s: float) -> dict:
+    """Write the episode as one float WAV, streaming (one chunk in memory at a time).
+    `spans`: where each trimmed chunk lies in it, (start_s, end_s), and `pauses` the silences
+    inside each (pauses()), in the same seconds: for timings.py."""
+    sr0, pieces = _trimmed(paths, gaps_s, threshold_db, pad_s)
+    total = 0
+    spans, quiet = [], []
+    with sf.SoundFile(out_wav, "w", samplerate=sr0, channels=1, subtype="FLOAT", format="WAV") as out:
+        lead = np.zeros(int(lead_in_s * sr0), dtype=np.float32)
+        out.write(lead)
+        total += len(lead)
+        for y, gap_n in pieces:
+            t0 = total / sr0
+            spans.append((t0, (total + len(y)) / sr0))
+            quiet.append([(t0 + a, t0 + b) for a, b in pauses(y, sr0)])
             out.write(y)
-            out.write(gap)
-            total += len(y) + len(gap)
-    return {"sample_rate": sr0, "samples": total, "duration_s": total / sr0}
+            out.write(np.zeros(gap_n, dtype=np.float32))
+            total += len(y) + gap_n
+    return {"sample_rate": sr0, "samples": total, "duration_s": total / sr0, "spans": spans,
+            "pauses": quiet}
+
+
+def layout(paths: list[str], gaps_s: list[float], *, lead_in_s: float, threshold_db: float,
+           pad_s: float) -> dict:
+    """What join() gives for these chunks (the same trim, the same rounding), without writing
+    the WAV: the timings of an episode whose chunks are still on disk."""
+    sr0, pieces = _trimmed(paths, gaps_s, threshold_db, pad_s)
+    total = int(lead_in_s * sr0)
+    spans, quiet = [], []
+    for y, gap_n in pieces:
+        t0 = total / sr0
+        spans.append((t0, (total + len(y)) / sr0))
+        quiet.append([(t0 + a, t0 + b) for a, b in pauses(y, sr0)])
+        total += len(y) + gap_n
+    return {"sample_rate": sr0, "samples": total, "duration_s": total / sr0, "spans": spans,
+            "pauses": quiet}
 
 
 def _last_json(text: str) -> dict:

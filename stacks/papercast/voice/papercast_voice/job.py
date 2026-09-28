@@ -8,6 +8,7 @@ reboot or a Retry. Everything that must survive is on disk in <dir>:
   use-cpu, cancel       the runner's controls (§10.4), checked at least every second
   chunks/<engine key>/  one WAV per finished chunk; a re-run never voices a chunk twice
   out/episode.mp3       the result; status.json `output` carries its sha256
+  out/timings.json      when each sentence is spoken in it (timings.py); `output.timings`
   metrics.json          timings, memory, rates of every run (voice-internal)
 
 One process per directory (flock on .voice.lock). One job per GPU slot (hosts.py): stibnite's card
@@ -29,7 +30,7 @@ import threading
 import time
 import traceback
 
-from . import VERSION, audio, gpu, hosts, procs, sched, tags, textprep
+from . import VERSION, audio, gpu, hosts, procs, sched, tags, textprep, timings
 from .config import engine_spec, gpu_need_mib
 from .locks import FileLock
 from .textprep import ScriptInvalid
@@ -39,6 +40,10 @@ INTERFACE = "1.4"   # this document version (INTERFACE.md); readers compare the 
 ID_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z2-7]{8}$")
 PLAN_VERSION = 1          # bump when chunking changes, so old chunks are not reused
 EXIT_OK, EXIT_SCRIPT, EXIT_FAILED, EXIT_CANCELLED, EXIT_BUSY = 0, 2, 3, 4, 5
+# job.json `voice` (optional): which narrator, for one engine. It may set only these keys of that
+# engine's spec; `voice` names the pair and is part of the chunk cache key (engine_key).
+VOICE_KEYS = {"voice", "instruction", "seed", "speed"}
+VOICE_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 
 
 class JobInvalid(Exception):
@@ -171,6 +176,7 @@ class Job:
         self.plock = threading.Lock()
         self.plan: list[textprep.Chunk] = []
         self.spec: dict | None = None
+        self.voice: dict | None = None      # job.json `voice`, checked
         self.done: dict[int, float] = {}
         self.run_words = 0
         self.run_t0: float | None = None
@@ -217,7 +223,50 @@ class Job:
             raise JobInvalid(f"job.json engine {job.get('engine')!r} is not auto or cpu")
         if not isinstance(job.get("tags"), dict):
             raise JobInvalid("job.json has no tags")
+        if job.get("voice") is not None:
+            job["voice"] = self._check_voice(job["voice"])
         return job
+
+    def _check_voice(self, v) -> dict:
+        """job.json `voice`: {"engine": name, "voice": key, and for that engine "instruction"
+        and "seed" (Breeze's described narrator) or "speed"}; "id" (the caller's name for it)
+        is kept for the log. Anything else is refused, so a job cannot reach into the spec."""
+        if not isinstance(v, dict):
+            raise JobInvalid("job.json voice must be an object")
+        eng = v.get("engine")
+        if not isinstance(eng, str) or eng not in (self.cfg.get("engines") or {}):
+            raise JobInvalid(f"job.json voice engine {eng!r} is not configured")
+        extra = set(v) - VOICE_KEYS - {"engine", "id"}
+        if extra:
+            raise JobInvalid(f"job.json voice may not set {sorted(extra)}")
+        if not isinstance(v.get("voice"), str) or not VOICE_RE.match(v["voice"]):
+            raise JobInvalid("job.json voice needs a `voice` name (letters, digits, . _ -)")
+        if "instruction" in v and not (isinstance(v["instruction"], str)
+                                       and 0 < len(v["instruction"].strip()) <= 2000):
+            raise JobInvalid("job.json voice instruction must be text of at most 2,000 characters")
+        if "seed" in v and not (isinstance(v["seed"], int) and not isinstance(v["seed"], bool)
+                                and 0 <= v["seed"] < 2 ** 31):
+            raise JobInvalid("job.json voice seed must be a whole number from 0 to 2**31 - 1")
+        if "speed" in v and not (isinstance(v["speed"], (int, float)) and not isinstance(v["speed"], bool)
+                                 and 0.5 <= v["speed"] <= 2.0):
+            raise JobInvalid("job.json voice speed must be between 0.5 and 2")
+        spec = (self.cfg.get("engines") or {})[eng]
+        md = spec.get("model_dir")
+        if eng == "kokoro" and md and not os.path.isfile(os.path.join(md, "voices", f"{v['voice']}.pt")):
+            raise JobInvalid(f"kokoro has no voice {v['voice']!r} (no voices/{v['voice']}.pt)")
+        return dict(v)
+
+    def _with_voice(self, spec: dict) -> dict:
+        """The engine spec with job.json's voice, when it is for this engine (the CPU fallback of
+        a GPU voice keeps the CPU engine's own voice)."""
+        v = self.voice
+        if not v or v.get("engine") != spec["name"]:
+            return spec
+        spec = dict(spec)
+        spec.update({k: v[k] for k in VOICE_KEYS if k in v})
+        self.event(f"voice {v['voice']}" + (f" ({v['id']})" if v.get("id") else "")
+                   + f" on {spec['name']}" + (f", seed {v['seed']}" if "seed" in v else ""))
+        return spec
 
     def _read_script(self) -> str:
         path = self.p("script.md")
@@ -567,7 +616,7 @@ class Job:
             self._synth_one(w, ch)
 
     def _gpu_pass(self, script: str, name: str) -> dict | None:
-        spec = engine_spec(self.cfg, name)
+        spec = self._with_voice(engine_spec(self.cfg, name))
         need = gpu_need_mib(self.cfg)
         if need is None:
             raise EngineError(f"GPU voice {name} has no measured peak memory in "
@@ -639,7 +688,7 @@ class Job:
 
     # --------------------------------------------------------------- CPU
     def _cpu_pass(self, script: str, why: str) -> dict:
-        spec = engine_spec(self.cfg, self.cfg["cpu_engine"])
+        spec = self._with_voice(engine_spec(self.cfg, self.cfg["cpu_engine"]))
         self._prepare(spec, script)
         self.event(f"CPU voice ({spec['name']}): {why}")
         t0 = time.time()
@@ -692,7 +741,7 @@ class Job:
             self.cpu_lock.release()
 
     # --------------------------------------------------------------- encode
-    def _encode(self, spec: dict, job: dict) -> dict:
+    def _encode(self, spec: dict, job: dict, script: str) -> dict:
         a, ff = self.cfg["audio"], self.cfg["ffmpeg"]
         note = self.status.get("note") or ""
         self.status.set(phase="encoding", eta_s=round(10 + 0.02 * sum(self.done.values())),
@@ -741,11 +790,20 @@ class Job:
             os.unlink(joined)
         except OSError:
             pass
-        return {"path": "out/episode.mp3", "format": "mp3", "bitrate_kbps": m["bitrate_kbps"],
-                "duration_s": round(m["duration_s"], 1), "loudness_lufs": round(m["lufs"], 1),
-                "true_peak_db": round(m["true_peak_db"], 1), "sha256": sha256_file(final),
-                "size": size, "engine": f"{spec['kind']}:{spec['label']}",
-                "voice": spec.get("voice"), "tags": written}
+        out = {"path": "out/episode.mp3", "format": "mp3", "bitrate_kbps": m["bitrate_kbps"],
+               "duration_s": round(m["duration_s"], 1), "loudness_lufs": round(m["lufs"], 1),
+               "true_peak_db": round(m["true_peak_db"], 1), "sha256": sha256_file(final),
+               "size": size, "engine": f"{spec['kind']}:{spec['label']}",
+               "voice": spec.get("voice"), "tags": written}
+        # The sentence timings: a bonus, so a problem with them never costs the episode.
+        try:
+            segs = timings.segments(script, [c.text for c in self.plan], j["spans"],
+                                    int(spec["max_words"]), a, j["pauses"])
+            timings.write(self.p("out", "timings.json"), timings.document(segs, m["duration_s"]))
+            out["timings"] = "out/timings.json"
+        except Exception as e:  # noqa: BLE001
+            self.event(f"no timings.json: {e.__class__.__name__}: {e}")
+        return out
 
     def _cleanup_after_done(self) -> None:
         """Chunk audio is only needed until the episode exists; plan.json files stay."""
@@ -784,6 +842,7 @@ class Job:
         log(f"papercast-voice {VERSION} run {self.vdir} (pid {os.getpid()}, nice {os.nice(0)})")
         try:
             job = self._load_job()
+            self.voice = job.get("voice")
             self.status.set(paper_id=job["paper_id"], queued_at=round(self._queued_at(), 6))
             prev = self._previous_output()
             if prev:
@@ -808,7 +867,7 @@ class Job:
                 if spec is None:
                     spec = self._cpu_pass(script, "Use CPU voice (Kokoro) was pressed")
             self._check_cancel()
-            out = self._encode(spec, job)
+            out = self._encode(spec, job, script)
             self.status.set(phase="done", output=out, error=None, eta_s=0, wait_reason=None,
                             wait_text=None)
             self.event(f"done: {out['duration_s']} s, {out['loudness_lufs']} LUFS, "

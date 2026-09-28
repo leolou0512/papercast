@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "papercast"
+description = "Make podcast episodes of papers for your group's papercast (Claude Code runs on your own computer, under your own login)."
+readme = { text = "papercast: `papercast login --server https://<hub>`, then `papercast add paper.pdf` and `papercast status`.", content-type = "text/markdown" }
+requires-python = ">=3.10"
+dependencies = []
+dynamic = ["version"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Environment :: Console",
+]
+
+[project.scripts]
+papercast = "papercast_cli.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "papercast_cli.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["papercast_cli*"]
+
+[tool.setuptools.package-data]
+# common/: wording.json and the base guideline (SPEC section 1); the pipeline may keep prompts
+# and page templates beside its code.
+"*" = ["*.json", "*.md", "*.html", "*.css", "*.js"]

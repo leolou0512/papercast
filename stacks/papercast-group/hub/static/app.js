@@ -439,15 +439,17 @@
     const c = chosen(p), n = (p.episodes || []).length;
     const title = displayTitle(p), rg = ring(p), sub = stateLine(c), ptags = p.tags || [];
     const by = c ? whoLine(c) : "", nv = n > 1 ? `${n} versions` : "";
+    const nc = S.social ? S.social.count(p.id) : 0;       // comments (social.js)
     const canDel = !!(c && c.can_delete), audio = anyAudio(p);
     // Everything the row shows, in one string: when the row shows it already, it is left as it is.
-    const sig = JSON.stringify([title, p.added_at, rg, sub, by, nv, ptags, ptags.includes(S.tag) ? S.tag : null, audio, !!p.listened, canDel]);
+    const sig = JSON.stringify([title, p.added_at, rg, sub, by, nv, ptags, ptags.includes(S.tag) ? S.tag : null, audio, !!p.listened, canDel, nc]);
     if (r.sig === sig) return;
     r.sig = sig;
     const tnode = el("p", { class: "row-title", title: title || null });
     titleInto(tnode, p);
     const line = el("div", { class: `row-sub t${sub.cls ? ` ${sub.cls}` : ""}` }, el("span", { class: "st", text: sub.text }),
-      nv ? el("span", { class: "nv", text: `· ${nv}` }) : null);
+      nv ? el("span", { class: "nv", text: `· ${nv}` }) : null,
+      nc ? el("span", { class: "nc", text: `· ${nc} comment${nc === 1 ? "" : "s"}` }) : null);
     const byl = by ? el("div", { class: "row-by" }, el("span", { text: by })) : null;
     const open = S.menu && S.menu.for === `row:${p.id}`;
     const more = canDel ? el("button", { type: "button", class: "more", "aria-label": "More", "aria-haspopup": "menu",
@@ -779,6 +781,7 @@
     renderState(c);
     renderVersions(p, c);
     renderPlayer();
+    if (S.social) S.social.paper(p, c);
     onScroll();
   }
 
@@ -1094,6 +1097,38 @@
     $("overlay").hidden = true;
     $("x-frame").src = "about:blank";
     if (S.lastFocus && S.lastFocus.focus) S.lastFocus.focus();
+  }
+
+  // ------------------------------------------------------------------ comments and the board
+  // social.js (window.PaperSocial) draws them; this is what it may use of the page.
+  function socialCtx() {
+    return {
+      api, me: () => S.me, isAdmin, phone, toast, hms,
+      typed: () => { S.typedAt = Date.now(); },
+      openPaper: (pid) => openPaper(pid),
+      rowChanged: (pid) => updateRow(pid),
+      // the open paper's version in the player, and where it is
+      position: () => { const e = openEp(); return e && e.has_audio ? { eid: e.id, s: posOf(e) } : null; },
+      seek: seekPlay,
+      openGraph: async (gid) => {
+        await openMap();
+        if (S.map && typeof S.map.select === "function" && !$("map").hidden) S.map.select(null, gid);
+      },
+    };
+  }
+  // A time in a comment: that version plays from there. It becomes the version this paper plays
+  // here (as a tap on it in Versions would); play() is called in the tap itself, so a phone lets it.
+  function seekPlay(eid, t) {
+    const e = epById(eid), pid = S.epPaper.get(eid), p = S.papers.get(pid);
+    if (!e || !e.has_audio || !p) return;
+    if (chosen(p) !== e) { store.set(mine(`pick.${pid}`), eid); if (S.open === pid) renderWin(); updateRow(pid); }
+    const a = A();
+    loadAudio(eid, (x) => {
+      S.dirty = true;
+      x.currentTime = Math.max(0, Math.min(x.duration || durOf(e) || 0, t));
+      savePosition(true); renderPlayer(); updateRow(pid);
+    });
+    a.play().catch((x) => { if (x.name !== "AbortError") toast(`Cannot play: ${x.message}`); });
   }
 
   // ------------------------------------------------------------------ menus
@@ -1618,6 +1653,10 @@
     on("episode", (d) => touched(d.paper_id || (d.paper && d.paper.id) || S.epPaper.get(d.episode_id || d.id)));
     on("graph", (d) => toMap("graph", d));
     on("log", (d) => toMap("log", d));
+    // comments and the board (social.js); paper, episode and log events reach it as papercast:event
+    on("comment", (d) => { if (S.social) S.social.event("comment", d); });
+    on("board", (d) => { if (S.social) S.social.event("board", d); });
+    on("resync", () => { if (S.social) S.social.event("resync", {}); });
   }
 
   // ------------------------------------------------------------------ start
@@ -1629,6 +1668,7 @@
     try { S.cfg = await api("GET", "/api/config"); } catch (e) { toast(e.message); return; }
     S.me = S.cfg.me || {};
     S.build = S.cfg.build || "";        // the build this page's code came with
+    S.social = window.PaperSocial ? window.PaperSocial.mount(socialCtx()) : null;     // comments and the board
     wireList();
     setSort(store.get("pcg.sort"));
     $("sort-btn").addEventListener("click", (e) => { e.stopPropagation(); openMenu(e.currentTarget, "sort", sortMenu()); });

@@ -1,7 +1,8 @@
 """The browser API: library, listened, positions, prefs, admin, audio, explainer, SSE (SPEC.md section 7). Owner: A4.
 
   GET    /api/config                      who is looking, the auth mode, the page's build
-  GET    /api/library?q=                  papers with at least one live episode, for this user
+  GET    /api/library?q=&graph=&tag=...   papers with at least one live episode, for this user;
+                                          q searches everything (search.py), the rest filter
   GET    /api/papers/<id>                 one paper, as in the library
   PUT    /api/papers/<id>/listened        {"listened": bool}: this user's tick, never automatic
   PUT    /api/episodes/<id>/position      {"s": seconds, "at": ms since the epoch}: newest wins
@@ -33,7 +34,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import db, events
+from . import db, events, search
 from .app import HTTPError
 
 try:
@@ -160,17 +161,25 @@ def _paper_rows(uid: int, pids: list | None = None):
     return db.conn().execute(sql, [uid] + list(pids or [])).fetchall()
 
 
+def _regular(path: str, follow: bool) -> bool:
+    try:
+        return stat.S_ISREG((os.stat if follow else os.lstat)(path).st_mode)
+    except (OSError, ValueError):
+        return False
+
+
 def _ep_view(e, uid: int, admin: bool, epdir: Path) -> dict:
-    d = epdir / e["id"]
-    audio = d / "audio.mp3"
+    # plain strings and one stat each: a library of a thousand papers asks this thousands of
+    # times per answer, and pathlib's objects cost more than the stat
+    d = os.path.join(str(epdir), e["id"])
     return {
         "id": e["id"], "made_by": {"id": e["made_by"], "name": e["maker"]}, "mine": e["made_by"] == uid,
         "prefs_summary": e["prefs_summary"] or "", "state": e["state"], "state_detail": e["state_detail"],
         "phase": e["phase"], "progress": e["progress"], "duration_s": e["duration_s"],
         "est_minutes": e["est_minutes"], "model": e["model"], "base_version": e["base_version"],
         "created_at": e["created_at"],
-        "has_audio": e["state"] == "ready" and audio.is_file() and not audio.is_symlink(),
-        "has_explainer": (d / "explainer.html").is_file(),
+        "has_audio": e["state"] == "ready" and _regular(os.path.join(d, "audio.mp3"), False),     # a file, not a link
+        "has_explainer": _regular(os.path.join(d, "explainer.html"), True),
         "position_s": e["pos_s"], "position_at": _ms(e["pos_at"]) if e["pos_at"] else 0,
         "can_delete": admin or e["made_by"] == uid,
     }
@@ -222,17 +231,39 @@ def get_config(req):
 
 
 def get_library(req):
-    """?q= searches; ?ids=p_a,p_b (at most 50) reads just those again (after an event): a paper
-    that has left the library is simply not in the answer."""
+    """?q= searches (hub/search.py): the papers best first, each with `match` (where it matched,
+    a snippet, its title's marks), and `search` (the count, the query as corrected, if it was).
+    graph, tag, maker, year_from, year_to, listened filter, with q or without (then newest
+    first). ?ids=p_a,p_b (at most 50) reads just those again (after an event): a paper that has
+    left the library is simply not in the answer; with q, each says where it matches (the rows
+    past the first page ask so)."""
     q = (req.arg("q") or "")[:200]
     ids = req.arg("ids")
-    pids = None
+    cfg, uid, admin = req.cfg, _uid(req), _admin(req)
+    f = search.filters_from(req.query)
     if ids is not None:
         pids = [x for x in ids.split(",") if re.fullmatch(PID[1:-1], x)][:50]
-        if not pids:
-            req.send_json(200, {"papers": []})
-            return
-    req.send_json(200, {"papers": library(req.cfg, _uid(req), _admin(req), q=q, pids=pids)})
+        papers = library(cfg, uid, admin, pids=pids) if pids else []
+        if papers and q.strip():
+            res = search.run(cfg, uid, q, pids=[p["id"] for p in papers])
+            for p in papers:
+                p["match"] = res["match"].get(p["id"])
+        req.send_json(200, {"papers": papers})
+        return
+    if not q.strip() and not f:
+        req.send_json(200, {"papers": library(cfg, uid, admin)})
+        return
+    res = search.run(cfg, uid, q, f)
+    views = {v["id"]: v for v in library(cfg, uid, admin, pids=res["ids"])} if res["ids"] else {}
+    papers = []
+    for pid in res["ids"]:
+        v = views.get(pid)
+        if v is not None:
+            if pid in res["match"]:
+                v["match"] = res["match"][pid]
+            papers.append(v)
+    res["info"]["n"] = len(papers)
+    req.send_json(200, {"papers": papers, "search": res["info"]})
 
 
 def get_paper(req, pid):

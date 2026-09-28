@@ -8,12 +8,16 @@
 waiting-for-gpu, speaking, encoding, done | failed) with its pid, one "chunk" per paragraph
 (chunks/<n>.done, skipped when there: the real voice's resume), honours `cancel`, holds
 .voice.lock (exit 5 when another process has it), and writes out/episode.mp3: silent MPEG-1
-Layer III frames, a real MP3 of FAKE_VOICE_SECONDS. It refuses job.json ids and scripts the real
-one refuses (its ID_RE; digits), so a test catches what would fail on perov.
+Layer III frames, a real MP3 of FAKE_VOICE_SECONDS, and out/timings.json (one sentence per
+paragraph, spread over it) as the real one does (FAKE_VOICE_NO_TIMINGS=1: none, as before 1.5).
+It refuses job.json ids and scripts the real one refuses (its ID_RE; digits), so a test catches
+what would fail on perov. job.json `voice` is taken as the real one takes it: its `voice` names
+the output's voice (else papercast-voice's default narrator), and the whole of it is echoed in
+status.json output `voice_spec` so a test sees what arrived.
 
 The worker starts the voice with a cleaned environment, so tests bake the knobs into a wrapper
 script (write_wrapper): FAKE_VOICE_CHUNK_S, FAKE_VOICE_WAIT_S, FAKE_VOICE_SECONDS,
-FAKE_VOICE_FAIL (an error code to fail with).
+FAKE_VOICE_FAIL (an error code to fail with), FAKE_VOICE_NO_TIMINGS, FAKE_VOICE_IGNORE_VOICE.
 """
 from __future__ import annotations
 
@@ -65,6 +69,7 @@ def run(vdir: str) -> int:
     wait_s = float(os.environ.get("FAKE_VOICE_WAIT_S", "0"))
     seconds = float(os.environ.get("FAKE_VOICE_SECONDS", "3"))
     fail = os.environ.get("FAKE_VOICE_FAIL", "")
+    no_timings = os.environ.get("FAKE_VOICE_NO_TIMINGS") == "1"
     lock = open(os.path.join(vdir, ".voice.lock"), "a+")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -101,6 +106,13 @@ def run(vdir: str) -> int:
     if not ID_RE.match(str(job.get("paper_id", ""))):
         return failed("engine_failed", "job.json paper_id is not a papercast id")
     put(paper_id=job["paper_id"])
+    voice = job.get("voice")
+    if voice is not None and not (isinstance(voice, dict) and isinstance(voice.get("voice"), str)):
+        return failed("engine_failed", "job.json voice needs a `voice` name")
+    key = voice["voice"] if voice else "described-narrator-a-seed42"
+    if os.environ.get("FAKE_VOICE_IGNORE_VOICE") == "1":         # a voice that falls back to its default
+        key = "described-narrator-a-seed42"
+    engine = "cpu:fake-kokoro" if job.get("engine") == "cpu" else "gpu:fake"
     try:
         with open(os.path.join(vdir, job.get("script", "script.md")), encoding="utf-8") as fh:
             script = fh.read()
@@ -116,7 +128,7 @@ def run(vdir: str) -> int:
             return failed("cancelled", "stopped because the paper was dismissed", 4)
         time.sleep(0.05)
     os.makedirs(os.path.join(vdir, "chunks"), exist_ok=True)
-    put(phase="speaking", engine="gpu:fake", wait_text=None, note="Speaking on stibnite GPU 0.")
+    put(phase="speaking", engine=engine, wait_text=None, note="Speaking on stibnite GPU 0.")
     done = resumed = 0
     for i, _p in enumerate(paras):
         if os.path.exists(os.path.join(vdir, "cancel")):
@@ -139,11 +151,19 @@ def run(vdir: str) -> int:
     os.replace(out_mp3 + ".tmp", out_mp3)
     for f in os.listdir(os.path.join(vdir, "chunks")):
         os.unlink(os.path.join(vdir, "chunks", f))
-    put(phase="done", eta_s=0, output={
-        "path": "out/episode.mp3", "format": "mp3", "bitrate_kbps": 128,
-        "duration_s": round(mp3_seconds(data), 2), "loudness_lufs": -16.0,
-        "sha256": hashlib.sha256(data).hexdigest(), "size": len(data), "engine": "gpu:fake",
-        "voice": "fake", "tags": job.get("tags")})
+    dur = mp3_seconds(data)
+    output = {"path": "out/episode.mp3", "format": "mp3", "bitrate_kbps": 128,
+              "duration_s": round(dur, 2), "loudness_lufs": -16.0,
+              "sha256": hashlib.sha256(data).hexdigest(), "size": len(data), "engine": engine,
+              "voice": key, "voice_spec": voice, "tags": job.get("tags")}
+    if not no_timings:
+        texts = [" ".join(p.replace("#", "").split()) for p in paras]
+        step = max(0.01, (dur - 0.5) / max(1, len(texts)))
+        write_json(os.path.join(vdir, "out", "timings.json"), {"version": 1, "duration_s": round(dur, 3), "segments": [
+            {"start": round(0.4 + i * step, 3), "end": round(0.4 + (i + 1) * step - 0.05, 3), "text": t}
+            for i, t in enumerate(texts)]})
+        output["timings"] = "out/timings.json"
+    put(phase="done", eta_s=0, output=output)
     print("done", flush=True)
     return 0
 

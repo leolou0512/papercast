@@ -9,8 +9,15 @@ job directory <PCG_VOICE_JOBS>/<episode_id>/voice/ {script.md, job.json} exactly
 hands a paper to the voice (stacks/papercast/INTERFACE.md section 10), run
 `nice -n 10 papercast-voice run <dir>` detached with a cleaned environment, read its status.json,
 report it (PUT /api/voice/<id>/status, also every heartbeat so the hub keeps the claim while the
-voice waits for the GPU), upload out/episode.mp3 (PUT /api/voice/<id>/audio, X-Duration-S), or
-report the failure (POST /api/voice/<id>/failed).
+voice waits for the GPU), upload out/timings.json (PUT /api/voice/<id>/timings: when each
+sentence is spoken, for the page's play-along transcript) and then out/episode.mp3 (PUT
+/api/voice/<id>/audio, X-Duration-S, X-Voice: the voice it is in), or report the failure (POST
+/api/voice/<id>/failed).
+
+Voices: a claim may name one (hub/voices.py, when someone changed an episode's voice): its
+`spec` goes into job.json as `voice` (papercast-voice then uses that narrator and seed, or that
+Kokoro voice with engine cpu). A claim for an episode voiced before starts its job directory
+afresh (the old status says done, the chunks are the old voice's).
 
 Restarts: the episode being voiced is in <PCG_WORKER_STATE>/current.json and its job directory is
 kept, so a restarted worker carries on with the same episode without claiming again;
@@ -41,6 +48,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -210,12 +218,17 @@ class Hub:
     def failed(self, eid: str, body: dict):
         return self.request("POST", f"/api/voice/{eid}/failed", body)
 
-    def audio(self, eid: str, path: Path, duration_s: float, sha: str):
+    def audio(self, eid: str, path: Path, duration_s: float, sha: str, voice: str | None = None):
         size = path.stat().st_size
+        h = {"Content-Type": "audio/mpeg", "Content-Length": str(size),
+             "X-Duration-S": f"{duration_s:.3f}", "X-Sha256": sha}
+        if voice:
+            h["X-Voice"] = voice
         with open(path, "rb") as fh:
-            return self.request("PUT", f"/api/voice/{eid}/audio", fh, timeout=300.0, headers={
-                "Content-Type": "audio/mpeg", "Content-Length": str(size),
-                "X-Duration-S": f"{duration_s:.3f}", "X-Sha256": sha})
+            return self.request("PUT", f"/api/voice/{eid}/audio", fh, timeout=300.0, headers=h)
+
+    def timings(self, eid: str, doc: dict):
+        return self.request("PUT", f"/api/voice/{eid}/timings", doc, timeout=60.0)
 
 
 def _err(status, body) -> str:
@@ -317,7 +330,10 @@ class Worker:
                                                      "may not be there yet); retrying", 600)
                         self.sleep(min(60, self.cfg.backoff_max_s))
                         continue
-                    job = {"episode_id": body["episode_id"], "claim": body, "claimed_at": now_iso(),
+                    # claimed_at tells this claim from an earlier one of the same episode
+                    # (uploaded.json), so it has microseconds: a voice change can follow at once
+                    job = {"episode_id": body["episode_id"], "claim": body,
+                           "claimed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
                            "spawns": 0}
                     if not re.match(r"^[A-Za-z0-9_-]{1,64}$", job["episode_id"]):
                         log(f"claim gave an episode id that is not a plain name: {job['episode_id']!r}")
@@ -420,12 +436,53 @@ class Worker:
                 raise Failed("script_unavailable", f"the hub did not give the script: {_err(st, body)}")
             self.sleep(min(30 * errors, self.cfg.backoff_max_s))
 
+    @staticmethod
+    def claim_voice(claim: dict):
+        """(the claim's voice, its job.json `voice`), or (None, None) for the voice's default."""
+        v = claim.get("voice")
+        if not isinstance(v, dict) or not isinstance(v.get("spec"), dict):
+            return None, None
+        return v, v["spec"]
+
+    def start_afresh(self, eid: str, vdir: Path, want, job: dict) -> None:
+        """A claim for an episode whose job directory holds another voicing: another voice (job.json
+        says), or the same one already delivered to the hub (a voice change back, a redo). Its
+        status says done and its chunks are the old voice's, so the directory starts over
+        (voice.log is kept)."""
+        jj = read_json(vdir / "job.json")
+        if jj is None:
+            return
+        st = read_json(vdir / "status.json") or {}
+        up = read_json(vdir / "uploaded.json") or {}
+        other = (jj.get("voice") or None) != (want or None)
+        again = bool(up) and up.get("claimed_at") != job.get("claimed_at") and st.get("phase") == "done"
+        if not (other or again):
+            return
+        pid = self.adoptable(vdir)
+        if pid:                                 # the last voicing's process must not see this
+            (vdir / "cancel").touch()
+            end = time.time() + 60
+            while self.adoptable(vdir) and time.time() < end:
+                self.sleep(0.5)
+            if self.adoptable(vdir):
+                raise Failed("voice_busy", f"a voice process (pid {pid}) still works in {vdir}")
+        log(f"{eid}: {'another voice' if other else 'voiced again'}; its job directory starts afresh")
+        for name in ("job.json", "status.json", "uploaded.json", "metrics.json", "cancel", "use-cpu"):
+            try:
+                os.unlink(vdir / name)
+            except FileNotFoundError:
+                pass
+        for d in ("chunks", "out", "work"):
+            shutil.rmtree(vdir / d, ignore_errors=True)
+
     def prepare(self, job: dict, vdir: Path) -> None:
         """The job directory as Leo's runner writes it (INTERFACE §10.2): script.md and job.json."""
         eid = job["episode_id"]
         claim = job.get("claim") or {}
         vdir.mkdir(parents=True, exist_ok=True)
         os.chmod(vdir, 0o700)
+        voice, want = self.claim_voice(claim)
+        self.start_afresh(eid, vdir, want, job)
         sp = vdir / "script.md"
         text = self.fetch_script(eid, claim.get("script_url") or f"/api/voice/{eid}/script", sp.exists())
         if text is not None:
@@ -447,13 +504,16 @@ class Worker:
         if not (vdir / "job.json").exists():
             # Written once: papercast-voice keeps the paper's place in its GPU line by it.
             day = (job.get("claimed_at") or now_iso())[:10]
-            write_json(vdir / "job.json", {
-                "interface": "1.0", "paper_id": voice_id(eid, day), "script": "script.md",
-                "output_dir": "out", "engine": self.cfg.engine,
-                "tags": {"title": claim.get("title") or eid, "album": "Papers",
-                         "artist": claim.get("first_author") or "Unknown author",
-                         "albumartist": "Papers", "date": now_iso()[:10], "genre": "Podcast",
-                         "comment": f"papercast-group {eid}"}})
+            jj = {"interface": "1.0", "paper_id": voice_id(eid, day), "script": "script.md",
+                  "output_dir": "out", "engine": "cpu" if voice and voice.get("cpu") else self.cfg.engine,
+                  "tags": {"title": claim.get("title") or eid, "album": "Papers",
+                           "artist": claim.get("first_author") or "Unknown author",
+                           "albumartist": "Papers", "date": now_iso()[:10], "genre": "Podcast",
+                           "comment": f"papercast-group {eid}"}}
+            if want:
+                jj["voice"] = want
+                log(f"{eid}: in the voice {voice.get('name') or want.get('voice')}")
+            write_json(vdir / "job.json", jj)
         try:
             os.unlink(vdir / "cancel")          # a cancel from an earlier, lost claim
         except FileNotFoundError:
@@ -605,10 +665,13 @@ class Worker:
         if out.get("sha256") and out["sha256"] != sha:
             raise Failed("voice_failed", "voice output checksum does not match status.json")
         dur = float(out.get("duration_s") or 0)
+        self.upload_timings(eid, vdir, out)
+        key = out.get("voice") if isinstance(out.get("voice"), str) and re.match(
+            r"^[A-Za-z0-9._-]{1,80}$", out.get("voice") or "") else None
         log(f"{eid}: uploading {p.stat().st_size} bytes, {dur:.1f} s, "
-            f"{out.get('loudness_lufs')} LUFS, {out.get('engine')}")
+            f"{out.get('loudness_lufs')} LUFS, {out.get('engine')}, voice {key}")
         for attempt in range(1, 5):
-            code, resp = self.retrying("audio upload", lambda: self.hub.audio(eid, p, dur, sha))
+            code, resp = self.retrying("audio upload", lambda: self.hub.audio(eid, p, dur, sha, key))
             if code < 500:
                 break
             log(f"{eid}: upload: {_err(code, resp)}; trying again")
@@ -628,6 +691,25 @@ class Worker:
             pass
         log(f"{eid}: ready (HTTP {code})")
         self.drop()
+
+    def upload_timings(self, eid: str, vdir: Path, out: dict) -> None:
+        """out/timings.json, before the MP3 (the hub keeps it for the audio being made and moves
+        it in with the MP3). A bonus: whatever goes wrong here, the audio still goes."""
+        if out.get("timings") != "out/timings.json":
+            return
+        p = vdir / "out" / "timings.json"
+        try:
+            if p.is_symlink() or p.stat().st_size > 8 * 1024 * 1024:
+                raise ValueError("not a plain file under 8 MB")
+            doc = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            log(f"{eid}: timings not sent ({e})")
+            return
+        code, resp = self.retrying("timings upload", lambda: self.hub.timings(eid, doc))
+        if code >= 400:
+            log(f"{eid}: the hub did not take the timings: {_err(code, resp)}")
+        else:
+            log(f"{eid}: timings sent ({len(doc.get('segments') or [])} sentences)")
 
     def report_failed(self, eid: str, code: str, message: str) -> None:
         log(f"{eid}: failed: {code}: {message}")

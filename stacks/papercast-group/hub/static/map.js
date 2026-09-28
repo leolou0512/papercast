@@ -7,7 +7,9 @@
    admin deletes it (after a dialog; Undo brings it back). Undo and Redo say what they will do
    before they do, for "my last edit" or "the last edit" (Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z, Ctrl+Y);
    History lists the last 100 changes. A new link is aimed: an arrow from the first paper to the
-   pointer, snapping to the paper under it. Every edit shows at once and is set right by the hub's
+   pointer, snapping to the paper under it. While an admin has links from uploads on "suggest
+   only", an upload's links wait as suggestions: shown on request as dashed lines, each accepted
+   (it becomes a link) or dismissed. Every edit shows at once and is set right by the hub's
    answer; a failure rolls back with a short message. Every edit names the revision of the graph
    it was made on: when someone else changed the graph since, the hub refuses it and the map
    brings itself up to date at once. The hub's live events (map.event(kind, data) from the page,
@@ -80,6 +82,8 @@
     var LOG = { entries: [], hint: null, redoHint: null, papers: null, users: null, loaded: false, stale: true, busy: null, again: false, err: null, undoing: false };
     // aim: a link being aimed (from a paper to the pointer; `over` the paper it snaps to)
     var aim = null, shiftHeld = false;
+    // links from uploads (the hub's setting) and the suggestions shown
+    var SETS = { mode: null, open: 0, loaded: false }, showSugg = false, selSugg = null, hoverS = null;
 
     /* ---------- the hub ---------- */
     function call(method, path, body) {
@@ -122,14 +126,17 @@
     if (!EDIT) undoBox.hidden = true;
     if (opts.title) head.appendChild(h("span", "pm-title", opts.title));
     if (opts.graphs !== false) head.appendChild(tabsEl);
-    // who else changed this graph in the last minute
+    // under the search: Show suggestions, and who else changed this graph in the last minute
+    var subRow = h("div", "pm-sub"), bSugg = h("button", "pm-btn pm-small pm-suggb"); bSugg.type = "button"; bSugg.hidden = true;
+    bSugg.setAttribute("aria-pressed", "false");
     var live = h("div", "pm-live"); live.hidden = true; live.setAttribute("aria-live", "polite");
-    [head, undoBox, icons, closeBox, qEl, live].forEach(function (e) { top.appendChild(e); });
+    subRow.appendChild(bSugg); subRow.appendChild(live);
+    [head, undoBox, icons, closeBox, qEl, subRow].forEach(function (e) { top.appendChild(e); });
     var PANELS = {}, PBTN = { start: bStart, undo: bUndo, redo: bRedo, hist: bHist, set: bSet };
     function panel(key, label) { var e = h("div", "pm-panel"); e.hidden = true; e.setAttribute("data-panel", key); e.setAttribute("role", "region"); e.setAttribute("aria-label", label); PANELS[key] = e; return e; }
     var startEl = panel("start", "Start here"), undoEl = panel("undo", "Undo"), redoEl = panel("redo", "Redo"), histEl = panel("hist", "History"), setEl = panel("set", "Graph settings"), newEl = panel("newg", "New graph");
-    var setDyn = h("div", "pm-setdyn"), setFix = h("div");
-    setEl.appendChild(setDyn); setEl.appendChild(setFix);
+    var setDyn = h("div", "pm-setdyn"), setSite = h("div", "pm-setsite"), setFix = h("div");
+    setEl.appendChild(setDyn); setEl.appendChild(setSite); setEl.appendChild(setFix);
     Object.keys(PBTN).forEach(function (k) { PBTN[k].setAttribute("aria-pressed", "false"); });
     var card = h("div", "pm-card"); card.hidden = true;
     var tip = h("div", "pm-tip"); tip.hidden = true;
@@ -226,12 +233,12 @@
       r = r || {};
       var links = (r.links || r.edges || []).map(function (e) { return Array.isArray(e) ? { id: e[0] + ">" + e[1], src: e[0], dst: e[1], grade: e[2] } : e; });
       return { nodes: (r.nodes || []).filter(function (n) { return n && n.id != null; }), links: links, roots: r.roots || [], start: r.start || [],
-        path: r.path || [], descendants: r.descendants || {} };
+        path: r.path || [], descendants: r.descendants || {}, suggestions: Array.isArray(r.suggestions) ? r.suggestions : [] };
     }
     function viewData(g) {
-      var d = g.data || { nodes: [], links: [] }, nodes = d.nodes.slice(), links = d.links.slice();
-      pending.forEach(function (op) { op.apply(g, nodes, links); });
-      return { nodes: nodes, links: links };
+      var d = g.data || { nodes: [], links: [] }, nodes = d.nodes.slice(), links = d.links.slice(), sugg = (d.suggestions || []).slice();
+      pending.forEach(function (op) { op.apply(g, nodes, links, sugg); });
+      return { nodes: nodes, links: links, sugg: sugg };
     }
     function centreWorld(v) { return W && v ? { x: (W / 2 - v.x) / v.k, y: (H / 2 - v.y) / v.k } : { x: 0, y: 0 }; }
     function rebuild(g) {
@@ -261,6 +268,14 @@
         nodes[s].deg++; nodes[t].deg++; nodes[s].ch.push(t); nodes[t].par.push(s);
       });
       links.forEach(function (l) { var a = nodes[l.s].deg, b = nodes[l.t].deg; l.str = 1 / Math.min(a, b); l.bias = a / (a + b); });
+      // suggestions: drawn (on request) and picked like links, but no force pulls along them
+      var sugg = [], sid = {};
+      v.sugg.forEach(function (e) {
+        var a = idx[e.src], b = idx[e.dst];
+        if (a == null || b == null || a === b || sid[String(e.id)]) return;
+        var x = { id: e.id, s: a, t: b, grade: GNAME[e.grade] ? e.grade : "w", e: e, sugg: true };
+        sugg.push(x); sid[String(e.id)] = x;
+      });
       (D.start || []).forEach(function (id) { if (idx[id] != null) nodes[idx[id]].start = true; });
       // A paper the hub has not placed yet (layout.py runs 30 s after a change): by its placed
       // neighbours, else in the middle of the screen; placed again when more neighbours show up.
@@ -276,7 +291,7 @@
       // an ease still under way goes on to where it was going
       var moving = {}; mv.forEach(function (m) { moving[m.n.id] = true; });
       Object.keys(carry).forEach(function (id) { if (!moving[id] && idx[id] != null) mv.push({ n: nodes[idx[id]], x1: carry[id].x1, y1: carry[id].y1 }); });
-      g._s = { nodes: nodes, links: links, idx: idx, lid: lid, alpha: old ? old.alpha : 0, target: old ? old.target : 0, view: view, fitted: old ? old.fitted : false };
+      g._s = { nodes: nodes, links: links, idx: idx, lid: lid, sugg: sugg, sid: sid, alpha: old ? old.alpha : 0, target: old ? old.target : 0, view: view, fitted: old ? old.fitted : false };
       g.dirty = false;
       if (g !== cur) { mv.forEach(function (m) { m.n.x = m.x1; m.n.y = m.y1; }); return; }
       moves = mv.length ? { t0: performance.now(), dur: 650, list: mv.map(function (m) { return { n: m.n, x0: m.n.x, y0: m.n.y, x1: m.x1, y1: m.y1 }; }) } : null;
@@ -284,6 +299,8 @@
       hoverI = null; hoverL = null; hlKey = null;
       if (selId != null && idx[selId] == null) { selId = null; editLabel = null; }
       if (selLink != null && !lid[String(selLink)]) selLink = null;
+      if (selSugg != null && !sid[String(selSugg)]) selSugg = null;
+      hoverS = null;
       if (linkFrom != null && idx[linkFrom] == null) linkFrom = null;
       if (draft && (idx[draft.src] == null || idx[draft.dst] == null)) draft = null;
       renderBanner();
@@ -294,7 +311,7 @@
       if (!cur || !cur._s) return;
       var s = cur._s;
       if (!s.fitted && s.nodes.length && W && !userMoved) { fit(false); s.fitted = true; }
-      renderTabs(); renderStart(); refreshCard(); renderSettings(); renderEmpty(); runQuery(); kick();
+      renderTabs(); renderStart(); refreshCard(); renderSettings(); renderEmpty(); renderSuggBtn(); runQuery(); kick();
     }
     function forData(fn) { graphs.forEach(function (g) { if (g.data) fn(g, g.data); }); }
     function has(nodes, id) { for (var i = 0; i < nodes.length; i++) if (nodes[i].id === id) return true; return false; }
@@ -405,6 +422,11 @@
         vert(x0 + nx, y0 + ny, c, a, 0, e, 3, hw, 0); vert(x0 - nx, y0 - ny, c, a, 0, -e, 3, hw, 0); vert(x1 + nx, y1 + ny, c, a, 0, e, 3, hw, 0);
         vert(x0 - nx, y0 - ny, c, a, 0, -e, 3, hw, 0); vert(x1 - nx, y1 - ny, c, a, 0, -e, 3, hw, 0); vert(x1 + nx, y1 + ny, c, a, 0, e, 3, hw, 0);
       },
+      // a dashed line: its dashes as short lines
+      dash: function (x0, y0, x1, y1, col, a, w, on, off) {
+        var dx = x1 - x0, dy = y1 - y0, d = Math.sqrt(dx * dx + dy * dy) || 1, ux = dx / d, uy = dy / d;
+        for (var t = 0; t < d; t += on + off) { var t1 = Math.min(d, t + on); GLB.line(x0 + ux * t, y0 + uy * t, x0 + ux * t1, y0 + uy * t1, col, a, w); }
+      },
       tri: function (x0, y0, x1, y1, x2, y2, col, a) { var c = rgba(col); vert(x0, y0, c, a, 0, 0, 0, 0, 0); vert(x1, y1, c, a, 0, 0, 0, 0, 0); vert(x2, y2, c, a, 0, 0, 0, 0, 0); },
       disc: function (x, y, r, col, a) { quad(x, y, r + 1, rgba(col), a, 1, r, 0); },
       ring: function (x, y, R, hw, col, a) { quad(x, y, R + hw + 1, rgba(col), a, 2, R, hw); },
@@ -434,17 +456,20 @@
     var B2D = {
       begin: function () { last = {}; g2.setTransform(1, 0, 0, 1, 0, 0); g2.globalAlpha = 1; g2.fillStyle = C.bg; g2.fillRect(0, 0, gv.width, gv.height); },
       line: function (x0, y0, x1, y1, col, a, w) { st2(col, a, w); g2.beginPath(); g2.moveTo(x0, y0); g2.lineTo(x1, y1); g2.stroke(); },
+      dash: function (x0, y0, x1, y1, col, a, w, on, off) { st2(col, a, w); g2.setLineDash([on, off]); g2.beginPath(); g2.moveTo(x0, y0); g2.lineTo(x1, y1); g2.stroke(); g2.setLineDash([]); },
       tri: function (x0, y0, x1, y1, x2, y2, col, a) { st2(col, a); g2.beginPath(); g2.moveTo(x0, y0); g2.lineTo(x1, y1); g2.lineTo(x2, y2); g2.closePath(); g2.fill(); },
       disc: function (x, y, r, col, a) { st2(col, a); g2.beginPath(); g2.arc(x, y, r, 0, 6.2832); g2.fill(); },
       ring: function (x, y, R, hw, col, a) { st2(col, a, hw * 2); g2.beginPath(); g2.arc(x, y, R, 0, 6.2832); g2.stroke(); },
       end: function () {}
     };
-    var GA = { e: 0.95, s: 0.7, w: 0.42 }, KINDS = ["w", "s", "e", "lit"];
-    function edge(B, a, b, col, al, w, arrow, awd) {
+    var GA = { e: 0.95, s: 0.7, w: 0.42 }, KINDS = ["w", "s", "e", "lit"], AT_T = [0.5, 0.38, 0.62, 0.28, 0.72];
+    function edge(B, a, b, col, al, w, arrow, awd, dash) {
       var dx = b.sx - a.sx, dy = b.sy - a.sy, d = Math.sqrt(dx * dx + dy * dy) || 1, ux = dx / d, uy = dy / d;
       if (d <= a.sr + b.sr + DPR) return;
       var ex = b.sx - ux * (b.sr + DPR), ey = b.sy - uy * (b.sr + DPR);
-      B.line(a.sx + ux * a.sr, a.sy + uy * a.sr, arrow ? ex - ux * awd * 1.2 : ex, arrow ? ey - uy * awd * 1.2 : ey, col, al, w);
+      var x1 = arrow ? ex - ux * awd * 1.2 : ex, y1 = arrow ? ey - uy * awd * 1.2 : ey;
+      if (dash) B.dash(a.sx + ux * a.sr, a.sy + uy * a.sr, x1, y1, col, al, w, 5 * DPR, 4 * DPR);
+      else B.line(a.sx + ux * a.sr, a.sy + uy * a.sr, x1, y1, col, al, w);
       if (arrow) B.tri(ex, ey, ex - ux * awd * 2 - uy * awd, ey - uy * awd * 2 + ux * awd, ex - ux * awd * 2 + uy * awd, ey - uy * awd * 2 - ux * awd, col, al);
     }
     // The scene in device pixels: lines by kind (dim first, lit last), then nodes by colour.
@@ -469,6 +494,14 @@
         for (j = 0; j < list.length; j++) {
           var w = isLit ? (list[j] === hlLink ? lwd * 2.4 : lwd * 1.4) : lwd;
           edge(B, N[list[j].s], N[list[j].t], col, al, w, arrow, awd);
+        }
+      }
+      // the suggestions, when shown: dashed, in the muted colour (the one lit in the text colour)
+      if (showSugg) {
+        var SL = s.sugg, litS = hoverS || (selSugg != null ? s.sid[String(selSugg)] : null);
+        for (i = 0; i < SL.length; i++) {
+          var x = SL[i], on2 = x === litS;
+          edge(B, N[x.s], N[x.t], on2 ? C.hi : C.muted, on2 ? 1 : GA[x.grade] * (set ? dim : 1), on2 ? lwd * 1.6 : lwd, arrow, awd, true);
         }
       }
       // the link being made: in the accent (a muted warning colour when it points back in time),
@@ -526,6 +559,31 @@
         ctx.globalAlpha = Math.round(la * 10) / 10;
         ctx.fillText(n.label, px, py);
       }
+      // each suggestion's grade by its middle, where it is long enough on the screen
+      if (showSugg && s.sugg.length) {
+        ctx.font = "11px " + FONT; ctx.textBaseline = "middle";
+        for (i = 0; i < s.sugg.length; i++) {
+          var x = s.sugg[i], a = N[x.s], b = N[x.t];
+          var ax = a.x * k + v.x, ay = a.y * k + v.y, bx = b.x * k + v.x, by = b.y * k + v.y;
+          if (Math.hypot(bx - ax, by - ay) < 90) continue;
+          // along the line, where no paper (or its label) is: the middle, else a little either side
+          var word = GNAME[x.grade], tw2 = ctx.measureText(word).width, mx = 0, my = 0, best = -1;
+          for (var c = 0; c < AT_T.length; c++) {
+            var cx = ax + (bx - ax) * AT_T[c], cy = ay + (by - ay) * AT_T[c], near = Infinity;
+            for (var m = 0; m < N.length; m++) {
+              var nx = N[m].x * k + v.x, ny = N[m].y * k + v.y, rr = radius(N[m]) * k;
+              near = Math.min(near, Math.hypot(nx - cx, ny - cy) - rr, Math.hypot(nx - cx, ny + rr + 10 - cy) - 8);
+            }
+            if (near > best) { best = near; mx = cx; my = cy; }
+            if (near > 24) break;
+          }
+          if (mx < -60 || mx > W + 60 || my < -20 || my > H + 20) continue;
+          ctx.globalAlpha = set && !(set[x.s] && set[x.t]) ? 0.35 : 0.95;
+          ctx.fillStyle = C.bg; ctx.fillRect(mx - tw2 / 2 - 3, my - 7, tw2 + 6, 14);
+          ctx.fillStyle = C.muted; ctx.fillText(word, mx, my);
+        }
+        ctx.fillStyle = C.text; ctx.textBaseline = "top";
+      }
       ctx.globalAlpha = 1;
     }
 
@@ -541,7 +599,7 @@
       }
       if ((aim && aim.p) || linkFrom != null) return null;         // every paper stays a clear target
       var i = dragN ? dragN.i : hoverI;
-      var L = i == null ? (hoverL || (selLink != null ? s.lid[String(selLink)] : null)) : null;
+      var L = i == null ? (hoverL || hoverS || (selLink != null ? s.lid[String(selLink)] : null) || (showSugg && selSugg != null ? s.sid[String(selSugg)] : null)) : null;
       if (L) return { key: "l" + L.s + ":" + L.t, set: function () { return pairSet(L.s, L.t); }, node: null, link: L };
       if (i == null && selId != null && s.idx[selId] != null) i = s.idx[selId];
       return i != null ? { key: "n" + i, set: function () { return neighbours(s, i); }, node: i, link: null } : null;
@@ -552,7 +610,7 @@
       if (s.alpha > ALPHA_MIN || s.target > 0) { tick(s); busy = true; }
       if (moves) {
         var mp = Math.min(1, Math.max(0, (t - moves.t0) / moves.dur)), me = ease(mp);
-        moves.list.forEach(function (m) { if (m.n === dragN) return; m.n.x = m.x0 + (m.x1 - m.x0) * me; m.n.y = m.y0 + (m.y1 - m.y0) * me; });
+        moves.list.forEach(function (m) { if (m.n === dragN) return; m.n.x = mp >= 1 ? m.x1 : m.x0 + (m.x1 - m.x0) * me; m.n.y = mp >= 1 ? m.y1 : m.y0 + (m.y1 - m.y0) * me; });
         if (mp >= 1) moves = null; else busy = true;
       }
       if (aim && aim.p && aimQ() < 1) busy = true;
@@ -579,11 +637,13 @@
       anim = { t0: performance.now(), dur: 450, k0: v.k, x0: v.x, y0: v.y, k1: k, x1: x, y1: y }; kick();
     }
     function panelOpen() { for (var k in PANELS) if (!PANELS[k].hidden) return k; return null; }
+    // where the bar over the map ends (CSS px from the top)
+    function chromeBottom() { var r = top.getBoundingClientRect(), o = root.getBoundingClientRect(); return r.height ? r.bottom - o.top : 0; }
     function fit(smooth) {
       if (!W || !cur || !cur._s || !cur._s.nodes.length) return;
       var N = cur._s.nodes, x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
       N.forEach(function (n) { var r = radius(n); x0 = Math.min(x0, n.x - r); x1 = Math.max(x1, n.x + r); y0 = Math.min(y0, n.y - r); y1 = Math.max(y1, n.y + r + 18); });
-      var tp = phone() ? 124 : 88, bt = phone() ? 24 : 40, sl = 24, sr = !phone() && panelOpen() ? 312 : 24;
+      var tp = Math.max(phone() ? 124 : 88, chromeBottom() + 16), bt = phone() ? 24 : 40, sl = 24, sr = !phone() && panelOpen() ? 312 : 24;
       // a graph of one or two papers is not blown up to the whole screen
       var k = clampK(Math.min(2, (W - sl - sr) / Math.max(1, x1 - x0), (H - tp - bt) / Math.max(1, y1 - y0)));
       moveTo(k, sl + (W - sl - sr) / 2 - (x0 + x1) / 2 * k, tp + (H - tp - bt) / 2 - (y0 + y1) / 2 * k, smooth);
@@ -611,8 +671,10 @@
     }
     // A link near the pointer, measured on the screen (so the reach is the same at any zoom):
     // the distance to the line between the two discs' edges.
-    function hitLink(p) {
-      var s = cur._s, v = s.view, k = v.k, N = s.nodes, L = s.links, tol = phone() ? 14 : 6, best = null, bd = tol;
+    function hitLink(p) { var a = hitAlong(p, cur._s.links), b = showSugg ? hitAlong(p, cur._s.sugg) : null; return b && (!a || b.d < a.d) ? null : a && a.l; }
+    function hitSugg(p) { var a = hitAlong(p, cur._s.links), b = showSugg ? hitAlong(p, cur._s.sugg) : null; return b && (!a || b.d < a.d) ? b.l : null; }
+    function hitAlong(p, L) {
+      var s = cur._s, v = s.view, k = v.k, N = s.nodes, tol = phone() ? 14 : 6, best = null, bd = tol;
       for (var i = 0; i < L.length; i++) {
         var a = N[L[i].s], b = N[L[i].t];
         var ax = a.x * k + v.x, ay = a.y * k + v.y, bx = b.x * k + v.x, by = b.y * k + v.y;
@@ -625,7 +687,7 @@
         var qx = ax + t * dx - p.x, qy = ay + t * dy - p.y, e = Math.sqrt(qx * qx + qy * qy);
         if (e < bd) { bd = e; best = L[i]; }
       }
-      return best;
+      return best ? { l: best, d: bd } : null;
     }
 
     /* ---------- hover card ---------- */
@@ -734,11 +796,12 @@
           if (e.shiftKey !== shiftHeld && !typing(document.activeElement)) shiftHeld = e.shiftKey;
           if (aimFrom() != null) { cv.classList.toggle("over", !!hit(p)); aimAt(p, false); return; }
           if (aim) clearAim();
-          var n = hit(p), i = n ? n.i : null, l = n ? null : hitLink(p);
-          cv.classList.toggle("over", !!(n || l));
-          if (i !== hoverI || l !== hoverL) { hoverI = i; hoverL = l; kick(); }
+          var n = hit(p), i = n ? n.i : null, l = n ? null : hitLink(p), sg = n || l ? null : hitSugg(p);
+          cv.classList.toggle("over", !!(n || l || sg));
+          if (i !== hoverI || l !== hoverL || sg !== hoverS) { hoverI = i; hoverL = l; hoverS = sg; kick(); }
           if (n) showTip("n" + n.id, titleOf(n.id), byline(n.id), p);
           else if (l) showTip("l" + l.id, linkWords(l), cap(GNAME[l.grade]) + " link", p);
+          else if (sg) showTip("s" + sg.id, linkWords(sg), "Suggested · " + GNAME[sg.grade], p);
           else showTip(null);
         }
         return;
@@ -783,9 +846,10 @@
         if (!moved) pick(n.id, shift);
         if (e.pointerType !== "mouse") hoverI = null;
       } else if (mode === "pan" && !moved && cur && cur._s) {
-        var l = hitLink(at);
+        var l = hitLink(at), sg = l ? null : hitSugg(at);
         if (linkFrom != null) cancelDraft();                        // a click on nothing while linking: no link
         else if (l) selectLink(l.id, false);
+        else if (sg) selectSugg(sg.id);
         else select(null);
       }
       if (pcount() === 1) { var q = ptrs[Object.keys(ptrs)[0]]; down = { x: q.x, y: q.y, lx: q.x, ly: q.y }; mode = "pan"; moved = true; }
@@ -798,7 +862,7 @@
       if (e.pointerType === "mouse" && !ptrs[e.pointerId]) {
         tip.hidden = true; lastP = null;
         if (aim) aimAt(null, false);
-        if (hoverI != null || hoverL) { hoverI = null; hoverL = null; kick(); }
+        if (hoverI != null || hoverL || hoverS) { hoverI = null; hoverL = null; hoverS = null; kick(); }
       }
     });
     cv.addEventListener("wheel", function (e) { e.preventDefault(); if (!cur || !cur._s) return; tip.hidden = true; zoomAt(Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015)), local(e).x, local(e).y); }, { passive: false });
@@ -813,7 +877,7 @@
     }
     function closePanelsOnPhone() { if (phone()) openPanel(null); }
     function select(id, focus) {
-      selId = id; selLink = null; draft = null; linkFrom = null; editLabel = null;
+      selId = id; selLink = null; selSugg = null; draft = null; linkFrom = null; editLabel = null;
       renderBanner();
       if (id == null) card.hidden = true;
       else {
@@ -826,11 +890,17 @@
     function selectLink(lid, focus) {
       var l = cur._s.lid[String(lid)];
       if (!l) return;
-      selId = null; selLink = l.id; draft = null; linkFrom = null; editLabel = null;
+      selId = null; selLink = l.id; selSugg = null; draft = null; linkFrom = null; editLabel = null;
       renderBanner(); renderCard(true);
       if (focus) { var N = cur._s.nodes; centerAt((N[l.s].x + N[l.t].x) / 2, (N[l.s].y + N[l.t].y) / 2); }
       closePanelsOnPhone();
       kick();
+    }
+    function selectSugg(id) {
+      if (!cur || !cur._s || !cur._s.sid[String(id)]) return;
+      if (!showSugg) toggleSugg(true);
+      selId = null; selLink = null; selSugg = cur._s.sid[String(id)].id; draft = null; linkFrom = null; editLabel = null;
+      renderBanner(); renderCard(true); closePanelsOnPhone(); kick();
     }
     function linkBetween(a, b) {
       var s = cur._s, i = s.idx[a], j = s.idx[b];
@@ -839,7 +909,7 @@
     }
     function startLinkMode(id) {
       if (!canEdit()) return;
-      selId = null; selLink = null; draft = null; linkFrom = id; editLabel = null;
+      selId = null; selLink = null; selSugg = null; draft = null; linkFrom = id; editLabel = null;
       card.hidden = true; renderBanner(); kick();
     }
     function startDraft(a, b) {
@@ -849,12 +919,12 @@
       // the link as it was aimed: from the first paper to the second, which builds on it (pointing
       // back in time, the card says so and offers the swap)
       draft = { src: a, dst: b, anchor: a };
-      selId = null; selLink = null; linkFrom = null; editLabel = null;
+      selId = null; selLink = null; selSugg = null; linkFrom = null; editLabel = null;
       renderBanner(); renderCard(true); closePanelsOnPhone();
-      // on the phone the card covers the lower half: the arrow being made goes above it
+      // on the phone the card covers the lower half: the arrow being made goes between it and the bar
       if (phone()) {
         var s = cur._s, na = s.nodes[s.idx[a]], nb = s.nodes[s.idx[b]], v = s.view;
-        userMoved = true; moveTo(v.k, W / 2 - (na.x + nb.x) / 2 * v.k, H * 0.26 - (na.y + nb.y) / 2 * v.k, true);
+        userMoved = true; moveTo(v.k, W / 2 - (na.x + nb.x) / 2 * v.k, Math.max(H * 0.26, (chromeBottom() + H * 0.42) / 2) - (na.y + nb.y) / 2 * v.k, true);
       }
       kick();
     }
@@ -1119,6 +1189,116 @@
       });
     }
 
+    /* ---------- suggestions: links an upload found, waiting for a person ---------- */
+    function acceptSugg(id) {
+      var x = cur && cur._s && cur._s.sid[String(id)];
+      if (!x || x.e.pending) return;
+      var e = x.e, tmp = "t" + (++tmpSeq), made = new Date().toISOString();
+      var op = { apply: function (g, nodes, links, sugg) {
+        if (sugg) for (var i = sugg.length - 1; i >= 0; i--) if (same(sugg[i].id, id)) sugg.splice(i, 1);
+        if (has(nodes, e.src) && has(nodes, e.dst)) links.push({ id: tmp, src: e.src, dst: e.dst, grade: e.grade, origin: "human", by: { id: ME.id, name: ME.name }, created_at: made, pending: true });
+      } };
+      selSugg = null; selLink = tmp; selId = null;
+      var sn = seen(cur);
+      edit(op);
+      send(sn, "POST", "/api/link-suggestions/" + encodeURIComponent(id) + "/accept", {}).then(function (r) {
+        var l = (r && r.link) || null;
+        settle(op);
+        forData(function (g, d) {
+          d.suggestions = (d.suggestions || []).filter(function (y) { return !same(y.id, id); });
+          if (l && l.id != null && has(d.nodes, l.src) && has(d.nodes, l.dst) && !d.links.some(function (y) { return same(y.id, l.id); }))
+            d.links = d.links.concat([{ id: l.id, src: l.src, dst: l.dst, grade: l.grade, origin: l.origin, by: { id: ME.id, name: ME.name }, created_at: made }]);
+        });
+        if (selLink === tmp) selLink = l ? l.id : null;
+        rebuildAll(); refetchSoon(); soon({ settings: true });
+        say((r && r.already ? "Linked already: " : "Accepted: ") + label(e.dst) + " builds on " + label(e.src) + ".");
+      }, function (err) {
+        settle(op); if (selLink === tmp) selLink = null;
+        rebuildAll();
+        if (!refused(err, sn && sn.g)) { say("Could not accept it: " + errText(err) + "."); refetchSoon(); }
+      });
+    }
+    function dismissSugg(id) {
+      var x = cur && cur._s && cur._s.sid[String(id)];
+      if (!x || x.e.pending) return;
+      var e = x.e;
+      var op = { apply: function (g, nodes, links, sugg) { if (sugg) for (var i = sugg.length - 1; i >= 0; i--) if (same(sugg[i].id, id)) sugg.splice(i, 1); } };
+      selSugg = null; card.hidden = true;
+      edit(op);
+      send(null, "POST", "/api/link-suggestions/" + encodeURIComponent(id) + "/dismiss", {}).then(function () {
+        settle(op);
+        forData(function (g, d) { d.suggestions = (d.suggestions || []).filter(function (y) { return !same(y.id, id); }); });
+        rebuildAll(); refetchSoon(); soon({ settings: true });
+        say("Dismissed " + label(e.src) + " → " + label(e.dst) + ": it will not be suggested again.");
+      }, function (err) {
+        settle(op); rebuildAll();
+        say("Could not dismiss it: " + errText(err) + ".");
+      });
+    }
+    function acceptAll() {
+      if (!ADMIN || !SETS.open) return;
+      var n0 = SETS.open;
+      send(null, "POST", "/api/link-suggestions/accept-all", {}).then(function (r) {
+        settled++;
+        var n = (r && r.accepted) || 0, left = r && r.skipped ? r.skipped.length : 0;
+        graphs.forEach(function (g) { g.stale = true; });
+        soon({ list: true, graph: true, log: true, settings: true });
+        say("Accepted " + (n === 1 ? "1 suggested link" : n + " suggested links") + (left ? "; " + left + " could not be (linked the other way since, or a loop)" : "") + ".");
+      }, function (err) { say("Could not accept the " + n0 + " suggestions: " + errText(err) + "."); });
+    }
+    function toggleSugg(on) {
+      showSugg = on == null ? !showSugg : !!on;
+      if (!showSugg) { selSugg = null; hoverS = null; if (card.getAttribute("data-kind") === "suggestion") card.hidden = true; }
+      renderSuggBtn(); kick();
+    }
+    function renderSuggBtn() {
+      var n = cur && cur._s ? cur._s.sugg.length : 0;
+      bSugg.hidden = !n;
+      if (!n && showSugg) { showSugg = false; selSugg = null; }
+      bSugg.textContent = (showSugg ? "Hide suggestions" : "Show suggestions") + " (" + n + ")";
+      bSugg.setAttribute("aria-pressed", String(showSugg));
+      root.classList.toggle("pm-subrow", !!n);
+    }
+    bSugg.addEventListener("click", function () { toggleSugg(); });
+    // the hub's setting: links from uploads automatic, or suggestions only
+    function loadSettings() {
+      return call("GET", "/api/graph-settings").then(function (r) {
+        SETS.mode = r && r.agent_links === "suggest" ? "suggest" : "auto"; SETS.open = (r && r.suggestions) || 0; SETS.loaded = true;
+        renderSite();
+      }, function () { SETS.loaded = false; renderSite(); });
+    }
+    function setMode(v) {
+      if (!ADMIN || SETS.mode === v) return;
+      var was = SETS.mode; SETS.mode = v; renderSite();
+      send(null, "PUT", "/api/graph-settings", { agent_links: v }).then(function () {
+        say(v === "suggest" ? "Links from uploads are suggestions now: someone accepts each." : "Links from uploads are added by themselves now.");
+        soon({ settings: true });
+      }, function (err) { SETS.mode = was; renderSite(); say("Could not change it: " + errText(err) + "."); });
+    }
+    var MODES = [["auto", "Automatic", "An upload’s links are drawn at once."], ["suggest", "Suggest only", "An upload’s links wait as suggestions until someone accepts them."]];
+    function renderSite() {
+      if (setEl.hidden) return;
+      setSite.textContent = "";
+      if (!SETS.loaded) return;
+      setSite.appendChild(h("h2", null, "Links from uploads"));
+      var m = MODES.filter(function (x) { return x[0] === SETS.mode; })[0] || MODES[0];
+      if (ADMIN) {
+        var seg = h("div", "pm-seg pm-modes"); seg.setAttribute("role", "group"); seg.setAttribute("aria-label", "Links from uploads");
+        MODES.forEach(function (x) {
+          var b = btn(x[1], "pm-segb", function () { setMode(x[0]); });
+          b.setAttribute("aria-pressed", String(x[0] === SETS.mode)); b.setAttribute("data-mode", x[0]); b.title = x[2];
+          seg.appendChild(b);
+        });
+        setSite.appendChild(seg);
+        setSite.appendChild(h("p", "pm-note", m[2] + " For every graph."));
+        if (SETS.open) {
+          var act = h("div", "pm-act");
+          act.appendChild(btn("Accept all " + SETS.open + (SETS.open === 1 ? " suggestion" : " suggestions"), "pm-btn pm-acceptall", acceptAll));
+          setSite.appendChild(act);
+        }
+      } else setSite.appendChild(h("p", "pm-note", m[1] + ": " + m[2].charAt(0).toLowerCase() + m[2].slice(1)));
+    }
+
     /* ---------- the edit log: Undo and History ---------- */
     function entryById(id) { for (var i = 0; i < LOG.entries.length; i++) if (same(LOG.entries[i].id, id)) return LOG.entries[i]; return null; }
     function isMine(e) { return isMe(e.user_id != null ? e.user_id : e.user && e.user.id); }
@@ -1373,13 +1553,14 @@
       ids.slice().sort(function (a, b) { return (yearOf(a) || 0) - (yearOf(b) || 0); }).forEach(function (id) { ul.appendChild(item(id)); });
       card.appendChild(ul);
     }
-    function refreshCard() { if (!card.hidden || draft || selLink != null || selId != null) renderCard(false); }
+    function refreshCard() { if (!card.hidden || draft || selLink != null || selSugg != null || selId != null) renderCard(false); }
     function renderCard(force) {
       var a = document.activeElement;
       if (!force && a && card.contains(a) && (a.tagName === "INPUT" || editLabel != null)) return;   // someone is typing in it
       card.textContent = "";
       if (!cur || !cur._s) { card.hidden = true; return; }
-      if (draft) draftCard(); else if (selLink != null && cur._s.lid[String(selLink)]) linkCard(); else if (selId != null && cur._s.idx[selId] != null) paperCard();
+      if (draft) draftCard(); else if (selLink != null && cur._s.lid[String(selLink)]) linkCard();
+      else if (selSugg != null && cur._s.sid[String(selSugg)]) suggCard(); else if (selId != null && cur._s.idx[selId] != null) paperCard();
       else { card.hidden = true; return; }
       card.hidden = false;
     }
@@ -1459,6 +1640,25 @@
       card.appendChild(h("h2", null, "Papers"));
       var ul = h("ul", "pm-list"); ul.appendChild(item(A, null, "earlier")); ul.appendChild(item(B, null, "builds on it")); card.appendChild(ul);
     }
+    function suggCard() {
+      var x = cur._s.sid[String(selSugg)], e = x.e, A = e.src, B = e.dst, can = canEdit() && !e.pending;
+      card.setAttribute("data-kind", "suggestion");
+      closeX();
+      card.appendChild(h("h3", null, label(A) + " → " + label(B)));
+      card.appendChild(h("p", "pm-dir", label(B) + " builds on " + label(A)));
+      var up = e.by && (e.by.name || isMe(e.by)) ? (isMe(e.by) ? "your" : e.by.name + "’s") + " upload" : "an upload";
+      card.appendChild(h("p", "pm-sub pm-by", "Suggested, " + GNAME[x.grade] + ": found in " + up + (e.created_at ? " · " + ago(e.created_at) : "")));
+      if (can) {
+        var act = h("div", "pm-act");
+        act.appendChild(btn("Accept", "pm-open pm-accept", function () { acceptSugg(e.id); }));
+        act.appendChild(btn("Dismiss", "pm-btn pm-dismiss", function () { dismissSugg(e.id); }));
+        card.appendChild(act);
+        card.appendChild(h("p", "pm-note", "Accept makes it a link (Undo takes it back). Dismiss drops it for good."));
+      }
+      lockNote();
+      card.appendChild(h("h2", null, "Papers"));
+      var ul = h("ul", "pm-list"); ul.appendChild(item(A, null, "earlier")); ul.appendChild(item(B, null, "builds on it")); card.appendChild(ul);
+    }
     function draftCard() {
       var A = draft.src, B = draft.dst, ya = yearOf(A), yb = yearOf(B), bad = backwards(A, B);
       card.setAttribute("data-kind", "draft");
@@ -1490,7 +1690,7 @@
         if (phone() && (selId != null || selLink != null || draft || linkFrom != null)) { selId = null; selLink = null; draft = null; linkFrom = null; clearAim(); card.hidden = true; renderBanner(); kick(); }
         if (key === "start") renderStart();
         if (key === "undo" || key === "redo" || key === "hist") { renderUndo(); renderRedo(); renderHist(); loadLog(); }
-        if (key === "set") renderSettings(true);
+        if (key === "set") { renderSettings(true); renderSite(); loadSettings(); }
         if (key === "newg") renderNew();
       }
       renderTabs(); renderUndoButtons(); renderLive();
@@ -1725,13 +1925,13 @@
     }
     function showGraph(g) {
       if (!g) {
-        cur = null; selId = null; selLink = null; draft = null; linkFrom = null; editLabel = null; qset = null;
-        renderTabs(); renderBanner(); renderEmpty(); renderLive(); card.hidden = true; tip.hidden = true; ctxClear(); return;
+        cur = null; selId = null; selLink = null; selSugg = null; draft = null; linkFrom = null; editLabel = null; qset = null;
+        renderTabs(); renderBanner(); renderEmpty(); renderLive(); renderSuggBtn(); card.hidden = true; tip.hidden = true; ctxClear(); return;
       }
       if (cur === g) { applyWant(); return; }
       cur = g;
       if (!g.tmp) save(TKEY, g.id);
-      hoverI = null; hoverL = null; selId = null; selLink = null; draft = null; linkFrom = null; editLabel = null; clearAim();
+      hoverI = null; hoverL = null; hoverS = null; selId = null; selLink = null; selSugg = null; draft = null; linkFrom = null; editLabel = null; clearAim();
       card.hidden = true; tip.hidden = true; hl = 0; hlSet = null; hlFocus = null; hlLink = null; hlKey = null; anim = null; moves = null; allPath = false;
       renderBanner(); renderLive();
       if (g.data && (!g._s || g.dirty)) rebuild(g);
@@ -1841,14 +2041,17 @@
       if (soonT) return;
       soonT = setTimeout(function () {
         soonT = null; var x = soonWhat; soonWhat = {};
-        if (!visible) { graphs.forEach(function (g) { g.stale = true; }); LOG.stale = true; return; }
+        if (!visible) { graphs.forEach(function (g) { g.stale = true; }); LOG.stale = true; SETS.loaded = SETS.loaded && !x.settings; return; }
         if (x.list) loadList();
         if (x.graph && cur) loadGraph(cur);
         if (x.log) loadLog();
+        if (x.settings && (SETS.loaded || !setEl.hidden)) loadSettings();
       }, 250);
     }
     function onGraphEvent(d) {
       d = d || {};
+      if (d.change === "settings") { soon({ settings: true }); return; }
+      if (d.change === "suggestions") soon({ settings: true });
       // one graph (graph_id), several (graphs: a link is in every graph that has both papers), or not said
       var gid = d.graph_id || (d.graph && d.graph.id) || (typeof d.id === "string" && /^g_/.test(d.id) ? d.id : null);
       var ids = Array.isArray(d.graphs) ? d.graphs.map(function (x) { return x && typeof x === "object" ? x.id : x; }) : gid ? [gid] : null;
@@ -1915,7 +2118,7 @@
     resize();
     renderTabs(); renderEmpty();
     if (!phone()) openPanel("start");
-    loadList(); loadLog();
+    loadList(); loadLog(); loadSettings();
 
     var lastSig = "";
     function relabel() { graphs.forEach(function (g) { if (g._s) g._s.nodes.forEach(function (n) { n.label = labelFrom(n.o, n.id); }); }); }
@@ -1932,7 +2135,7 @@
       event: function (kind, data) { var fn = ON[kind]; if (fn) fn(data || {}); },
       hide: function () { visible = false; tip.hidden = true; hoverI = null; hoverL = null; shiftHeld = false; clearAim(); release(); closeDialog(true); },
       // everything again from the hub (what show() does)
-      refresh: function () { loadList(); if (cur && !cur.tmp) loadGraph(cur); graphs.forEach(function (g) { if (g !== cur) g.stale = true; }); loadLog(); },
+      refresh: function () { loadList(); if (cur && !cur.tmp) loadGraph(cur); graphs.forEach(function (g) { if (g !== cur) g.stale = true; }); loadLog(); loadSettings(); },
       // show a paper (and the graph it is in, when given)
       select: function (paperId, graphId) { want = { pid: paperId, gid: graphId }; if (graphId && byId[graphId] && byId[graphId] !== cur) showGraph(byId[graphId]); else applyWant(); },
       debug: { S: S, cur: function () { return cur; }, graphs: function () { return graphs; }, show: function (id) { showGraph(byId[id]); }, select: select, selectLink: selectLink,
@@ -1941,7 +2144,8 @@
           var t = aim && aim.p && cur && cur._s ? tipNow() : null;
           return { sel: selId, link: selLink, from: linkFrom, draft: draft && { src: draft.src, dst: draft.dst }, pending: pending.length, moving: !!moves, running: running,
             aim: t ? { from: aim.from, over: aim.over, tip: [t.x, t.y], r: t.r, warn: aimBad(), easing: aimQ() < 1, text: aimTip.hidden ? null : aimTip.textContent } : null,
-            rev: cur ? cur.rev : null, dialog: dlg.open ? dlgH.textContent : null, live: live.hidden ? null : live.textContent };
+            rev: cur ? cur.rev : null, dialog: dlg.open ? dlgH.textContent : null, live: live.hidden ? null : live.textContent,
+            sugg: { shown: showSugg, n: cur && cur._s ? cur._s.sugg.length : 0, sel: selSugg, mode: SETS.mode, open: SETS.open } };
         },
         // a paper's place on the page, and a link's middle (CSS px)
         pos: function (id) { var n = nodeOf(cur, id), v = cur._s.view; return n ? [n.x * v.k + v.x, n.y * v.k + v.y] : null; },

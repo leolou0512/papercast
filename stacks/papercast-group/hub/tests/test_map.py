@@ -1287,6 +1287,118 @@ class MapTest(unittest.TestCase):
         self.js(f"H.map.event('episode', {{id: 'e_x', paper_id: {J(FLOW)}, deleted: true}})")
         self.wait(f"{M}.cur()._s.idx[{J(FLOW)}] == null", "the paper that left")
 
+    # ------------------------------------------------------------------ 23. suggestions
+    def along(self, a, b, n=16):
+        """n page points along the middle of the line between two papers."""
+        (ax, ay), (bx, by) = self.pos(a), self.pos(b)
+        return [(ax + (bx - ax) * t, ay + (by - ay) * t) for t in [0.3 + 0.4 * i / (n - 1) for i in range(n)]]
+
+    def test_23_suggestions_shown_on_request_accepted_and_dismissed(self):
+        self.open("webgl=0")
+        px, var, close = self.colours()
+        muted, bg = var("--pm-muted"), var("--pm-bg")
+        ink = lambda x, y: sum(abs(g - w) for g, w in zip(self.js(f"{M}.pixel({x}, {y})"), bg)) > 24
+        dashes = lambda: sum(1 for x, y in self.along(TRPO, RLHF) if ink(x, y))
+        # asked for, not shown: the button says how many
+        self.assertEqual(self.text(".pm-suggb"), "Show suggestions (2)")
+        self.assertEqual(self.state()["sugg"], {"shown": False, "n": 2, "sel": None, "mode": "suggest", "open": 3})
+        self.assertEqual(dashes(), 0, "a suggestion drawn before it was asked for")
+        mx, my = self.along(TRPO, RLHF, 3)[1]
+        self.click(mx, my)
+        self.assertIsNone(self.card(), "a hidden suggestion was picked")
+        self.js("document.querySelector('#map .pm-suggb').click()")
+        self.assertEqual((self.text(".pm-suggb"), self.state()["sugg"]["shown"]), ("Hide suggestions (2)", True))
+        self.assertGreaterEqual(dashes(), 4, "not drawn as a dashed line")
+        self.assertLessEqual(dashes(), 13, "not dashed")
+        # hover and pick one: what it would be, whose upload found it, Accept and Dismiss
+        self.b.call("Input.dispatchMouseEvent", type="mouseMoved", x=mx + 2, y=my)
+        self.wait("document.querySelector('#map .pm-tip-t').textContent === 'RLHF builds on TRPO'", "hover")
+        self.assertEqual(self.text(".pm-tip-s"), "Suggested · weak")
+        self.click(mx + 2, my)
+        self.wait("document.querySelector('#map .pm-card').dataset.kind === 'suggestion' && !document.querySelector('#map .pm-card').hidden", "the card")
+        self.assertEqual(self.text(".pm-card h3"), "TRPO → RLHF")
+        self.assertEqual(self.text(".pm-card .pm-dir"), "RLHF builds on TRPO")
+        self.assertEqual(self.text(".pm-card .pm-by"), "Suggested, weak: found in Bob’s upload · 1 d ago")
+        self.assertEqual(self.texts(".pm-card .pm-act button"), ["Accept", "Dismiss"])
+        # accept: a link at once, set right by the hub; the person's edit, with the revision
+        self.hub.delay[("POST", r"/accept$")] = 0.8
+        self.press(".pm-card", "Accept")
+        got = self.link_between(TRPO, RLHF)
+        self.assertTrue(got and got["pending"], "not drawn at once")
+        self.assertEqual(self.state()["sugg"]["n"], 1)
+        self.wait(f"{M}.state().pending === 0", "accepted", 5)
+        self.assertEqual(self.link_between(TRPO, RLHF), {"id": 9, "grade": "w", "pending": False})
+        self.assertEqual(self.edits("POST", "/accept$"), [("/api/link-suggestions/1/accept", {})])
+        self.assertEqual(self.revs_sent("POST", "/accept$"), [(RL, 7)])
+        self.assertEqual(self.msg(), "Accepted: RLHF builds on TRPO.")
+        self.assertEqual(self.text(".pm-suggb"), "Hide suggestions (1)")
+        self.wait("document.querySelector('#map .pm-ib[aria-label=Undo]').title.startsWith('Undo: You added TRPO → RLHF (weak)')", "it is my edit")
+        # dismiss the other: gone for good
+        x2, y2 = self.along(TRPO, INSTRUCT, 3)[1]
+        self.click(x2, y2)
+        self.wait("document.querySelector('#map .pm-card').dataset.kind === 'suggestion' && document.querySelector('#map .pm-card h3').textContent === 'TRPO → InstructGPT'", "the other")
+        self.assertEqual(self.text(".pm-card .pm-by"), "Suggested, strong: found in Alice’s upload · 5 h ago")
+        self.press(".pm-card", "Dismiss")
+        self.assertEqual(self.state()["sugg"]["n"], 0, "not gone at once")
+        self.wait(f"{M}.state().pending === 0", "dismissed")
+        self.assertEqual(self.edits("POST", "/dismiss$"), [("/api/link-suggestions/2/dismiss", {})])
+        self.assertEqual(self.hub.s["suggestions"][2]["state"], "dismissed")
+        self.assertEqual(self.msg(), "Dismissed TRPO → InstructGPT: it will not be suggested again.")
+        self.assertTrue(self.js("document.querySelector('#map .pm-suggb').hidden"), "the button stays with nothing to show")
+        # the setting: for a viewer, what it is; no Accept all
+        self.open_panel("Graph settings")
+        self.wait("!!document.querySelector('#map .pm-setsite h2')", "the setting")
+        self.assertEqual(self.texts(".pm-setsite h2"), ["Links from uploads"])
+        self.assertEqual(self.text(".pm-setsite .pm-note"), "Suggest only: an upload’s links wait as suggestions until someone accepts them.")
+        self.assertEqual(self.js("document.querySelectorAll('#map .pm-setsite button').length"), 0)
+        # someone's upload found another: the page hears of it
+        with self.hub.lock:
+            self.hub.s["suggestions"][4] = {"id": 4, "src": PPO, "dst": RLHF, "grade": "e", "user_id": BOB, "created_at": "2026-09-28T10:00:00Z", "state": "open"}
+        self.js(f"H.emit('graph', {{id: {J(RL)}, change: 'suggestions'}})")
+        self.wait("!document.querySelector('#map .pm-suggb').hidden && document.querySelector('#map .pm-suggb').textContent === 'Show suggestions (1)'", "the new one")
+        self.assert_csrf()
+
+    def test_23b_the_setting_and_accept_all_are_an_admins(self):
+        self.open(me=ALICE)
+        self.open_panel("Graph settings")
+        self.wait("!!document.querySelector('#map .pm-modes')", "the switch")
+        pressed = lambda: self.js("[...document.querySelectorAll('#map .pm-modes button')].map(b => [b.textContent, b.getAttribute('aria-pressed')])")
+        self.assertEqual(pressed(), [["Automatic", "false"], ["Suggest only", "true"]])
+        self.assertEqual(self.text(".pm-setsite .pm-note"), "An upload’s links wait as suggestions until someone accepts them. For every graph.")
+        self.press("[data-panel=set] .pm-modes", "Automatic")
+        self.assertEqual(pressed(), [["Automatic", "true"], ["Suggest only", "false"]])
+        self.until(lambda: self.hub.s["agent_links"] == "auto", "saved")
+        self.assertEqual(self.edits("PUT", "graph-settings"), [("/api/graph-settings", {"agent_links": "auto"})])
+        self.wait("(m => !m.hidden)(document.querySelector('#map .pm-msg'))", "said")
+        self.assertEqual(self.msg(), "Links from uploads are added by themselves now.")
+        # switching back does not add the old suggestions; Accept all does
+        self.assertEqual(self.state()["sugg"]["n"], 2)
+        self.press("[data-panel=set]", "Accept all 3 suggestions")
+        self.wait(f"{M}.state().sugg.n === 0 && !!{M}.cur()._s.lid['9'] && !!{M}.cur()._s.lid['10']", "accepted, in this graph")
+        self.assertEqual(self.msg(), "Accepted 3 suggested links.")
+        self.assertEqual(self.edits("POST", "accept-all"), [("/api/link-suggestions/accept-all", {})])
+        self.wait("!document.querySelector('#map .pm-acceptall')", "nothing left to accept")
+        self.js(f"document.querySelector('#map .pm-tab[data-id=\"{GEN}\"]').click()")
+        self.wait(f"{M}.cur().id === {J(GEN)} && {M}.cur()._s.links.some(l => l.e.src === {J(DDPM)} && l.e.dst === {J(FLOW)})", "in the other graph too")
+        self.assert_csrf()
+
+    def test_23c_suggestions_on_the_phone(self):
+        self.phone()
+        self.open()
+        self.tap_button(".pm-sub", "Show suggestions (2)")
+        self.wait(f"{M}.state().sugg.shown", "shown")
+        self.assertTargets("the map with suggestions")
+        top = self.js("document.querySelector('#map .pm-sub').getBoundingClientRect().bottom")
+        self.open_panel("Start here")
+        self.assertGreaterEqual(self.js("document.querySelector('#map [data-panel=start]').getBoundingClientRect().top"), top - 0.5, "the panel covers the row")
+        self.open_panel("Start here")
+        x, y = self.along(TRPO, RLHF, 3)[1]
+        self.tap(x, y)
+        self.wait("document.querySelector('#map .pm-card').dataset.kind === 'suggestion' && !document.querySelector('#map .pm-card').hidden", "the card")
+        self.assertTargets("a suggestion's card")
+        self.tap_button(".pm-card", "Dismiss")
+        self.wait(f"{M}.state().pending === 0 && {M}.state().sugg.n === 1", "dismissed")
+
 
 if __name__ == "__main__":
     unittest.main()

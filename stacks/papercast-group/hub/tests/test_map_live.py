@@ -8,7 +8,8 @@ an edit made on a revision someone else moved past is refused and the page bring
 date at once, with nothing half-applied; redo after undo for "my last undo" and "the last undo by
 anyone", greyed out when there is nothing to redo; the delete dialog (Cancel, Escape, a click
 outside, Delete, then Undo), and no Delete for someone who neither made the graph nor is an
-admin; Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z and Ctrl+Y, not while typing; the phone's 44 px taps for the
+admin; links from uploads switched to suggest only by an admin, the suggestions on both pages,
+accepted on one and seen on the other, Accept all, and automatic again; Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z and Ctrl+Y, not while typing; the phone's 44 px taps for the
 new buttons and the dialog; no console error or CSP violation on either page.
 
     nice python3 -m unittest discover -s stacks/papercast-group/hub/tests -p 'test_map_live.py' -v
@@ -128,6 +129,8 @@ class LiveMap(unittest.TestCase):
         db.conn().execute("DELETE FROM graph_members")
         db.conn().execute("UPDATE graphs SET deleted_at = NULL, locked = 0, name = 'Reinforcement learning' WHERE id = ?", (self.rl,))
         db.conn().execute("UPDATE papers SET label = NULL")
+        db.conn().execute("DELETE FROM link_suggestions")
+        db.conn().execute("DELETE FROM graph_settings")
         self.assertEqual(errs, {"Alice": [], "Bob": []}, "errors in the console")
 
     # ------------------------------------------------------------------ helpers
@@ -418,6 +421,61 @@ class LiveMap(unittest.TestCase):
             self.press(a, ".pm-dialog", "Cancel")
         finally:
             a.viewport(1440, 900)
+
+    # ------------------------------------------------------------------ 6. links from uploads: suggestions
+    def upload(self, paper, others):
+        """The agent's links of an upload by Bob (contrib calls this after the checks)."""
+        return graph.apply_agent_links("e_up", paper, self.bob, [{"other": {"paper_id": o}, "direction": "builds_on", "grade": g} for o, g in others])
+
+    def test_6_suggestions_reach_both_pages_and_are_accepted(self):
+        a, b, p = self.ba, self.bb, self.p
+        self.map(a, "Alice")
+        self.map(b, "Bob")
+        for x in (a, b):
+            x.js("document.querySelector('#map .pm-ib[aria-label=\"Graph settings\"]').click()")
+            x.wait_js("!!document.querySelector('#map .pm-setsite h2')", 3, "the setting")
+        self.assertEqual(b.js("document.querySelectorAll('#map .pm-setsite button').length"), 0, "Bob may change the setting")
+        self.assertEqual(b.js("document.querySelector('#map .pm-setsite .pm-note').textContent"), "Automatic: an upload’s links are drawn at once.")
+        # Alice (an admin) switches to suggestions: saved, and Bob's panel says so
+        self.press(a, "[data-panel=set] .pm-modes", "Suggest only")
+        a.wait_js("(m => !m.hidden && m.textContent.startsWith('Links from uploads are suggestions'))(document.querySelector('#map .pm-msg'))", 3, "saved")
+        self.assertEqual(self.api("GET", "/api/graph-settings")["agent_links"], "suggest")
+        self.shows(b, "document.querySelector('#map .pm-setsite .pm-note').textContent.startsWith('Suggest only')", "Bob's panel")
+        # an upload finds two links: suggestions on both pages, not links
+        out = self.upload(p[4], [(p[0], "s"), (p[2], "w")])
+        self.assertEqual((out["added"], out["suggested"]), (0, 2))
+        took = self.shows(b, "!document.querySelector('#map .pm-suggb').hidden && document.querySelector('#map .pm-suggb').textContent === 'Show suggestions (2)'", "Bob's suggestions")
+        self.shows(a, "document.querySelector('#map .pm-suggb').textContent === 'Show suggestions (2)'", "Alice's suggestions")
+        self.assertFalse(a.js(self.has_link(a, p[0], p[4])))
+        # Bob shows them and accepts one on his map; Alice sees the link
+        b.js("document.querySelector('#map .pm-ib[aria-label=\"Graph settings\"]').click()")    # the panel away
+        b.js("document.querySelector('#map .pm-suggb').click()")
+        (ax, ay), (bx, by) = b.js(f"{M}.pos({J(p[0])})"), b.js(f"{M}.pos({J(p[4])})")
+        b.js(f"{M}.view(1, innerWidth / 2 - ({M}.cur()._s.nodes[{M}.cur()._s.idx[{J(p[0])}]].x + {M}.cur()._s.nodes[{M}.cur()._s.idx[{J(p[4])}]].x) / 2, innerHeight / 2 - ({M}.cur()._s.nodes[{M}.cur()._s.idx[{J(p[0])}]].y + {M}.cur()._s.nodes[{M}.cur()._s.idx[{J(p[4])}]].y) / 2)")
+        (ax, ay), (bx, by) = b.js(f"{M}.pos({J(p[0])})"), b.js(f"{M}.pos({J(p[4])})")
+        self.click(b, (ax + bx) / 2, (ay + by) / 2)
+        b.wait_js("document.querySelector('#map .pm-card').dataset.kind === 'suggestion' && !document.querySelector('#map .pm-card').hidden", 3, "the suggestion's card")
+        self.assertEqual(b.js("document.querySelector('#map .pm-card .pm-dir').textContent"), "Epsilon builds on Alpha")
+        self.assertEqual(b.js("document.querySelector('#map .pm-card .pm-by').textContent").split(" · ")[0], "Suggested, strong: found in your upload")
+        self.press(b, ".pm-card", "Accept")
+        b.wait_js(f"{M}.state().pending === 0 && {self.has_link(b, p[0], p[4])}", 5, "accepted")
+        took = self.shows(a, self.has_link(a, p[0], p[4], "s"), "the accepted link on Alice's map")
+        self.shows(a, "document.querySelector('#map .pm-suggb').textContent === 'Show suggestions (1)'", "one left on Alice's map")
+        e = self.api("GET", "/api/graph-log")["log"][0]
+        self.assertEqual((e["op"], e["user"]["name"], e["actor"]), ("link.add", "Bob", "human"))
+        # Accept all: Alice's, in her settings panel
+        a.js("document.querySelector('#map .pm-ib[aria-label=\"Graph settings\"]').click()")
+        a.wait_js("!!document.querySelector('#map .pm-acceptall')", 3, "Accept all")
+        self.assertEqual(a.js("document.querySelector('#map .pm-acceptall').textContent"), "Accept all 1 suggestion")
+        a.js("document.querySelector('#map .pm-acceptall').click()")
+        self.shows(b, self.has_link(b, p[2], p[4], "w"), "the last one on Bob's map", 2)
+        b.wait_js("document.querySelector('#map .pm-suggb').hidden", 3, "nothing left to show")
+        # automatic again: the next upload's links are links at once
+        self.press(a, "[data-panel=set] .pm-modes", "Automatic")
+        a.wait_js("(m => !m.hidden && m.textContent.startsWith('Links from uploads are added'))(document.querySelector('#map .pm-msg'))", 3, "saved")
+        self.assertEqual(self.upload(p[4], [(p[1], "e")])["added"], 1)
+        self.shows(b, self.has_link(b, p[1], p[4], "e"), "an automatic link on Bob's map")
+        self.assertTrue(b.js("document.querySelector('#map .pm-suggb').hidden"))
 
 
 if __name__ == "__main__":

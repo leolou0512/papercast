@@ -28,7 +28,7 @@
 
 /* the bar: tabs over the search on the left, Undo and Redo, the icons, Close on the right */
 .pm-top { position: absolute; top: 12px; left: 16px; right: 16px; display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto;
-  grid-template-areas: "head undo icons close" "q . . ." "live . . ."; column-gap: 12px; row-gap: 8px; align-items: start; pointer-events: none; }
+  grid-template-areas: "head undo icons close" "q . . ." "sub . . ."; column-gap: 12px; row-gap: 8px; align-items: start; pointer-events: none; }
 .pm-top > * { pointer-events: auto; }
 .pm-head { grid-area: head; display: flex; align-items: baseline; gap: 18px; min-width: 0; pointer-events: none; }
 .pm-head > * { pointer-events: auto; }
@@ -48,7 +48,12 @@
 .pm-q:focus { outline: none; border-color: var(--pm-muted); }
 .pm-icons { grid-area: icons; display: flex; gap: 2px; flex: none; }
 .pm-undobox { grid-area: undo; display: flex; gap: 2px; flex: none; }
-.pm-live { grid-area: live; justify-self: start; font-size: 12px; color: var(--pm-muted); pointer-events: none; }
+.pm-sub { grid-area: sub; justify-self: start; display: flex; align-items: center; gap: 12px; min-width: 0; pointer-events: none; }
+.pm-sub > * { pointer-events: auto; }
+.pm-sub:not(:has(> :not([hidden]))) { display: none; }
+.pm-live { font-size: 12px; color: var(--pm-muted); pointer-events: none !important; }
+.pm-suggb[aria-pressed="true"] { background: var(--pm-panel); }
+.pm-modes { margin-top: 6px; }
 .pm-closebox { grid-area: close; display: flex; }
 .pm-closebox:empty { display: none; }
 .pm-ib { width: 36px; height: 36px; border-radius: 6px; display: grid; place-items: center; color: var(--pm-muted); }
@@ -172,7 +177,10 @@
 @media (max-width: 760px) {
   /* two rows: the tabs, Undo and Redo, Close; then the search and the icons */
   .pm-top { top: calc(8px + env(safe-area-inset-top)); left: 12px; right: 8px; grid-template-columns: minmax(0, 1fr) auto 44px;
-    grid-template-areas: "head undo close" "q icons icons" "live live live"; column-gap: 6px; row-gap: 4px; align-items: center; }
+    grid-template-areas: "head undo close" "q icons icons" "sub sub sub"; column-gap: 6px; row-gap: 4px; align-items: center; }
+  /* with Show suggestions under the search, what hangs under the bar goes down a row */
+  .pmap.pm-subrow .pm-panel { top: calc(156px + env(safe-area-inset-top)); max-height: calc(100% - 172px - env(safe-area-inset-top)); }
+  .pmap.pm-subrow .pm-msg { top: calc(156px + env(safe-area-inset-top)); }
   .pm-undobox { justify-self: end; }
   .pm-closebox { justify-content: flex-end; }
   .pm-title { display: none; }

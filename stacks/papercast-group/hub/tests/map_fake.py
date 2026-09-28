@@ -4,7 +4,9 @@ edit recorded (method, path, body, the X-PCG header), the edit log and its rever
 when `expect` is not the newest op in scope, 409 `conflict` when the thing changed since) and
 redo (`"redo": true`, the log's `undo` and `redo` hints per scope, as graph.py), locked graphs
 for admins only, and each graph's revision: one up with every change touching it, and an edit
-sent with an older `base_rev` refused with 409 `stale` (an edit someone already made is done). Knobs: `fail` and `delay` for the next request matching a method and a
+sent with an older `base_rev` refused with 409 `stale` (an edit someone already made is done);
+links from uploads automatic or suggested (/api/graph-settings), and the suggestions' accept,
+dismiss and accept-all. Knobs: `fail` and `delay` for the next request matching a method and a
 path pattern. It also serves the map (hub/static/map.js, map.css) and a page that mounts it
 (map_harness/), with the hub's page CSP, so a CSP violation shows as a console error."""
 from __future__ import annotations
@@ -95,7 +97,14 @@ def fixtures() -> dict:
          "before": {"id": 8, "src": RLHF, "dst": DPO, "grade": "w", "state": "active"}, "after": {"id": 8, "src": RLHF, "dst": DPO, "grade": "w", "state": "removed"},
          "revert_of": None, "reverted_by": None},
     ]
-    return {"papers": papers, "graphs": graphs, "layout": layout, "links": links, "log": log, "next_link": 9, "next_graph": 1}
+    # links uploads found while they were suggestions only (graph.py's link_suggestions)
+    suggestions = {
+        1: {"id": 1, "src": TRPO, "dst": RLHF, "grade": "w", "user_id": BOB, "created_at": ago(days=1), "state": "open"},
+        2: {"id": 2, "src": TRPO, "dst": INSTRUCT, "grade": "s", "user_id": ALICE, "created_at": ago(hours=5), "state": "open"},
+        3: {"id": 3, "src": DDPM, "dst": FLOW, "grade": "e", "user_id": BOB, "created_at": ago(days=2), "state": "open"},
+    }
+    return {"papers": papers, "graphs": graphs, "layout": layout, "links": links, "log": log, "next_link": 9, "next_graph": 1,
+            "suggestions": suggestions, "agent_links": "suggest"}
 
 
 class FakeHub:
@@ -331,7 +340,34 @@ class FakeHub:
         for n in nodes:
             n["deg"] = sum(1 for l in links if n["id"] in (l["src"], l["dst"]))
         return {"graph": self.meta(g), "rev": g["rev"], "nodes": nodes, "links": links, "roots": roots, "start": roots, "path": path,
-                "descendants": {k: v for k, v in desc.items() if v}}
+                "descendants": {k: v for k, v in desc.items() if v},
+                "suggestions": [self.sugg_out(x) for x in self.open_suggestions() if x["src"] in mem and x["dst"] in mem]}
+
+    def open_suggestions(self):
+        """The open ones still worth showing: no link of the pair either way (graph.py's _World.sugg)."""
+        pairs = {(l["src"], l["dst"]) for l in self.s["links"].values()}
+        back = {(l["dst"], l["src"]) for l in self.s["links"].values() if l["state"] == "active"}
+        return [x for x in self.s["suggestions"].values() if x["state"] == "open" and (x["src"], x["dst"]) not in pairs
+                and (x["src"], x["dst"]) not in back]
+
+    def sugg_out(self, x):
+        u = USERS.get(x["user_id"])
+        return {"id": x["id"], "src": x["src"], "dst": x["dst"], "grade": x["grade"], "created_at": x["created_at"],
+                "by": {"id": u["id"], "name": u["name"]} if u else None}
+
+    def accept(self, me, x):
+        """-> the new link, or None when the pair is linked already."""
+        old = next((l for l in self.s["links"].values() if l["src"] == x["src"] and l["dst"] == x["dst"]), None)
+        x["state"] = "accepted"
+        if old and old["state"] == "active":
+            return None
+        lid = self.s["next_link"]
+        self.s["next_link"] += 1
+        l = {"id": lid, "src": x["src"], "dst": x["dst"], "grade": x["grade"], "origin": "human", "state": "active",
+             "created_by": me["id"], "created_at": iso(datetime.now(timezone.utc))}
+        self.s["links"][lid] = l
+        self.add_log(me["id"], "link.add", lid, None, {"id": lid, "src": l["src"], "dst": l["dst"], "grade": l["grade"], "state": "active"})
+        return l
 
     def depth(self, e):
         """0 a change, odd an undo, even (> 0) a redo (graph.py's _depths)."""
@@ -530,6 +566,37 @@ class FakeHub:
                 return bad
             p["label"] = text
             return 200, {"label": text, "revs": self.bump([gid for gid, g in self.s["graphs"].items() if m.group(1) in g["members"]], me["id"])}
+        if path == "/api/graph-settings":
+            if method == "PUT":
+                if me["role"] != "admin":
+                    return 403, {"error": "forbidden", "message": "needs admin"}
+                if body.get("agent_links") not in ("auto", "suggest"):
+                    return 400, {"error": "bad_mode", "message": "agent_links is auto or suggest"}
+                self.s["agent_links"] = body["agent_links"]
+            return 200, {"agent_links": self.s["agent_links"], "suggestions": len(self.open_suggestions())}
+        if method == "POST" and path == "/api/link-suggestions/accept-all":
+            if me["role"] != "admin":
+                return 403, {"error": "forbidden", "message": "needs admin"}
+            done = [self.accept(me, x) for x in self.open_suggestions()]
+            revs = self.bump([g for l in done if l for g in self.link_graphs(l["src"], l["dst"])], me["id"])
+            return 200, {"accepted": len([l for l in done if l]), "skipped": [], "revs": revs}
+        m = re.match(r"^/api/link-suggestions/(\d+)/(accept|dismiss)$", path)
+        if m and method == "POST":
+            x = self.s["suggestions"][int(m.group(1))]
+            if m.group(2) == "dismiss":
+                done = x["state"] != "open"
+                x["state"] = "dismissed" if not done else x["state"]
+                return 200, {"suggestion": dict(x), "already": done}
+            if x["state"] == "dismissed":
+                return 409, {"error": "dismissed", "message": "that suggestion was dismissed"}
+            linked = any(l["src"] == x["src"] and l["dst"] == x["dst"] and l["state"] == "active" for l in self.s["links"].values())
+            if not linked:
+                bad = self.stale(body, q)
+                if bad:
+                    return bad
+            l = self.accept(me, x)
+            revs = self.bump(self.link_graphs(x["src"], x["dst"]), me["id"]) if l else {}
+            return 200, {"suggestion": dict(x), "link": self.link_out(l) if l else None, "revs": revs, "already": l is None}
         if method == "GET" and path == "/api/graph-log":
             n = int(q.get("limit") or 100)
             newest = sorted(self.s["log"], key=lambda e: -e["id"])[:n]

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<title>Approve papercast</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/auth.css">
+<script src="/cli.js" defer></script>
+</head>
+<body>
+<main class="box">
+  <h1 id="title">papercast login</h1>
+  <p class="msg" id="msg">Loading…</p>
+
+  <form id="enter" hidden>
+    <label for="code-in">The code your terminal shows</label>
+    <input class="field" id="code-in" autocomplete="off" autocapitalize="characters" spellcheck="false"
+           placeholder="ABCD-EFGH" maxlength="12" enterkeyhint="go">
+    <div class="row"><button type="submit" class="btn-accent" id="code-go">Continue</button></div>
+  </form>
+
+  <div id="ask" hidden>
+    <div class="code" id="code"></div>
+    <p class="sub">Approve only if you just ran <code>papercast login</code> yourself and your terminal shows this
+      code. That device will be able to use papercast as you until you remove it from Devices.</p>
+    <div class="row">
+      <button type="button" class="btn-accent" id="yes">Approve</button>
+      <button type="button" class="text-btn" id="no">Deny</button>
+    </div>
+  </div>
+
+  <p class="who" id="who" hidden></p>
+</main>
+</body>
+</html>

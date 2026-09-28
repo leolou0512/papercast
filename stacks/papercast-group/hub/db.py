@@ -264,10 +264,47 @@ def _m4_runtime_columns(c) -> None:
     _add_column(c, "voice_jobs", "worker", "TEXT")
 
 
+def _m5_password_auth(c) -> None:
+    """PCG_AUTH=password (auth.py): the ledger of allowed emails, a username, password and
+    session version per person, one-use password links (sha256 only) and the sign-in log.
+    users.pw_hash NULL means the first password, which is the username, still stands."""
+    _add_column(c, "users", "username", "TEXT")                 # the email's local part, fixed
+    _add_column(c, "users", "pw_hash", "TEXT")                  # scrypt$n$r$p$salt$key
+    _add_column(c, "users", "pw_set_at", "TEXT")
+    _add_column(c, "users", "session_v", "INTEGER NOT NULL DEFAULT 0")   # bumped: every session ends
+    _add_column(c, "users", "reset_asked_at", "TEXT")           # asked for a reset with no email set up
+    _add_column(c, "users", "last_login_at", "TEXT")
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_username ON users(username)")
+    c.execute("""CREATE TABLE IF NOT EXISTS allowed_emails (
+                   email TEXT PRIMARY KEY,                      -- lowercased
+                   note TEXT NOT NULL DEFAULT '',
+                   added_by INTEGER REFERENCES users(id),      -- NULL: the command line on the server
+                   added_at TEXT NOT NULL)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS pw_links (
+                   token_hash TEXT PRIMARY KEY,                 -- sha256 of the link's secret
+                   user_id INTEGER NOT NULL REFERENCES users(id),
+                   kind TEXT NOT NULL,                          -- email | admin | bootstrap
+                   made_by INTEGER REFERENCES users(id),
+                   created_at TEXT NOT NULL,
+                   expires_at TEXT NOT NULL,
+                   used_at TEXT)""")
+    c.execute("CREATE INDEX IF NOT EXISTS pw_links_user ON pw_links(user_id)")
+    c.execute("""CREATE TABLE IF NOT EXISTS auth_log (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   at TEXT NOT NULL,
+                   kind TEXT NOT NULL,
+                   user_id INTEGER,                             -- whose account, when known
+                   email TEXT,                                  -- the address, or what was typed
+                   actor_id INTEGER,                            -- the admin who did it (NULL: the person, or the server)
+                   ip TEXT,
+                   detail TEXT)""")
+
+
 MIGRATIONS = [
     (2, _m2_paper_label),
     (3, _m3_indexes),
     (4, _m4_runtime_columns),
+    (5, _m5_password_auth),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0] if MIGRATIONS else 1      # what migrate() brings a database to
 

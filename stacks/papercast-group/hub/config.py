@@ -13,7 +13,7 @@ class Config:
     data: Path                      # $PCG_DATA: hub.db and episodes/
     bind: str = "127.0.0.1"
     port: int = 8480
-    auth: str = "local"             # cf-access | local | header (tests only)
+    auth: str = "local"             # password | cf-access | local | header (tests only)
     cf_team: str = ""               # <team>.cloudflareaccess.com
     cf_aud: str = ""
     admin_emails: set = field(default_factory=set)
@@ -21,6 +21,12 @@ class Config:
     secret: bytes = b""             # cookie HMAC key
     worker_token_sha256: str = ""
     static: Path = HERE / "static"
+    # PCG_AUTH=password: the one email the hub sends, a password reset link (auth.py)
+    smtp_host: str = ""
+    smtp_port: int = 587            # 587 STARTTLS, 465 TLS from the start
+    smtp_user: str = ""
+    smtp_password_file: str = ""    # a 600 file holding the password, never the password itself
+    smtp_from: str = ""
 
     @property
     def episodes(self) -> Path:
@@ -42,9 +48,14 @@ def load(env=None) -> Config:
         secret=env.get("PCG_SECRET", "").encode(),
         worker_token_sha256=env.get("PCG_WORKER_TOKEN_SHA256", "").lower(),
         static=Path(env.get("PCG_STATIC", str(HERE / "static"))),
+        smtp_host=env.get("PCG_SMTP_HOST", "").strip(),
+        smtp_port=int(env.get("PCG_SMTP_PORT", "").strip() or "587"),
+        smtp_user=env.get("PCG_SMTP_USER", "").strip(),
+        smtp_password_file=env.get("PCG_SMTP_PASSWORD_FILE", "").strip(),
+        smtp_from=env.get("PCG_SMTP_FROM", "").strip(),
     )
-    if cfg.auth not in ("cf-access", "local", "header"):
-        raise SystemExit(f"PCG_AUTH must be cf-access, local or header, not {cfg.auth!r}")
+    if cfg.auth not in ("password", "cf-access", "local", "header"):
+        raise SystemExit(f"PCG_AUTH must be password, cf-access, local or header, not {cfg.auth!r}")
     if cfg.auth != "header" and len(cfg.secret) < 16:
         raise SystemExit("PCG_SECRET must be set (at least 16 characters)")
     return cfg

@@ -2,7 +2,12 @@
 
 Who may ask, per level (LEVELS):
   public                     anyone
-  viewer, contributor, admin a browser. PCG_AUTH=cf-access: Cloudflare Access's JWT (header
+  viewer, contributor, admin a browser. PCG_AUTH=password: the pcg_s cookie of a password sign-in
+                             (hub/accounts.py: the ledger of allowed emails, passwords, reset
+                             links), which carries the person's session version, so a new
+                             password, "sign out everywhere" or removal ends every session; while
+                             the first password (the username) stands, every level answers 403
+                             must_change_password. cf-access: Cloudflare Access's JWT (header
                              Cf-Access-Jwt-Assertion, else the CF_Authorization cookie, which is
                              all a browser carries on paths Access bypasses, like /api/cli/);
                              local: the pcg_s cookie; header (tests only): X-Test-User from
@@ -26,7 +31,9 @@ the poll that collects it, so no plaintext is ever stored (cli_logins.token_plai
 
     python3 -m hub.auth bootstrap <email>     (from stacks/papercast-group, with the hub's env)
 makes that person an admin (creating them if new) and, under local auth, prints a one-time
-sign-in link.
+sign-in link; under password auth it puts the email on the ledger and prints a set-password link.
+    python3 -m hub.auth allow list | add EMAIL... | remove EMAIL... | import FILE
+    python3 -m hub.auth email-test ADDRESS     (sends one email with the hub's SMTP settings)
 """
 from __future__ import annotations
 
@@ -77,7 +84,7 @@ CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"   # no 0/O, 1/I
 # 127.0.0.1, so the address alone would not tell a test from the internet).
 PROXY_HEADERS = ("Cf-Connecting-Ip", "Cf-Ray", "X-Forwarded-For", "X-Real-Ip", "Forwarded")
 EMAIL_RX = re.compile(r"^[^@\s<>\"',;]{1,64}@[^@\s<>\"',;]{1,190}$")
-USER_COLS = "id, email, name, role, disabled, created_at"
+USER_COLS = "id, email, name, role, disabled, created_at, username"
 
 
 def _now() -> float:
@@ -144,7 +151,8 @@ def _user(row) -> dict | None:
     if row is None:
         return None
     return {"id": row["id"], "email": row["email"], "name": row["name"], "role": row["role"],
-            "disabled": bool(row["disabled"]), "created_at": row["created_at"]}
+            "disabled": bool(row["disabled"]), "created_at": row["created_at"],
+            "username": row["username"] if "username" in row.keys() else None}
 
 
 def get_user(uid) -> dict | None:
@@ -192,13 +200,27 @@ def authenticate(req, level: str):
             user = _seen(req.cfg, email) if email else None
         if user is None:
             raise HTTPError(401, "login_required", "run `papercast login` first")
+        if req.cfg.auth == "password" and not user.pop("listed", True) and not user["disabled"]:
+            raise HTTPError(403, "not_listed", "this account's email is not on the group's list")
+        if not user["disabled"]:
+            _first_password(req, user)
         return _check(user, "contributor" if level == "cli-contributor" else "viewer")
     # browser levels: CSRF first, so a cross-site request changes nothing (not even a new user row)
     csrf(req)
     user = browser_user(req)
     if user is None:
         raise HTTPError(401, "login_required", "sign in first")
+    if not user["disabled"]:
+        _first_password(req, user)
     return _check(user, level)
+
+
+def _first_password(req, user: dict) -> dict:
+    """Password mode: a session signed in with the first password (the username) may only choose
+    a new one (POST /api/auth/password, which is public and checks the session itself)."""
+    if req.cfg.auth == "password" and user.get("must_change"):
+        raise HTTPError(403, "must_change_password", "choose a new password first")
+    return user
 
 
 def browser_user(req) -> dict | None:
@@ -207,6 +229,16 @@ def browser_user(req) -> dict | None:
     if cfg.auth == "cf-access":
         jwt = req.headers.get("Cf-Access-Jwt-Assertion") or cookie(req, "CF_Authorization")
         return _seen(cfg, verify_access_jwt(cfg, jwt)) if jwt else None
+    if cfg.auth == "password":
+        got = session_v2(cfg, cookie(req, SESSION_COOKIE))
+        if got is None:
+            return None
+        from . import accounts
+        row = accounts.account(got[0])
+        # a session ends with a new password, sign-out-everywhere, a reset or removal (session_v)
+        if row is None or row["session_v"] != got[1] or not row["listed"] or row["disabled"]:
+            return None
+        return accounts.public_user(row)
     if cfg.auth == "local":
         uid = session_uid(cfg, cookie(req, SESSION_COOKIE))
         return get_user(uid) if uid is not None else None
@@ -271,7 +303,8 @@ def _from_bearer(req) -> dict | None:
         return None
     h = _sha(tok)
     row = db.conn().execute(
-        "SELECT t.id AS tid, t.hash, t.last_used_at, u.id, u.email, u.name, u.role, u.disabled, u.created_at "
+        "SELECT t.id AS tid, t.hash, t.last_used_at, u.id, u.email, u.name, u.role, u.disabled, u.created_at, "
+        "u.username, u.pw_hash, EXISTS (SELECT 1 FROM allowed_emails a WHERE a.email = u.email) AS listed "
         "FROM tokens t JOIN users u ON u.id = t.user_id WHERE t.hash = ? AND t.revoked_at IS NULL", (h,)).fetchone()
     if row is None or not tok.startswith("pcg_") or not _same(row["hash"], h):
         raise HTTPError(401, "bad_token", "this device's token is not valid: run `papercast login` again")
@@ -279,7 +312,11 @@ def _from_bearer(req) -> dict | None:
     if row["last_used_at"] is None or row["last_used_at"] < _iso(now - TOUCH_S):
         db.conn().execute("UPDATE tokens SET last_used_at = ? WHERE id = ?", (_iso(now), row["tid"]))
     req.token_id = row["tid"]
-    return _user(row)
+    u = _user(row)
+    if req.cfg.auth == "password":
+        u["must_change"] = row["pw_hash"] is None
+        u["listed"] = bool(row["listed"])
+    return u
 
 
 def _worker(req) -> dict:
@@ -317,10 +354,43 @@ def session_uid(cfg, v: str | None) -> int | None:
     return int(m[1])
 
 
-def session_cookie(cfg, uid: int) -> str:
+def make_session_v2(cfg, uid: int, sv: int, at: float | None = None) -> str:
+    """Password mode: v2.<user id>.<session version>.<issued>.<HMAC>. Bumping users.session_v
+    ends every session of that person at once (new password, sign out everywhere, removal)."""
+    msg = f"v2.{int(uid)}.{int(sv)}.{int(_now() if at is None else at)}"
+    return msg + "." + _b64e(hmac.new(cfg.secret, b"pcg_s|" + msg.encode(), hashlib.sha256).digest())
+
+
+def session_v2(cfg, v: str | None):
+    """(user id, session version) of a valid v2 cookie, else None."""
+    m = re.fullmatch(r"v2\.(\d{1,12})\.(\d{1,9})\.(\d{1,12})\.[A-Za-z0-9_-]{43}", v or "")
+    if not m or len(cfg.secret) < 16:
+        return None
+    if not _same(make_session_v2(cfg, int(m[1]), int(m[2]), int(m[3])), v):
+        return None
+    age = _now() - int(m[3])
+    if age >= SESSION_S or age < -300:
+        return None
+    return int(m[1]), int(m[2])
+
+
+def _secure(cfg) -> str:
+    return "; Secure" if cfg.public_url.lower().startswith("https://") else ""
+
+
+def session_cookie(cfg, uid: int, sv: int | None = None) -> str:
     """The Set-Cookie value: HttpOnly, SameSite=Lax, Secure when the hub is served over https."""
-    secure = "; Secure" if cfg.public_url.lower().startswith("https://") else ""
-    return f"{SESSION_COOKIE}={make_session(cfg, uid)}; Path=/; Max-Age={SESSION_S}; HttpOnly; SameSite=Lax{secure}"
+    if cfg.auth == "password":
+        if sv is None:
+            sv = db.conn().execute("SELECT session_v FROM users WHERE id = ?", (uid,)).fetchone()[0]
+        val = make_session_v2(cfg, uid, sv)
+    else:
+        val = make_session(cfg, uid)
+    return f"{SESSION_COOKIE}={val}; Path=/; Max-Age={SESSION_S}; HttpOnly; SameSite=Lax{_secure(cfg)}"
+
+
+def clear_cookie(cfg) -> str:
+    return f"{SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax{_secure(cfg)}"
 
 
 # ---------------------------------------------------------------- Cloudflare Access JWT
@@ -512,6 +582,16 @@ def _page(req, name: str):
     req.send(200, p.read_bytes(), "text/html; charset=utf-8", {"Content-Security-Policy": PAGE_CSP, "X-Frame-Options": "DENY"})
 
 
+def page_for(req, e) -> str | None:
+    """Where a browser opening the page goes instead of this refusal (app.py): the sign-in page
+    when it has no session, the set-password page while the first password stands."""
+    if e.code == 401:
+        return "/signin"
+    if e.err == "must_change_password":
+        return "/set-password"
+    return None
+
+
 def me_get(req):
     req.send_json(200, {**req.user, "auth": req.cfg.auth})
 
@@ -590,6 +670,11 @@ def cli_poll(req):
         user = get_user(row["user_id"])
         if user is None or user["disabled"]:
             raise HTTPError(403, "denied", "that account is disabled")
+        if req.cfg.auth == "password":
+            from . import accounts
+            a = accounts.account(user["id"], c=c)
+            if not a["listed"] or a["pw_hash"] is None:     # removed, or reset to the first password since
+                raise HTTPError(403, "denied", "that account cannot log in a device now")
         # the token is made here, at its one collection: its plaintext exists only in this answer
         if c.execute("UPDATE cli_logins SET state = 'taken', token_plain = NULL WHERE code = ? AND state = 'approved'",
                      (row["code"],)).rowcount != 1:
@@ -699,11 +784,18 @@ def join_post(req):
 
 def admin_users(req):
     rows = db.conn().execute(
-        f"SELECT {', '.join('u.' + c for c in USER_COLS.split(', '))}, "
+        f"SELECT {', '.join('u.' + c for c in USER_COLS.split(', '))}, u.pw_hash IS NULL AS default_pw, "
+        "u.last_login_at, u.reset_asked_at, a.email IS NOT NULL AS listed, a.note, "
         "(SELECT COUNT(*) FROM tokens t WHERE t.user_id = u.id AND t.revoked_at IS NULL) AS devices, "
         "(SELECT MAX(t.last_used_at) FROM tokens t WHERE t.user_id = u.id) AS last_used_at "
-        "FROM users u ORDER BY u.id").fetchall()
-    req.send_json(200, {"users": [{**_user(r), "devices": r["devices"], "last_used_at": r["last_used_at"]} for r in rows]})
+        "FROM users u LEFT JOIN allowed_emails a ON a.email = u.email ORDER BY u.id").fetchall()
+    pw = req.cfg.auth == "password"
+    from . import accounts
+    req.send_json(200, {"auth": req.cfg.auth, "email": accounts.email_ready(req.cfg), "users": [{
+        **_user(r), "devices": r["devices"], "last_used_at": r["last_used_at"], "last_login_at": r["last_login_at"],
+        "on_list": bool(r["listed"]), "note": r["note"] or "",
+        "default_password": bool(r["default_pw"]) if pw else False,
+        "reset_asked_at": r["reset_asked_at"]} for r in rows]})
 
 
 def admin_user_put(req, uid):
@@ -721,16 +813,28 @@ def admin_user_put(req, uid):
         f["name"] = clean_name(b["name"])
     if not f:
         raise HTTPError(400, "bad_request", "send role, disabled or name")
+    from . import accounts
     with db.transaction() as c:
         u = get_user(int(uid))
         if u is None:
             raise HTTPError(404, "not_found", "no such user")
         stays_admin = f.get("role", u["role"]) == "admin" and not f.get("disabled", int(u["disabled"]))
         if u["role"] == "admin" and not u["disabled"] and not stays_admin:
-            others = c.execute("SELECT COUNT(*) FROM users WHERE role = 'admin' AND disabled = 0 AND id != ?", (u["id"],)).fetchone()[0]
-            if not others:
+            if not accounts.other_admins(req.cfg, c, u["id"]):
                 raise HTTPError(409, "last_admin", "the hub needs at least one admin")
+        if req.cfg.auth == "password" and f.get("disabled") == 0 and u["disabled"] and \
+                c.execute("SELECT 1 FROM allowed_emails WHERE email = ?", (u["email"],)).fetchone() is None:
+            raise HTTPError(409, "not_listed", f"{u['email']} is not on the list: add it again under Users instead")
         c.execute(f"UPDATE users SET {', '.join(k + ' = ?' for k in f)} WHERE id = ?", (*f.values(), u["id"]))
+        if f.get("disabled") == 1 and not u["disabled"]:
+            c.execute("UPDATE users SET session_v = session_v + 1 WHERE id = ?", (u["id"],))   # every session ends
+        if req.cfg.auth == "password":
+            for k, what in (("role", "role"), ("disabled", "disabled")):
+                if k in f and f[k] != (u[k] if k == "role" else int(u["disabled"])):
+                    before = u[k] if k == "role" else ("yes" if u["disabled"] else "no")
+                    after = f[k] if k == "role" else ("yes" if f[k] else "no")
+                    accounts.log_event(what, user_id=u["id"], email=u["email"], actor_id=req.user["id"],
+                                       ip=accounts.client_addr(req), detail=f"{before} -> {after}", c=c)
     req.send_json(200, get_user(int(uid)))
 
 
@@ -738,7 +842,8 @@ def admin_invite(req):
     """{"role"} -> a join link for someone new; {"user_id"} -> a one-time sign-in link for someone
     who exists (a new browser or phone)."""
     if req.cfg.auth != "local":
-        raise HTTPError(409, "not_local", "invite links are for local sign-in; under Cloudflare Access people sign in with their email")
+        raise HTTPError(409, "not_local", "invite links are for local sign-in; with passwords, add the person's email "
+                        "under Users; under Cloudflare Access people sign in with their email")
     b = req.json()
     if b.get("user_id") is not None:
         uid = b["user_id"]
@@ -773,11 +878,15 @@ ROUTES = [
 ]
 
 
-# ---------------------------------------------------------------- bootstrap
+# ---------------------------------------------------------------- bootstrap and the command line
 
 def bootstrap(cfg, email: str) -> str | None:
-    """Make `email` an admin (created if new, re-enabled if disabled); under local auth return a
-    one-time sign-in link for them."""
+    """Make `email` an admin (created if new, re-enabled if disabled). Local auth: returns a
+    one-time sign-in link; password auth: the email goes on the ledger, and the answer is a
+    24-hour set-password link (accounts.bootstrap)."""
+    if cfg.auth == "password":
+        from . import accounts
+        return accounts.bootstrap(cfg, email)["link"]["url"]
     email = clean_email(email)
     db.init(cfg)
     db.migrate()
@@ -792,19 +901,27 @@ def bootstrap(cfg, email: str) -> str | None:
     return make_link(cfg, "admin", None, uid)["url"] if cfg.auth == "local" else None
 
 
-def main(argv=None) -> int:
-    from . import config as C
-    argv = sys.argv[1:] if argv is None else argv
-    if len(argv) != 2 or argv[0] != "bootstrap":
-        print("usage: python3 -m hub.auth bootstrap <email>", file=sys.stderr)
-        return 2
-    cfg = C.load()
-    try:
-        link = bootstrap(cfg, argv[1])
-    except HTTPError as e:
-        print(e.msg, file=sys.stderr)
-        return 2
-    print(f"{argv[1].strip().lower()} is an admin.")
+USAGE = """usage: python3 -m hub.auth bootstrap EMAIL
+       python3 -m hub.auth allow list
+       python3 -m hub.auth allow add EMAIL... [--note TEXT]
+       python3 -m hub.auth allow remove EMAIL...
+       python3 -m hub.auth allow import FILE [--note TEXT]   (one email per line, # comments; - reads stdin)
+       python3 -m hub.auth email-test ADDRESS
+(from stacks/papercast-group, with the hub's settings: set -a; . ~/papercast-group/hub.env; set +a)"""
+
+
+def _bootstrap_cmd(cfg, email) -> int:
+    if cfg.auth == "password":
+        from . import accounts
+        got = accounts.bootstrap(cfg, email)
+        print(f"{got['email']} is an admin, on the list (username {got['username']}).")
+        if got["default_password"]:
+            print(f"Sign in at {cfg.public_url}/signin as {got['username']} with the first password "
+                  f"{got['username']}; the hub then asks for a new one.")
+        print(f"Or set the password now with this one-time link (24 hours): {got['link']['url']}")
+        return 0
+    link = bootstrap(cfg, email)
+    print(f"{email.strip().lower()} is an admin.")
     if link:
         print(f"One-time sign-in link (24 hours): {link}")
     elif cfg.auth == "cf-access":
@@ -812,5 +929,110 @@ def main(argv=None) -> int:
     return 0
 
 
+def _read_emails(path: str) -> list:
+    text = sys.stdin.read() if path == "-" else open(path, encoding="utf-8").read()
+    out = []
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            out.append(line)
+    return out
+
+
+def _allow_cmd(cfg, args) -> int:
+    from . import accounts
+    db.init(cfg)
+    db.migrate()
+    if cfg.auth != "password":
+        print(f"(PCG_AUTH is {cfg.auth}: the list decides who signs in once the hub uses passwords)", file=sys.stderr)
+    if args.what == "list":
+        rows = accounts.ledger()
+        if not rows:
+            print("The list is empty.")
+            return 0
+        print(f"{'email':34} {'username':16} {'role':12} {'password':9} {'last sign-in':21} added")
+        for r in rows:
+            u = r["user"] or {}
+            pw = "-" if not u else "first" if u["default_password"] else "own"
+            role = (u.get("role") or "-") + (" (off)" if u.get("disabled") else "")
+            by = r["added_by"]["name"] if r["added_by"] else "server"
+            print(f"{r['email']:34} {u.get('username') or '-':16} {role:12} {pw:9} {u.get('last_login_at') or 'never':21} "
+                  f"{r['added_at'][:10]} by {by}" + (f" · {r['note']}" if r["note"] else ""))
+        return 0
+    emails = args.emails if args.what in ("add", "remove") else _read_emails(args.emails[0])
+    bad = 0
+    for e in emails:
+        try:
+            if args.what == "remove":
+                got = accounts.disallow(cfg, e)
+                print(f"removed {got['email']}" + (": account disabled, its sessions and devices ended" if got["user_id"] else ""))
+            else:
+                got = accounts.allow(cfg, e, note=args.note or "")
+                if got["state"] == "already":
+                    print(f"already on the list: {got['email']}")
+                elif got["state"] == "back":
+                    print(f"back on the list: {got['email']} (enabled again, with the password it had)")
+                else:
+                    print(f"added {got['email']}: username {got['username']}, first password {got['username']} "
+                          "(a new one is asked for at the first sign-in)")
+        except HTTPError as ex:
+            bad += 1
+            print(f"refused {e.strip()}: {ex.msg}", file=sys.stderr)
+    return 1 if bad else 0
+
+
+def _email_test_cmd(cfg, to: str) -> int:
+    from . import accounts
+    if not accounts.email_ready(cfg):
+        print("Email is not set up: PCG_SMTP_HOST and PCG_SMTP_FROM (and for a login PCG_SMTP_USER and "
+              "PCG_SMTP_PASSWORD_FILE) go in hub.env.", file=sys.stderr)
+        return 2
+    try:
+        accounts.send_email(cfg, to, "papercast: a test email",
+                            f"This is a test from the papercast hub at {cfg.public_url}.\n"
+                            "The password links it sends will come from this address.\n")
+    except Exception as ex:                     # noqa: BLE001  (show whatever SMTP said)
+        print(f"not sent: {type(ex).__name__}: {ex}", file=sys.stderr)
+        return 1
+    print(f"sent to {to} through {cfg.smtp_host}:{cfg.smtp_port} as {cfg.smtp_user or '(no login)'}")
+    return 0
+
+
+def main(argv=None) -> int:
+    import argparse
+    from . import config as C
+    argv = sys.argv[1:] if argv is None else argv
+    ap = argparse.ArgumentParser(prog="python3 -m hub.auth", usage=USAGE)
+    sub = ap.add_subparsers(dest="cmd")
+    b = sub.add_parser("bootstrap")
+    b.add_argument("email")
+    a = sub.add_parser("allow")
+    a.add_argument("what", choices=["list", "add", "remove", "import"])
+    a.add_argument("emails", nargs="*")
+    a.add_argument("--note", default="")
+    t = sub.add_parser("email-test")
+    t.add_argument("address")
+    args = ap.parse_args(argv)
+    if args.cmd is None or (args.cmd == "allow" and args.what != "list" and not args.emails) \
+            or (args.cmd == "allow" and args.what == "import" and len(args.emails) != 1):
+        print(USAGE, file=sys.stderr)
+        return 2
+    cfg = C.load()
+    try:
+        if args.cmd == "bootstrap":
+            return _bootstrap_cmd(cfg, args.email)
+        if args.cmd == "allow":
+            return _allow_cmd(cfg, args)
+        return _email_test_cmd(cfg, args.address)
+    except HTTPError as e:
+        print(e.msg, file=sys.stderr)
+        return 2
+    except OSError as e:
+        print(e, file=sys.stderr)
+        return 2
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    # run as the package's module (accounts.py imports it), not as a second copy called __main__
+    from hub import auth as _auth
+    sys.exit(_auth.main())

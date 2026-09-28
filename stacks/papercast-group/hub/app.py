@@ -25,7 +25,7 @@ from . import db
 log = logging.getLogger("pcg")
 
 # Owners add their module here (SPEC.md section 1); nothing else in this file is theirs.
-ROUTE_MODULES = ["auth", "web", "contrib", "voiceq", "graph"]
+ROUTE_MODULES = ["auth", "accounts", "web", "contrib", "voiceq", "graph"]
 JSON_MAX = 256 * 1024
 # Leo's page CSP (stacks/papercast/web/app.py PAGE_CSP): no inline script or style.
 PAGE_CSP = ("default-src 'self'; img-src 'self' data:; media-src 'self'; style-src 'self'; "
@@ -194,7 +194,14 @@ def make_handler(cfg: C.Config):
                     name = "index.html" if u.path in ("/", "/index.html") else u.path.lstrip("/")
                     if "/" not in name and name in static:
                         if name == "index.html":
-                            req.user = auth.authenticate(req, "viewer")
+                            try:
+                                req.user = auth.authenticate(req, "viewer")
+                            except HTTPError as e:
+                                to = auth.page_for(req, e)      # signed out: the sign-in page, not a JSON 401
+                                if not to:
+                                    raise
+                                req.send(303, b"", "text/plain; charset=utf-8", {"Location": to})
+                                return
                         p = static[name]
                         ctype = STATIC_TYPES.get(p.suffix, mimetypes.guess_type(p.name)[0] or "application/octet-stream")
                         extra = {"Content-Security-Policy": PAGE_CSP} if p.suffix == ".html" else {}
@@ -206,7 +213,8 @@ def make_handler(cfg: C.Config):
                     self.close_connection = True
                 if not req.sent:
                     try:
-                        req.send_json(e.code, {"error": e.err, "message": e.msg, **e.extra})
+                        wait = {"Retry-After": str(e.extra["retry_after"])} if "retry_after" in e.extra else None
+                        req.send_json(e.code, {"error": e.err, "message": e.msg, **e.extra}, wait)
                     except (BrokenPipeError, ConnectionResetError):
                         pass
             except (BrokenPipeError, ConnectionResetError):

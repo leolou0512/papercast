@@ -24,6 +24,9 @@ from hub import web  # noqa: E402
 A, B, CAROL, DAN = "alice@example.org", "bob@example.org", "carol@example.org", "dan@example.org"
 
 
+
+LEO_EXPLAINER_CSP = "sandbox allow-scripts allow-popups; default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; font-src data:; media-src data: blob:; connect-src 'none'; form-action 'none'; base-uri 'none'"
+
 class Web(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -370,9 +373,13 @@ class Web(unittest.TestCase):
         self.assertEqual(st, 200)
         self.assertIn(b"An explainer.", got)
         self.assertEqual(h["Content-Security-Policy"], web.EXPLAINER_CSP)
-        leo = (HERE.parents[3] / "stacks" / "papercast" / "web" / "app.py").read_text()
-        m = re.search(r'EXPLAINER_CSP = \((.*?)\)\n', leo, re.S)
-        self.assertEqual(web.EXPLAINER_CSP, "".join(re.findall(r'"([^"]*)"', m.group(1))), "not Leo's CSP verbatim")
+        # Leo's explainer CSP (stacks/papercast/web/app.py, INTERFACE.md section 6), verbatim; in the
+        # NAS_setup checkout it is also compared with his file itself
+        self.assertEqual(web.EXPLAINER_CSP, LEO_EXPLAINER_CSP, "not Leo's CSP verbatim")
+        leo_app = HERE.parents[3] / "stacks" / "papercast" / "web" / "app.py"
+        if leo_app.is_file():
+            m = re.search(r'EXPLAINER_CSP = \((.*?)\)\n', leo_app.read_text(), re.S)
+            self.assertEqual(web.EXPLAINER_CSP, "".join(re.findall(r'"([^"]*)"', m.group(1))), "not Leo's CSP verbatim")
         self.assertEqual((h["X-Frame-Options"], h["X-Content-Type-Options"], h["Cache-Control"]), ("SAMEORIGIN", "nosniff", "no-store"))
         self.assertEqual(r.req("GET", f"/x/{self.e1}/explainer.html")[0], 200)     # before the voice, too
         self.assertEqual(r.req("GET", f"/x/{self.e2a}/explainer.html", user=None)[0], 401)

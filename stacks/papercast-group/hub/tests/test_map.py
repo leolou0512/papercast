@@ -695,6 +695,8 @@ class MapTest(unittest.TestCase):
         self.assertIsNone(self.js("document.querySelector('#map .pm-card .pm-rm')"))
         self.assertFalse(self.js(f"!!{self.button('.pm-card', 'Edit label')}"))
         self.assertIn("Locked", self.text(".pm-card"))
+        # the card's byline shows (the toolbar row's hide-when-empty rule once matched it too)
+        self.assertTrue(self.js("[...document.querySelectorAll('#map .pm-card .pm-sub')].every(e => getComputedStyle(e).display !== 'none')"))
         # shift-click only selects
         x, y = self.pos(DPO)
         self.click(x, y, shift=True)

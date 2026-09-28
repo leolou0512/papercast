@@ -102,9 +102,25 @@ def build(data: dict, listener_name: str | None = None) -> list[dict]:
         elif not phrases:
             raise ValueError(f"wording.json: class {cid!r} has no phrases")
         c = dict(c, phrases=phrases)
-        c["rx"] = _compile(phrases, bool(c.get("case_sensitive")))
+        if cid == NAME_CLASS:
+            c["rx"] = _compile_names(phrases, bool(c.get("case_sensitive")))
+        else:
+            c["rx"] = _compile(phrases, bool(c.get("case_sensitive")))
         out.append(c)
     return out
+
+
+def _compile_names(phrases: list[str], case_sensitive: bool) -> re.Pattern:
+    """As _compile, except that a one-word name followed by a capitalised word is someone else's
+    full name, not the listener: for Alex, "Alex Krizhevsky" passes, "Alex, the loss..." does not."""
+    multi = [p for p in phrases if len(p.split()) > 1]
+    single = [p for p in phrases if len(p.split()) == 1]
+    parts = []
+    if multi:
+        parts.append(_compile(multi, case_sensitive).pattern)
+    if single:
+        parts.append(_compile(single, case_sensitive).pattern + r"(?!\s+[A-Z])")
+    return re.compile("|".join(f"(?:{p})" for p in parts), 0 if case_sensitive else re.I)
 
 
 def load(path: str = PATH, listener_name: str | None = None) -> list[dict]:

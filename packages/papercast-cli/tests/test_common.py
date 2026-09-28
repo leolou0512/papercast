@@ -557,3 +557,14 @@ class Base(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ListenerNameIsNotAnAuthor(unittest.TestCase):
+    """An author who shares the listener's first name is not the listener (integration fix)."""
+
+    def test_first_name_followed_by_a_surname_passes(self):
+        from papercast_cli.common import wording
+        self.assertEqual(wording.hits("The network of Alex Krizhevsky won in two thousand twelve.", "script", listener_name="alex"), [])
+        self.assertTrue(wording.hits("Alex, the loss here is the key.", "script", listener_name="alex"))
+        self.assertTrue(wording.hits("As Alex Smith knows, it works.", "script", listener_name="Alex Smith"))
+

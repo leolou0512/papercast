@@ -141,6 +141,7 @@ class Config:
         # papercast-voice calls its own card "stibnite" in the sentences it writes (its config's
         # local host); the page should name the machine that is really speaking.
         self.host_label = env.get("PCG_VOICE_HOST_LABEL") or socket.gethostname().split(".")[0]
+        self.worker_name = env.get("PCG_WORKER_NAME") or socket.gethostname()
         self.backoff_max_s = float(env.get("PCG_BACKOFF_MAX_S", "300"))
         # The voice runs with a cleaned environment, as Leo's runner starts it (INTERFACE §10.1):
         # the installed wrapper names everything it needs itself.
@@ -171,7 +172,10 @@ class Hub:
             path = u.path + (f"?{u.query}" if u.query else "")
         else:
             path = self.base_path + path
-        h = {"Authorization": f"Bearer {self.cfg.token}", "User-Agent": f"pcg-voice-worker/{VERSION}"}
+        # X-Worker names this worker on every call, as the claim does: the hub hands a restarted
+        # worker the claim it holds, and refuses another worker's updates to it.
+        h = {"Authorization": f"Bearer {self.cfg.token}", "User-Agent": f"pcg-voice-worker/{VERSION}",
+             "X-Worker": self.cfg.worker_name}
         if isinstance(body, (dict, list)):
             body = json.dumps(body).encode()
             h["Content-Type"] = "application/json"
@@ -198,7 +202,7 @@ class Hub:
         return r.status, data
 
     def claim(self):
-        return self.request("POST", "/api/voice/claim", {"worker": socket.gethostname()})
+        return self.request("POST", "/api/voice/claim", {"worker": self.cfg.worker_name})
 
     def status(self, eid: str, body: dict):
         return self.request("PUT", f"/api/voice/{eid}/status", body)
@@ -510,7 +514,9 @@ class Worker:
                 key = (phase, progress, detail)
                 t = time.time()
                 if phase not in ("done", "failed") and (key != last_key or t - last_sent >= self.cfg.heartbeat_s):
-                    body = {"phase": phase, "progress": progress, "detail": detail,
+                    # `note` is the sentence the page shows (hub/voiceq.py reads that key);
+                    # `detail` repeats it for readers of the first version of this body.
+                    body = {"phase": phase, "progress": progress, "note": detail, "detail": detail,
                             "eta_s": st.get("eta_s"), "engine": st.get("engine")}
                     if self.send_status(eid, body):
                         last_sent, last_key = t, key

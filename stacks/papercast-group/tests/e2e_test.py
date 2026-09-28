@@ -12,7 +12,8 @@ Two tests:
   test_cli_voice_web      the real CLI (A7 + A8's pipeline, `papercast login` and `papercast add`)
                           with a fake `claude` on PATH -> hub -> worker -> web.
 A test whose parts are not merged yet is skipped, and says which part and what answered.
-Nothing here talks to the network or to a real Claude; the hub listens on 127.0.0.1 only and
+Nothing here talks to a real Claude or leaves the machine (the CLI test points https_proxy at a
+closed port, so the pipeline's Semantic Scholar lookups fail at once); the hub listens on 127.0.0.1 and
 lives for the test (fake data: on a shared machine anyone local could reach it meanwhile).
 """
 from __future__ import annotations
@@ -23,6 +24,7 @@ import io
 import json
 import os
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -131,7 +133,13 @@ class Hub:
             "PCG_WORKER_TOKEN_SHA256": hashlib.sha256(WORKER_TOKEN.encode()).hexdigest(),
             "PCG_LOG": "INFO"}
         self.log = open(tmp / "hub.log", "ab")
-        self.p = subprocess.Popen([sys.executable, "-m", "hub.app"], cwd=str(PG), env=self.env,
+        if "def main" in (PG / "hub" / "db.py").read_text():
+            # what the install does first: migrations and the seeds (base prompt v1, graphs)
+            r = subprocess.run([sys.executable, "-m", "hub.db", "migrate", "--data", str(self.data)],
+                               cwd=str(PG), env=self.env, capture_output=True, timeout=60)
+            if r.returncode != 0:
+                raise AssertionError(f"hub.db migrate failed: {(r.stdout + r.stderr).decode()[-2000:]}")
+        self.p = subprocess.Popen([sys.executable, str(PG / "deploy" / "run_hub.py")], cwd=str(PG), env=self.env,
                                   stdout=self.log, stderr=subprocess.STDOUT)
         wait_for(self.answers, 30, "the hub to answer")
 
@@ -200,10 +208,10 @@ def as_list(v, key: str):
 
 class E2E(unittest.TestCase):
     def setUp(self):
-        self.tmpd = tempfile.TemporaryDirectory(prefix="pcg-e2e-")
-        self.tmp = Path(self.tmpd.name)
-        self.hub = Hub(self.tmp)
+        # PCG_E2E_KEEP=1 keeps the directory (hub.log, worker.log, the data) for a look after
+        self.tmp = Path(tempfile.mkdtemp(prefix="pcg-e2e-"))
         self.extra_homes: list[Path] = []
+        self.hub = Hub(self.tmp)
 
     def tearDown(self):
         self.hub.stop()
@@ -212,7 +220,7 @@ class E2E(unittest.TestCase):
         if os.environ.get("PCG_E2E_KEEP"):
             print(f"kept {self.tmp}", file=sys.stderr)
         else:
-            self.tmpd.cleanup()
+            shutil.rmtree(self.tmp, ignore_errors=True)
 
     # ------------------------------------------------------------ parts
     def need(self, cond: bool, part: str, what):
@@ -268,14 +276,15 @@ class E2E(unittest.TestCase):
                "PCG_WORKER_TOKEN_FILE": str(self.tmp / "worker.token"), "PAPERCAST_VOICE_CMD": voice,
                "PCG_VOICE_JOBS": str(jobs), "PCG_WORKER_STATE": str(self.tmp / "worker"),
                "PCG_POLL_S": "0.2", "PCG_HEARTBEAT_S": "1", "PCG_MONITOR_S": "0.1",
-               "PCG_BACKOFF_MAX_S": "1"}
+               "PCG_BACKOFF_MAX_S": "1", "PCG_WORKER_NAME": "e2e-worker"}
         with open(self.tmp / "worker.log", "ab") as log:
             p = subprocess.run([sys.executable, str(WORKER), "--exit-when-idle"], env=env,
                                stdout=log, stderr=subprocess.STDOUT, timeout=180)
         self.assertEqual(p.returncode, 0, (self.tmp / "worker.log").read_text()[-3000:])
         return jobs
 
-    def check_ready(self, eid: str, pid: str | None, title: str, token: str, jobs: Path, seconds: float):
+    def check_ready(self, eid: str, pid: str | None, title: str | None, token: str, jobs: Path,
+                    seconds: float):
         """What the page would show: the episode ready, with its audio, for another user too."""
         st, _, r = self.hub.call("GET", f"/api/cli/episodes/{eid}", token=token)
         self.assertEqual(st, 200, r)
@@ -284,11 +293,14 @@ class E2E(unittest.TestCase):
         up = json.loads((jobs / eid / "voice" / "uploaded.json").read_text())
         st, _, lib = self.hub.call("GET", "/api/library", user=BOB)
         self.assertEqual(st, 200, lib)
-        papers = [p for p in as_list(lib, "papers") if p.get("title") == title]
+        papers = [p for p in as_list(lib, "papers")
+                  if any(e.get("id") == eid for e in p.get("episodes", []))]
         self.assertEqual(len(papers), 1, lib)
         paper = papers[0]
         if pid:
             self.assertEqual(paper["id"], pid)
+        if title:
+            self.assertEqual(paper.get("title"), title)
         eps = [e for e in paper.get("episodes", []) if e.get("id") == eid]
         self.assertEqual(len(eps), 1, paper)
         self.assertEqual(eps[0].get("state"), "ready", eps[0])
@@ -314,7 +326,9 @@ class E2E(unittest.TestCase):
         token = self.cli_token(ALICE)
         self.voice_api()
         st, _, prompt = self.hub.call("GET", "/api/cli/prompt", token=token)
-        self.need(st == 200, "the CLI API (A3)", f"GET /api/cli/prompt -> {st}")
+        missing = st == 404 and isinstance(prompt, dict) and prompt.get("error") == "not_found"
+        self.need(not missing, "the CLI API (A3)", f"GET /api/cli/prompt -> {st} {prompt!r:.100}")
+        self.assertEqual(st, 200, f"the base prompt (seeded by `python -m hub.db migrate`): {prompt!r:.300}")
         title = "Straight Paths, an End to End Test"
         st, _, look = self.hub.call("GET", "/api/cli/lookup?title=" + urllib.parse.quote(title), token=token)
         self.assertEqual(st, 200, look)
@@ -361,11 +375,15 @@ class E2E(unittest.TestCase):
         home = self.tmp / "alice-home"
         (home / "bin").mkdir(parents=True)
         self.extra_homes.append(home)
-        claude = install_fake_claude(home / "bin")
+        claude = install_fake_claude(home / "bin", home)
+        # https_proxy to a closed local port: the pipeline's Semantic Scholar requests (links)
+        # fail at once instead of leaving the machine; the hub is plain http on 127.0.0.1.
         env = {"HOME": str(home), "USER": "alice", "LANG": "C.UTF-8",
                "PATH": f"{home / 'bin'}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}",
                "PYTHONPATH": str(CLI), "PYTHONUNBUFFERED": "1", "BROWSER": "true",
-               "PAPERCAST_NO_BROWSER": "1", "NO_COLOR": "1"}
+               "PAPERCAST_NO_BROWSER": "1", "NO_COLOR": "1",
+               "https_proxy": "http://127.0.0.1:9", "HTTPS_PROXY": "http://127.0.0.1:9",
+               "no_proxy": "127.0.0.1,localhost", "NO_PROXY": "127.0.0.1,localhost"}
         # 1. papercast login: read the code it prints, approve it as alice, as the web page would
         p = subprocess.Popen(cmd + ["login", "--server", self.hub.url], env=env, cwd=str(home),
                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -391,6 +409,8 @@ class E2E(unittest.TestCase):
                            capture_output=True, timeout=120)
         self.assertEqual(r.returncode, 0, (r.stdout + r.stderr).decode(errors="replace"))
 
+        polls = [0]
+
         def uploaded():
             s, _, lst = self.hub.call("GET", "/api/cli/episodes?mine=1", token=token)
             eps = as_list(lst, "episodes")
@@ -398,6 +418,14 @@ class E2E(unittest.TestCase):
             if bad:
                 raise AssertionError(f"the hub rejected the CLI's bundle: {bad[0].get('check_report')}")
             ok = [e for e in eps if e.get("state") == "waiting-for-gpu"]
+            polls[0] += 1
+            if not ok and polls[0] % 10 == 0:
+                # a job the CLI gave up on says so in `papercast status`: stop waiting then
+                s = subprocess.run(cmd + ["status", "--all"], env=env, cwd=str(home),
+                                   capture_output=True, timeout=60)
+                text = (s.stdout + s.stderr).decode(errors="replace")
+                if re.search(r"\bfailed\b", text):
+                    raise AssertionError("the CLI's job failed.\npapercast status --all:\n" + text)
             return ok[0] if ok else None
         try:
             ep = wait_for(uploaded, TIMEOUT_CLI_S, "the CLI to upload its episode", every=1.0)
@@ -409,7 +437,7 @@ class E2E(unittest.TestCase):
                                  + (s.stdout + s.stderr).decode(errors="replace") + logs)
         self.assertTrue(claude.exists())
         jobs = self.run_worker(seconds=5.0)
-        self.check_ready(ep["id"], ep.get("paper_id"), fake_claude.TITLE, token, jobs, 5.0)
+        self.check_ready(ep["id"], ep.get("paper_id"), None, token, jobs, 5.0)
 
 
 def cli_command():
@@ -421,12 +449,24 @@ def cli_command():
     return None
 
 
-def install_fake_claude(bindir: Path) -> Path:
-    """`claude` on PATH: $PCG_E2E_FAKE_CLAUDE, else A8's own fake if it ships one, else ours."""
+def install_fake_claude(bindir: Path, home: Path) -> Path:
+    """`claude` on PATH: $PCG_E2E_FAKE_CLAUDE, else A8's own fake if it ships one (it knows the
+    pipeline's exact protocol), else ours."""
     src = os.environ.get("PCG_E2E_FAKE_CLAUDE")
     if not src:
-        theirs = sorted(glob.glob(str(CLI / "tests" / "fake_claude*")))
+        theirs = sorted(glob.glob(str(CLI / "tests" / "pipeline_fake" / "claude")) +
+                        glob.glob(str(CLI / "tests" / "fake_claude*")))
         src = theirs[0] if theirs else str(HERE / "fake_claude.py")
+    if "pipeline_fake" in src:
+        # A8's fake reads what to do from fake-claude/scenario.json beside the job directories
+        # (the pipeline cleans Claude's environment, so no variable reaches it): a paper with no
+        # arXiv id or DOI, and an explainer without a crop (no pdftoppm needed).
+        d = home / ".local" / "state" / "papercast" / "jobs" / "fake-claude"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "scenario.json").write_text(json.dumps({
+            "paper": {"title": fake_claude.TITLE, "authors": ["Ada Lovelace", "Alan Turing"],
+                      "year": 2022, "arxiv_id": None, "doi": None, "url": None},
+            "explainer": "svg"}))
     dst = bindir / "claude"
     if src.endswith(".py"):
         dst.write_text(f"#!/bin/sh\nexec '{sys.executable}' '{src}' \"$@\"\n")

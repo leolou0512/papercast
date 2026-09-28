@@ -51,13 +51,13 @@ stop() {        # stop <name> <needle>: TERM the process group we started, then 
 }
 
 up() {
-    start hub "$H/hub.env" "-m hub.app" "$PYV" -m hub.app
+    start hub "$H/hub.env" "run_hub.py" "$PYV" "$APP/deploy/run_hub.py"
     start voice "$H/worker.env" "voice_worker.py" "$PYV" "$APP/deploy/voice_worker.py"
 }
 
 down() {
     stop voice "voice_worker.py"
-    stop hub "-m hub.app"
+    stop hub "run_hub.py"
 }
 
 case "${1:-}" in
@@ -66,7 +66,7 @@ case "${1:-}" in
     stop) down ;;
     nightly)
         (set -a; . "$H/hub.env"; set +a; cd "$APP" || exit 1
-         if [ -f tools/backup.py ]; then PCG_BACKUP_DIR=$H/backups nice -n 19 "$PYV" tools/backup.py
+         if [ -f tools/backup.py ]; then nice -n 19 "$PYV" tools/backup.py --data "$PCG_DATA" --dest "$H/backups"
          else echo "tools/backup.py is not installed yet: nothing backed up"; fi
          if grep -q "__main__" hub/layout.py; then nice -n 15 "$PYV" -m hub.layout --all
          else echo "hub/layout.py has no command line yet: nothing laid out"; fi) ;;

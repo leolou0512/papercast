@@ -106,6 +106,15 @@ set_env "$W" PCG_WORKER_STATE "$H/worker"
 grep -q '^PCG_VOICE_ENGINE=' "$W" || set_env "$W" PCG_VOICE_ENGINE auto
 sed -e 's/^\(PCG_SECRET=\).*/\1<set>/' "$E"
 
+# The database: migrations, then what a new hub starts with (base prompt v1, the five topic
+# graphs), once; A1's `python -m hub.db migrate`, which the hub itself does not run.
+if grep -q 'def main' "$H/app/papercast-group/hub/db.py"; then
+    say "database"
+    (set -a; . "$E"; set +a; cd "$H/app/papercast-group" && "$H/venv/bin/python" -m hub.db migrate)
+else
+    echo "note: hub/db.py has no command line yet: the hub makes its tables at start, nothing is seeded"
+fi
+
 ( ensure_ffmpeg ) || echo "ffmpeg: not installed (the hub does not need it; the voice has its own)"
 
 if [ -n "$VOICE" ]; then

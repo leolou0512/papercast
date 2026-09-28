@@ -8,7 +8,8 @@ Type=oneshot
 EnvironmentFile=@H@/hub.env
 Environment=PCG_BACKUP_DIR=@H@/backups
 WorkingDirectory=@H@/app/papercast-group
-ExecStart=/bin/sh -c 'if [ -f tools/backup.py ]; then exec @H@/venv/bin/python tools/backup.py; else echo "tools/backup.py is not installed yet: nothing backed up"; fi'
+# $$ is a literal $ for the shell (systemd would expand $PCG_DATA itself otherwise).
+ExecStart=/bin/sh -c 'if [ -f tools/backup.py ]; then exec @H@/venv/bin/python tools/backup.py --data "$$PCG_DATA" --dest "$$PCG_BACKUP_DIR"; else echo "tools/backup.py is not installed yet: nothing backed up"; fi'
 Nice=19
 IOSchedulingClass=idle
 UMask=0077

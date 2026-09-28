@@ -72,8 +72,8 @@ def script_text(words_min: int = 2400) -> str:
 
 
 def explainer() -> dict:
-    return {"title": TITLE,
-            "points": ["A network learns the velocity that moves noise onto data along straight paths.",
+    # only points and figures: the hub refuses any other field (common/checks.py)
+    return {"points": ["A network learns the velocity that moves noise onto data along straight paths.",
                        "Pairing each noise point with a nearby data point keeps the paths from crossing.",
                        "Straight paths need few sampling steps."],
             "figures": []}

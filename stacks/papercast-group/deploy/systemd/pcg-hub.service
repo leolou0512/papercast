@@ -11,7 +11,8 @@ Type=simple
 EnvironmentFile=@H@/hub.env
 Environment=PYTHONUNBUFFERED=1
 WorkingDirectory=@H@/app/papercast-group
-ExecStart=@H@/venv/bin/python -m hub.app
+# run_hub.py, not `-m hub.app`: see its docstring (one HTTPError class, not two).
+ExecStart=@H@/venv/bin/python @H@/app/papercast-group/deploy/run_hub.py
 Restart=always
 RestartSec=5
 TimeoutStopSec=20

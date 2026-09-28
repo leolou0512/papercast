@@ -42,15 +42,22 @@ From stibnite (or any checkout): copy the repo over, then install there.
 bash stacks/papercast-group/tools/sync_to_perov.sh             # [run 2026-09-28] rsync, 8 MB
 ssh leo@100.97.205.90
 cd ~/papercast-group/repo
-bash stacks/papercast-group/deploy/install.sh --voice          # [run 2026-09-28] the first time
-bash stacks/papercast-group/deploy/install.sh                  # [run] later: code only, keeps the voice
+bash stacks/papercast-group/deploy/install.sh --voice          # the first time (= install-voice.sh, [run
+                                                               # 2026-09-28 on its own], then the rest)
+bash stacks/papercast-group/deploy/install.sh                  # [run 2026-09-28, three times] code only, keeps the voice
 ```
 `install.sh` is idempotent: it swaps the code in (`app` is a symlink replaced in one rename,
 the last three copies kept), keeps `data/`, the secret and the worker token, adds settings that
-are missing without touching the ones there, writes the units and restarts the hub and the
-worker. Options: `--public-url URL`, `--admin a@x,b@y` (sets `PCG_ADMIN_EMAILS`), `--no-start`.
+are missing without touching the ones there, runs `python -m hub.db migrate` (A1's: the
+migrations, then once the seeds a new hub starts with: base prompt v1 and the five topic
+graphs; the hub itself only migrates), writes the units and restarts the hub and the worker.
+Options: `--public-url URL`, `--admin a@x,b@y` (sets `PCG_ADMIN_EMAILS`), `--no-start`.
 
 Why these choices:
+- **The hub starts through `deploy/run_hub.py`**, not `python -m hub.app`: run as `-m`,
+  app.py is the module `__main__` and the other modules import a second copy of it as
+  `hub.app`, so app.py's `except HTTPError` misses the errors they raise and every 401, 404 or
+  428 goes out as a 500 (found by the end-to-end test against the parts as they stood).
 - **A venv without pip, filled by uv.** perov's Python 3.10 has no `ensurepip`
   (`python3.10-venv` is not installed, and installing it needs sudo), so `python3.10 -m venv
   --without-pip` and `uv pip install`. uv 0.11.33 (the version on stibnite) is fetched once
@@ -88,6 +95,7 @@ systemctl --user status pcg-hub pcg-voice            # [run]
 journalctl --user -u pcg-hub -u pcg-voice -f         # logs
 systemctl --user restart pcg-hub                     # [run] after a settings change
 systemctl --user list-timers 'pcg-*'                 # [run] backup 03:30, layout 04:15
+systemctl --user start pcg-backup                    # [run, guarded] tools/backup.py --data $PCG_DATA --dest ~/papercast-group/backups
 cat ~/papercast-group/worker/current.json            # the episode being voiced, if any
 cat ~/papercast-group/data/episodes/<id>/voice/status.json   # the voice's own status
 ```
@@ -149,8 +157,23 @@ and only the hub's own local auth stands in front of it.
 
 cloudflared is the official static `cloudflared-linux-amd64` 2026.8.2 from Cloudflare's GitHub
 releases, sha256 `fcfb02b5…0576ad2` (GitHub's asset digest). perov already had that exact file in
-`~/.local/bin/cloudflared` (installed 2026-08-28, not by this); it is used as it is. A different
-file there would be left alone and ours put in `~/papercast-group/bin/`.
+`~/.local/bin/cloudflared` (dated 2026-08-28, before this install); it is used as it is. A
+different file there would be left alone and ours put in `~/papercast-group/bin/`.
+
+**On perov the quick tunnel cannot come up** [run 2026-09-28]: Imperial's resolvers
+(155.198.142.7/8) answer `trycloudflare.com` and `api.trycloudflare.com` with `146.179.34.253`,
+`phishing.net.ic.ac.uk`, the college's block page, which refuses port 443; cloudflared stops
+with `failed to request quick Tunnel: Post "https://api.trycloudflare.com/tunnel": dial tcp
+146.179.34.253:443: connect: connection refused`. That is the college's security policy
+(anonymous trycloudflare addresses are a phishing favourite), so this script does not go
+around it (no other resolver, no hosts entry). A named tunnel does not use trycloudflare: its
+edge, `region1.v2.argotunnel.com`, resolves to Cloudflare (198.41.192.x) and TCP 7844 answers
+from perov. Whether a tunnel out of a college machine is allowed at all is Imperial ICT's
+call; ask before production. What was checked instead, with `tests/fake_cloudflared.sh`
+standing in for cloudflared (`PCG_CLOUDFLARED=…`): the address parsed (not the `api.` line
+cloudflared also prints), `PCG_PUBLIC_URL` set and the hub restarted with it, `down` and the
+time limit (`--minutes 1`: ended after 60 s) both putting the old value back, nothing left
+running; and with the real cloudflared, the refusal reported and `PCG_PUBLIC_URL` untouched.
 
 ## Production: a named tunnel, Cloudflare Access (written up, not done: no account yet)
 
@@ -226,10 +249,16 @@ device login, lookup, claim, a bundle, the hub's checks; (2) the real CLI (`pape
 `papercast add` a tiny PDF) with a fake `claude` on PATH (A8's own if it ships one); each then
 the real voice worker with a fake papercast-voice writing a short MP3, and the web API (library,
 paper, `/audio/<id>.mp3` with Range, the explainer with its CSP) showing the episode ready with
-those exact bytes. A test whose parts are not merged is skipped and names the part.
+those exact bytes. A test whose parts are not merged is skipped and names the part. It seeds
+the database first as the install does (`python -m hub.db migrate`), so the base prompt exists.
 ```bash
 python3 -m unittest discover -s stacks/papercast-group/tests -p 'e2e_test.py' -v
+PCG_E2E_KEEP=1 ...                  # keep the temporary directory (hub.log, worker.log, data)
 ```
+[run 2026-09-28 against a scratch copy of this branch with every other part's files as they
+stood in their worktrees at about 05:00 UTC, not a merge: (1) passed, the whole path in 1.6 s;
+(2) the real CLI logged in, ran the pipeline with A8's fake claude and stopped at the upload on
+an A7/A8 mismatch (`Api.upload() takes 2 positional arguments but 4 were given`).]
 
 ## Files
 
@@ -238,6 +267,7 @@ python3 -m unittest discover -s stacks/papercast-group/tests -p 'e2e_test.py' -v
 | `install.sh`, `install-voice.sh`, `uninstall.sh`, `lib.sh` | the install (pins for uv, ffmpeg, cloudflared in `lib.sh`) |
 | `systemd/pcg-*.service`, `pcg-*.timer` | the units (`@H@` = the install, filled in by install.sh) |
 | `voice_worker.py` | the worker (stdlib, Python 3.10) |
+| `run_hub.py` | how the hub is started (one copy of `hub.app`) |
 | `watchdog.sh` | the no-systemd fallback (crontab) |
 | `tunnel.sh` | the quick tunnel |
 | `tests/` | the worker's tests: `fake_hub.py`, `fake_papercast_voice.py`, `test_voice_worker.py` |

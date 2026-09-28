@@ -13,7 +13,7 @@
 #   papercastctl rollback                   back to the release before (app/previous), restarted
 #   papercastctl signin-link EMAIL          make EMAIL an admin on the list; prints their username,
 #                                           first password and a one-time set-password link
-#   papercastctl allow list | add EMAIL... [--note T] | remove EMAIL... | import FILE|-
+#   papercastctl allow list | add EMAIL... [--note T] [--no-welcome] | remove EMAIL... | import FILE|- [--no-welcome]
 #   papercastctl admins EMAIL...            as signin-link, for several
 #   papercastctl backup-now                 a backup now (as the nightly one), then lists them
 #   papercastctl backups                    the backups there are
@@ -155,12 +155,13 @@ allow)
     case "$what" in
         list|add|remove) hub_py -m hub.auth allow "$what" "$@" ;;
         import)
-            [ $# -eq 1 ] || die "allow import FILE (one email per line; - for stdin)"
+            nw=""; [ "${2:-}" != --no-welcome ] || { nw=--no-welcome; set -- "$1"; }
+            [ $# -eq 1 ] || die "allow import FILE [--no-welcome] (one email per line; - for stdin)"
             # read here (the account cannot read people's homes), handed over on stdin
-            if [ "$1" = - ]; then hub_py -m hub.auth allow import -
-            else [ -r "$1" ] || die "cannot read $1"; hub_py -m hub.auth allow import - < "$1"
+            if [ "$1" = - ]; then hub_py -m hub.auth allow import - $nw
+            else [ -r "$1" ] || die "cannot read $1"; hub_py -m hub.auth allow import - $nw < "$1"
             fi ;;
-        *) die "allow list | add EMAIL... | remove EMAIL... | import FILE" ;;
+        *) die "allow list | add EMAIL... [--no-welcome] | remove EMAIL... | import FILE [--no-welcome]" ;;
     esac
     ;;
 backup-now)

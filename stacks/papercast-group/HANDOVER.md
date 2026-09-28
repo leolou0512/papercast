@@ -54,7 +54,8 @@ Admins manage people on the page itself: **Settings → Users** (add, remove, ch
 a password). From the server:
 
     papercastctl allow list
-    papercastctl allow add zz123@ic.ac.uk [--note "who"]      # username zz123, first password zz123
+    papercastctl allow add zz123@ic.ac.uk [--note "who"]      # username zz123, first password zz123,
+                                                              # and the welcome email (--no-welcome: not)
     papercastctl allow remove zz123@ic.ac.uk                  # their sessions and CLI tokens end
     papercastctl allow import FILE                            # one email per line
     papercastctl signin-link zz123@ic.ac.uk                   # make them an admin; prints their username,
@@ -64,8 +65,14 @@ Send what `signin-link` prints to that person only. A new person changes the fir
 their first sign-in. If sign-in is not on passwords yet (`status` shows the mode),
 `papercastctl auth password --admin YOU@ic.ac.uk` switches it on and makes you an admin.
 
-"Forgot password" emails need an SMTP account (optional; without one an admin makes a link in
-Users). With a Gmail account and its app password:
+Adding someone (in Users or with `allow add`/`import`) emails them the welcome from
+hub/email/welcome.html and welcome.txt: their username, the first password and a Join button.
+Users → a person's menu → "Send the welcome email again" resends it while they are still on the
+first password. It lands in junk at first; tell people to look there.
+
+The welcome and "forgot password" emails need an SMTP account (optional; without one nothing is
+sent and an admin makes a link in Users). It is papercast.virtualatoms@gmail.com with its app
+password in /srv/papercast/etc/smtp.password. To set it again:
 
     papercastctl email --host smtp.gmail.com --port 587 --user X@gmail.com --from X@gmail.com \
         --password-file - --test YOU@ic.ac.uk                # paste the app password, Enter, Ctrl-D

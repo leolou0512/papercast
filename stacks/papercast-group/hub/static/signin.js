@@ -113,6 +113,8 @@
         : st.mode === "cf-access" ? "Sign in through Cloudflare Access: reload this page." : "This browser is not signed in.", "warn");
       return;
     }
+    const u = new URLSearchParams(location.search).get("u");       // the welcome email's Join button
+    if (u && !$("login").value) $("login").value = u.trim().slice(0, 120);
     show("signin");
   }
 

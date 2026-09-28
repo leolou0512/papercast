@@ -787,7 +787,9 @@ def admin_users(req):
         f"SELECT {', '.join('u.' + c for c in USER_COLS.split(', '))}, u.pw_hash IS NULL AS default_pw, "
         "u.last_login_at, u.reset_asked_at, a.email IS NOT NULL AS listed, a.note, "
         "(SELECT COUNT(*) FROM tokens t WHERE t.user_id = u.id AND t.revoked_at IS NULL) AS devices, "
-        "(SELECT MAX(t.last_used_at) FROM tokens t WHERE t.user_id = u.id) AS last_used_at "
+        "(SELECT MAX(t.last_used_at) FROM tokens t WHERE t.user_id = u.id) AS last_used_at, "
+        "(SELECT MAX(l.at) FROM auth_log l WHERE l.user_id = u.id AND l.kind = 'welcome_sent') AS welcome_at, "
+        "(SELECT MAX(l.at) FROM auth_log l WHERE l.user_id = u.id AND l.kind = 'welcome_failed') AS welcome_failed_at "
         "FROM users u LEFT JOIN allowed_emails a ON a.email = u.email ORDER BY u.id").fetchall()
     pw = req.cfg.auth == "password"
     from . import accounts
@@ -795,7 +797,8 @@ def admin_users(req):
         **_user(r), "devices": r["devices"], "last_used_at": r["last_used_at"], "last_login_at": r["last_login_at"],
         "on_list": bool(r["listed"]), "note": r["note"] or "",
         "default_password": bool(r["default_pw"]) if pw else False,
-        "reset_asked_at": r["reset_asked_at"]} for r in rows]})
+        "reset_asked_at": r["reset_asked_at"], "welcome_at": r["welcome_at"],
+        "welcome_failed_at": r["welcome_failed_at"]} for r in rows]})
 
 
 def admin_user_put(req, uid):
@@ -903,9 +906,10 @@ def bootstrap(cfg, email: str) -> str | None:
 
 USAGE = """usage: python3 -m hub.auth bootstrap EMAIL
        python3 -m hub.auth allow list
-       python3 -m hub.auth allow add EMAIL... [--note TEXT]
+       python3 -m hub.auth allow add EMAIL... [--note TEXT] [--no-welcome]
        python3 -m hub.auth allow remove EMAIL...
-       python3 -m hub.auth allow import FILE [--note TEXT]   (one email per line, # comments; - reads stdin)
+       python3 -m hub.auth allow import FILE [--note TEXT] [--no-welcome]   (one email per line, # comments; - reads stdin)
+       (add and import email each new person the welcome, with the first password, when email is set up)
        python3 -m hub.auth email-test ADDRESS
        python3 -m hub.auth admin-account EMAIL   (password mode: an admin with any email domain; the password is read from stdin)
 (from stacks/papercast-group, with the hub's settings: set -a; . ~/papercast-group/hub.env; set +a)"""
@@ -976,10 +980,38 @@ def _allow_cmd(cfg, args) -> int:
                 else:
                     print(f"added {got['email']}: username {got['username']}, first password {got['username']} "
                           "(a new one is asked for at the first sign-in)")
+                if got["state"] != "already" and not args.no_welcome and not _welcome_now(cfg, got["user_id"]):
+                    bad += 1
         except HTTPError as ex:
             bad += 1
             print(f"refused {e.strip()}: {ex.msg}", file=sys.stderr)
     return 1 if bad else 0
+
+
+def _welcome_now(cfg, uid) -> bool:
+    """The welcome email, sent before the command goes on (no mail thread outlives it). False: it
+    should have gone and did not."""
+    from . import accounts
+    row = accounts.account(uid)
+    why = accounts.welcome_problem(cfg, row)
+    if why == "no_email":
+        print("  no welcome email: this hub cannot send email (papercastctl email ...)")
+        return True
+    if why:
+        print("  no welcome email: " + {"has_password": "they have chosen a password already",
+                                         "not_password": "the hub does not use passwords (PCG_AUTH)"}.get(why, "not on the list"))
+        return True
+    subject, text, page = accounts.welcome_email(cfg, row)
+    try:
+        accounts.send_email(cfg, row["email"], subject, text, page)
+    except Exception as ex:                     # noqa: BLE001  (show whatever SMTP said)
+        accounts.log_event("welcome_failed", user_id=uid, email=row["email"], detail=f"{type(ex).__name__}: {ex}")
+        print(f"  the welcome email to {row['email']} was not sent: {type(ex).__name__}: {ex} "
+              "(the account is made; send it again from the Users panel)", file=sys.stderr)
+        return False
+    accounts.log_event("welcome_sent", user_id=uid, email=row["email"])
+    print(f"  welcome email sent to {row['email']}")
+    return True
 
 
 def _email_test_cmd(cfg, to: str) -> int:
@@ -1025,6 +1057,7 @@ def main(argv=None) -> int:
     a.add_argument("what", choices=["list", "add", "remove", "import"])
     a.add_argument("emails", nargs="*")
     a.add_argument("--note", default="")
+    a.add_argument("--no-welcome", action="store_true", help="add without emailing the welcome")
     t = sub.add_parser("email-test")
     t.add_argument("address")
     s = sub.add_parser("admin-account")

@@ -1,6 +1,7 @@
 """PCG_AUTH=password: the ledger of allowed Imperial emails, passwords, reset links, rate limits,
-the sign-in log and the one email the hub sends (Leo's decision, 2026-09-28: a list of allowed
-Imperial addresses, email only for "forgot password", no Google, no Cloudflare Access).
+the sign-in log and the two emails the hub sends (Leo's decisions, 2026-09-28: a list of allowed
+Imperial addresses, no Google, no Cloudflare Access; email for "forgot password", and a welcome
+from papercast.virtualatoms@gmail.com to each person an admin adds).
 
 Who has an account: exactly the emails on the ledger (allowed_emails), @ic.ac.uk or
 @imperial.ac.uk. Adding one makes the account at once: username = the email's local part
@@ -19,21 +20,24 @@ Routes (the public ones check CSRF themselves, as /api/join does, since they set
   POST /api/auth/link {"token","peek"|"password"}  see a reset link / use it (signs this browser in)
   POST /api/auth/password {"current"?,"password"}  change it (no current while the first one stands)
   POST /api/auth/signout, POST /api/auth/signout-all
-  admin: GET/POST/DELETE /api/admin/allowed, POST /api/admin/users/<id>/reset-link,
-         POST /api/admin/users/<id>/reset-default, GET /api/admin/auth-log
+  GET  /email/<picture>                        the welcome email's banner (static/email/, no sign-in)
+  admin: GET/POST/DELETE /api/admin/allowed (POST emails the welcome), POST /api/admin/users/<id>/reset-link,
+         POST /api/admin/users/<id>/reset-default, POST /api/admin/users/<id>/welcome (again),
+         GET /api/admin/auth-log
 
 Secrets: passwords as scrypt (stored with n, r, p, so they can rise: an older hash is redone at
 the next sign-in); reset links as sha256 only. Failed sign-ins are limited per account and per
 client address (CF-Connecting-IP, trusted only from 127.0.0.1, which is where cloudflared
 connects from); an unknown account costs the same scrypt and gets the same answer.
 
-From the command line (python3 -m hub.auth ...): bootstrap EMAIL, allow list|add|remove|import,
-email-test ADDRESS. See auth.main."""
+From the command line (python3 -m hub.auth ...): bootstrap EMAIL, allow list|add|remove|import
+(add and import email the welcome, unless --no-welcome), email-test ADDRESS. See auth.main."""
 from __future__ import annotations
 
 import base64
 import hashlib
 import hmac
+import html
 import ipaddress
 import logging
 import os
@@ -49,6 +53,8 @@ import unicodedata
 from collections import deque
 from email.message import EmailMessage
 from email.utils import formataddr, formatdate, make_msgid
+from pathlib import Path
+from urllib.parse import quote
 
 from . import auth, db
 from .app import HTTPError
@@ -329,7 +335,7 @@ ASKS_ADDRESS = Limiter(ASK_PER_ADDRESS, ASK_WINDOW)
 
 
 def reset_limits() -> None:
-    for lim in (FAILS_ACCOUNT, FAILS_ADDRESS, ASKS_EMAIL, ASKS_ADDRESS):
+    for lim in (FAILS_ACCOUNT, FAILS_ADDRESS, ASKS_EMAIL, ASKS_ADDRESS, WELCOMES):
         lim.reset()
 
 
@@ -524,7 +530,7 @@ def server_admin(cfg, email: str, password: str) -> dict:
     return {"user_id": uid, "email": e, "username": name}
 
 
-# ---------------------------------------------------------------- email (only the reset link)
+# ---------------------------------------------------------------- email (the reset link, the welcome)
 
 def email_ready(cfg) -> bool:
     return bool(cfg.smtp_host and cfg.smtp_from)
@@ -541,8 +547,9 @@ def _smtp_password(cfg) -> str:
         return f.read().strip()
 
 
-def send_email(cfg, to: str, subject: str, body: str) -> None:
-    """Plain text, over TLS (465) or STARTTLS (any other port; never in the clear). Raises on failure."""
+def send_email(cfg, to: str, subject: str, body: str, html_body: str | None = None) -> None:
+    """Plain text (and an HTML alternative when given), over TLS (465) or STARTTLS (any other
+    port; never in the clear). Raises on failure."""
     msg = EmailMessage()
     # a bare address gets the name "papercast" (hub.env is also sourced by bash: no spaces or <> there)
     msg["From"] = cfg.smtp_from if "<" in cfg.smtp_from else formataddr(("papercast", cfg.smtp_from))
@@ -551,6 +558,8 @@ def send_email(cfg, to: str, subject: str, body: str) -> None:
     msg["Date"] = formatdate(usegmt=True)
     msg["Message-ID"] = make_msgid(domain=cfg.smtp_from.rpartition("@")[2].strip(">") or None)
     msg.set_content(body)
+    if html_body is not None:
+        msg.add_alternative(html_body, subtype="html")
     ctx = ssl.create_default_context(cafile=getattr(cfg, "smtp_ca_file", None) or None)
     if cfg.smtp_port == 465:
         s = smtplib.SMTP_SSL(cfg.smtp_host, cfg.smtp_port, timeout=20, context=ctx)
@@ -583,7 +592,11 @@ _mailer = {"thread": None}
 _mail_lock = threading.Lock()
 
 
-def queue_email(cfg, to: str, subject: str, body: str, *, user_id=None) -> None:
+MAIL_KINDS = {"link": ("the password link", "link_sent", "email_failed"),
+              "welcome": ("the welcome email", "welcome_sent", "welcome_failed")}
+
+
+def queue_email(cfg, to: str, subject: str, body: str, *, user_id=None, html_body=None, kind="link", actor_id=None) -> None:
     """Sent by a background thread: the request never waits for SMTP, and a failure goes to the
     hub's log and the sign-in log, never to the person who asked."""
     with _mail_lock:
@@ -593,23 +606,25 @@ def queue_email(cfg, to: str, subject: str, body: str, *, user_id=None) -> None:
             t.start()
             _mailer["thread"] = t
     try:
-        _mailq.put_nowait((cfg, to, subject, body, user_id))
+        _mailq.put_nowait((cfg, to, subject, body, html_body, kind, user_id, actor_id))
     except queue.Full:
-        log.warning("mail queue full: the link for %s was not sent", to)
-        log_event("email_failed", user_id=user_id, email=to, detail="the hub's mail queue is full")
+        what, _, failed = MAIL_KINDS[kind]
+        log.warning("mail queue full: %s for %s was not sent", what, to)
+        log_event(failed, user_id=user_id, email=to, actor_id=actor_id, detail="the hub's mail queue is full")
 
 
 def _mail_loop():
     while True:
-        cfg, to, subject, body, uid = _mailq.get()
+        cfg, to, subject, body, html_body, kind, uid, actor = _mailq.get()
+        what, sent, failed = MAIL_KINDS[kind]
         try:
-            send_email(cfg, to, subject, body)
-            log.info("sent the password link to %s", to)
-            log_event("link_sent", user_id=uid, email=to)
+            send_email(cfg, to, subject, body, html_body)
+            log.info("sent %s to %s", what, to)
+            log_event(sent, user_id=uid, email=to, actor_id=actor)
         except Exception as ex:                 # noqa: BLE001  (SMTP, TLS, DNS, the password file)
             log.warning("could not email %s: %s: %s", to, type(ex).__name__, ex)
             try:
-                log_event("email_failed", user_id=uid, email=to, detail=f"{type(ex).__name__}: {ex}")
+                log_event(failed, user_id=uid, email=to, actor_id=actor, detail=f"{type(ex).__name__}: {ex}")
             except Exception:                   # noqa: BLE001
                 log.exception("auth_log")
         finally:
@@ -624,6 +639,63 @@ def mail_idle(timeout: float = 10.0) -> bool:
             return True
         time.sleep(0.02)
     return False
+
+
+# ---------------------------------------------------------------- the welcome email (an admin adds someone)
+
+EMAIL_DIR = Path(__file__).resolve().parent / "email"
+WELCOME_SUBJECT = "Welcome to Virtual Atoms Lab Papercast"
+WELCOME_KEYS = ("name", "username", "signin_url", "site_url", "github_url")
+GITHUB_URL = "https://github.com/leolou0512/papercast"
+WELCOME_PER_HOUR = 3                            # from the Users panel, per account: the add and two more
+WELCOMES = Limiter(WELCOME_PER_HOUR, 3600)
+
+
+def _fill(template: str, values: dict, escape: bool) -> str:
+    """Each {key} replaced by its value (HTML-escaped when `escape`), in one pass, so a value is never
+    read as a placeholder; other braces (the HTML's style blocks) are left alone."""
+    def one(m):
+        v = str(values[m.group(1)])
+        return html.escape(v, quote=True) if escape else v
+    return re.sub(r"\{(" + "|".join(WELCOME_KEYS) + r")\}", one, template)
+
+
+def welcome_email(cfg, row) -> tuple:
+    """(subject, plain text, HTML): Leo's text in hub/email/, for an account on its first password."""
+    name = row["username"]
+    values = {"name": row["name"] or name, "username": name, "signin_url": f"{cfg.public_url}/signin?u={quote(name)}",
+              "site_url": cfg.public_url, "github_url": GITHUB_URL}
+    text = _fill((EMAIL_DIR / "welcome.txt").read_text(encoding="utf-8"), values, False)
+    page = _fill((EMAIL_DIR / "welcome.html").read_text(encoding="utf-8"), values, True)
+    return WELCOME_SUBJECT, text, page
+
+
+def welcome_problem(cfg, row) -> str | None:
+    """Why the welcome cannot go to this account now, or None. It tells the first password, so
+    only an account on the list, enabled, and still on its first password gets one."""
+    if not is_password_mode(cfg):
+        return "not_password"
+    if not email_ready(cfg):
+        return "no_email"
+    if row is None or not row["listed"] or row["disabled"]:
+        return "not_listed"
+    if row["pw_hash"] is not None:
+        return "has_password"
+    return None
+
+
+def queue_welcome(cfg, row, *, by=None) -> None:
+    subject, text, page = welcome_email(cfg, row)
+    queue_email(cfg, row["email"], subject, text, user_id=row["id"], html_body=page, kind="welcome", actor_id=by)
+
+
+def email_asset(req, name):
+    """The welcome email's pictures, fetched by mail clients: no sign-in, only static/email/."""
+    p = req.cfg.static / "email" / name
+    if not p.is_file():
+        raise HTTPError(404, "not_found", "no such file")
+    req.send(200, p.read_bytes(), "image/jpeg" if name.endswith(".jpg") else "image/png",
+             {"Cache-Control": "public, max-age=86400"})
 
 
 # ---------------------------------------------------------------- routes: the pages and the person's own
@@ -862,10 +934,17 @@ def admin_allowed(req):
 
 
 def admin_allow(req):
+    """Add to the list; a new account (or one back on its first password) gets the welcome email,
+    unless {"welcome": false}. "welcome" in the answer: queued, off, already, no_email, has_password."""
     b = req.json()
     got = allow(req.cfg, b.get("email"), note=b.get("note") or "", by=req.user["id"], ip=client_addr(req))
     row = account(got["user_id"])
-    req.send_json(201 if got["state"] != "already" else 200, {**got, "user": public_user(row)})
+    welcome = ("already" if got["state"] == "already" else "off" if b.get("welcome") is False
+               else welcome_problem(req.cfg, row) or "queued")
+    if welcome == "queued":
+        WELCOMES.hit(row["id"])
+        queue_welcome(req.cfg, row, by=req.user["id"])
+    req.send_json(201 if got["state"] != "already" else 200, {**got, "user": public_user(row), "welcome": welcome})
 
 
 def admin_disallow(req):
@@ -894,6 +973,22 @@ def admin_reset_link(req, uid):
         c.execute("UPDATE users SET reset_asked_at = NULL WHERE id = ?", (row["id"],))
         log_event("link_made", user_id=row["id"], email=row["email"], actor_id=req.user["id"], ip=client_addr(req), c=c)
     req.send_json(201, {**link, "username": row["username"]})
+
+
+def admin_welcome(req, uid):
+    """The welcome email again (lost, or in junk), while the account is still on its first password."""
+    row = _target(uid)
+    why = welcome_problem(req.cfg, row)
+    if why:
+        raise HTTPError(409, why, {"no_email": "This hub cannot send email yet.",
+                                   "has_password": f"{row['username']} has chosen a password already: make them a password link instead.",
+                                   }.get(why, "The welcome is only for password sign-in."))
+    wait = WELCOMES.wait(row["id"])
+    if wait:
+        _slow_down(wait)
+    WELCOMES.hit(row["id"])
+    queue_welcome(req.cfg, row, by=req.user["id"])
+    req.send_json(202, {"ok": True, "email": row["email"]})
 
 
 def admin_reset_default(req, uid):
@@ -937,6 +1032,8 @@ ROUTES = [
     ("DELETE", r"^/api/admin/allowed$", admin_disallow, "admin"),
     ("POST", r"^/api/admin/users/(\d{1,12})/reset-link$", admin_reset_link, "admin"),
     ("POST", r"^/api/admin/users/(\d{1,12})/reset-default$", admin_reset_default, "admin"),
+    ("POST", r"^/api/admin/users/(\d{1,12})/welcome$", admin_welcome, "admin"),
+    ("GET", r"^/email/([a-z0-9][a-z0-9-]{0,60}\.(?:jpg|png))$", email_asset, "public"),
     ("GET", r"^/api/admin/auth-log$", admin_log, "admin"),
 ]
 

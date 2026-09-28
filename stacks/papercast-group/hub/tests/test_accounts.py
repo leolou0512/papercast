@@ -141,6 +141,7 @@ class PasswordTest(unittest.TestCase):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def setUp(self):
+        self.assertTrue(accounts.mail_idle())           # no email of an earlier test still on its way
         accounts.reset_limits()
         self.r = self.hub.req
         self.smtp.fail = None
@@ -148,7 +149,8 @@ class PasswordTest(unittest.TestCase):
 
     # ---------------------------------------------------------------- helpers
     def add(self, code, as_=None, **extra):
-        s, j, _ = self.r("POST", "/api/admin/allowed", {"email": code, **extra}, **(as_ or self.leo))
+        """Added without the welcome email (its own tests below), so the email counts stay exact."""
+        s, j, _ = self.r("POST", "/api/admin/allowed", {"email": code, "welcome": False, **extra}, **(as_ or self.leo))
         self.assertIn(s, (200, 201), j)
         return j
 
@@ -304,17 +306,17 @@ class PasswordTest(unittest.TestCase):
     def test_the_command_line_ledger(self):
         f = Path(self.hub.dir) / "group.txt"
         f.write_text("# the group, one per line\nxy101@ic.ac.uk\n  XY102@IMPERIAL.AC.UK   # visiting\n\nxy103\nnot-imperial@gmail.com\n")
-        p = self.hub.run("allow", "import", str(f))
+        p = self.hub.run("allow", "import", str(f), "--no-welcome")
         self.assertEqual(p.returncode, 1)                       # one line refused
         self.assertIn("added xy101@ic.ac.uk: username xy101, first password xy101", p.stdout)
         self.assertIn("added xy102@imperial.ac.uk", p.stdout)
         self.assertIn("added xy103@ic.ac.uk", p.stdout)
         self.assertIn("refused not-imperial@gmail.com: Only Imperial addresses", p.stderr)
-        p = self.hub.run("allow", "add", "xy101@ic.ac.uk", "xy104", "--note", "summer student")
+        p = self.hub.run("allow", "add", "xy101@ic.ac.uk", "xy104", "--note", "summer student", "--no-welcome")
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("already on the list: xy101@ic.ac.uk", p.stdout)
         self.assertEqual(self.hub.q("SELECT note, added_by FROM allowed_emails WHERE email = 'xy104@ic.ac.uk'")[0][:], ("summer student", None))
-        p = self.hub.run("allow", "import", "-", stdin="xy105@ic.ac.uk\n")
+        p = self.hub.run("allow", "import", "-", "--no-welcome", stdin="xy105@ic.ac.uk\n")
         self.assertEqual(p.returncode, 0, p.stderr)
         p = self.hub.run("allow", "list")
         self.assertEqual(p.returncode, 0, p.stderr)
@@ -705,6 +707,106 @@ class PasswordTest(unittest.TestCase):
         self.assertEqual(self.smtp.parsed()["Subject"], "papercast: a test email")
 
     # ---------------------------------------------------------------- admin resets
+    # ---------------------------------------------------------------- the welcome email
+    def welcome_parts(self, i=-1):
+        msg = self.smtp.parsed(i)
+        self.assertEqual(msg.get_content_type(), "multipart/alternative")
+        text = msg.get_body(("plain",)).get_content().replace("\r\n", "\n")     # CRLF on the wire
+        page = msg.get_body(("html",)).get_content()
+        return msg, text, page
+
+    def test_welcome_email_when_an_admin_adds_someone(self):
+        n = len(self.smtp.messages)
+        s, j, _ = self.r("POST", "/api/admin/allowed", {"email": "wl101"}, **self.leo)
+        self.assertEqual((s, j["state"], j["welcome"]), (201, "added", "queued"))
+        self.assertTrue(accounts.mail_idle() and self.smtp.wait(n + 1))
+        m = self.smtp.messages[-1]
+        self.assertEqual((m["to"], m["user"], m["tls"]), (["wl101@ic.ac.uk"], BOT, True))
+        msg, text, page = self.welcome_parts()
+        self.assertEqual((msg["To"], msg["Subject"]), ("wl101@ic.ac.uk", "Welcome to Virtual Atoms Lab Papercast"))
+        self.assertTrue(text.startswith("Hi, wl101\n"), text[:40])
+        self.assertIn(f"Join: {PUBLIC}/signin?u=wl101\n", text)
+        self.assertRegex(text, r"Email:\s+wl101@ic\.ac\.uk\n\s+Password:\s+wl101\n")
+        self.assertIn(accounts.GITHUB_URL, text)
+        self.assertIn(f'href="{PUBLIC}/signin?u=wl101"', page)
+        self.assertIn("https://papercast.virtualatoms.org/email/welcome-banner.jpg", page)
+        for part in (text, page):
+            self.assertNotRegex(part, r"\{(" + "|".join(accounts.WELCOME_KEYS) + r")\}")
+        ev = [e for e in self.events("welcome_sent") if e["email"] == "wl101@ic.ac.uk"]
+        self.assertEqual((len(ev), ev[0]["actor"]["id"]), (1, self.leo_id))
+        u = next(u for u in self.r("GET", "/api/admin/users", **self.leo)[1]["users"] if u["username"] == "wl101")
+        self.assertEqual((bool(u["welcome_at"]), u["welcome_failed_at"]), (True, None))
+        # already on the list, or asked not to: no email
+        self.assertEqual(self.r("POST", "/api/admin/allowed", {"email": "wl101"}, **self.leo)[1]["welcome"], "already")
+        self.assertEqual(self.r("POST", "/api/admin/allowed", {"email": "wl102", "welcome": False}, **self.leo)[1]["welcome"], "off")
+        self.assertTrue(accounts.mail_idle())
+        time.sleep(0.2)
+        self.assertEqual(len(self.smtp.messages), n + 1)
+
+    def test_welcome_values_are_escaped_and_never_read_as_placeholders(self):
+        row = {"username": "ab1", "email": "ab1@ic.ac.uk", "name": '<img src=x onerror="go()"> & {username}'}
+        subject, text, page = accounts.welcome_email(self.hub.cfg, row)
+        self.assertIn('Hi, <img src=x onerror="go()"> & {username}\n', text)
+        self.assertIn("Hi, &lt;img src=x onerror=&quot;go()&quot;&gt; &amp; {username}</p>", page)
+        self.assertNotIn("<img src=x", page)
+        self.assertIn("@media only screen", page)                # the style blocks' braces are left alone
+
+    def test_the_welcome_again_from_the_users_panel(self):
+        n = len(self.smtp.messages)
+        uid = self.r("POST", "/api/admin/allowed", {"email": "wa101"}, **self.leo)[1]["user_id"]
+        for _ in range(accounts.WELCOME_PER_HOUR - 1):
+            s, j, _ = self.r("POST", f"/api/admin/users/{uid}/welcome", **self.leo)
+            self.assertEqual((s, j["email"]), (202, "wa101@ic.ac.uk"))
+        s, j, _ = self.r("POST", f"/api/admin/users/{uid}/welcome", **self.leo)
+        self.assertEqual((s, j["error"]), (429, "slow_down"))    # the add and two more, per hour
+        self.assertTrue(accounts.mail_idle() and self.smtp.wait(n + accounts.WELCOME_PER_HOUR))
+        self.assertEqual({tuple(m["to"]) for m in self.smtp.messages[n:]}, {("wa101@ic.ac.uk",)})
+        accounts.reset_limits()
+        # only admins; not once they chose a password; not without email
+        bob_id, bob = self.person("wa102")
+        self.assertEqual(self.r("POST", f"/api/admin/users/{uid}/welcome", **bob)[0], 403)
+        s, j, _ = self.r("POST", f"/api/admin/users/{bob_id}/welcome", **self.leo)
+        self.assertEqual((s, j["error"]), (409, "has_password"))
+        self.hub.cfg.smtp_host = ""
+        s, j, _ = self.r("POST", f"/api/admin/users/{uid}/welcome", **self.leo)
+        self.assertEqual((s, j["error"]), (409, "no_email"))
+        self.assertEqual(self.r("POST", "/api/admin/allowed", {"email": "wa103"}, **self.leo)[1]["welcome"], "no_email")
+        self.assertEqual(self.r("POST", "/api/admin/users/999999/welcome", **self.leo)[0], 404)
+
+    def test_a_welcome_that_fails_is_logged(self):
+        self.smtp.fail = "auth"
+        n = len(self.smtp.messages)
+        self.assertEqual(self.r("POST", "/api/admin/allowed", {"email": "wf101"}, **self.leo)[1]["welcome"], "queued")
+        self.assertTrue(accounts.mail_idle())
+        self.assertEqual(len(self.smtp.messages), n)
+        self.assertIn("wf101@ic.ac.uk", [e["email"] for e in self.events("welcome_failed")])
+        u = next(u for u in self.r("GET", "/api/admin/users", **self.leo)[1]["users"] if u["username"] == "wf101")
+        self.assertEqual((u["welcome_at"], bool(u["welcome_failed_at"])), (None, True))
+
+    def test_the_welcome_from_the_command_line(self):
+        trust = {"SSL_CERT_FILE": self.smtp.ca}                 # the subprocess cannot take the test hook
+        n = len(self.smtp.messages)
+        p = self.hub.run("allow", "add", "wc101", "wc102", env=trust)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("welcome email sent to wc101@ic.ac.uk", p.stdout)
+        self.assertEqual([m["to"] for m in self.smtp.messages[n:]], [["wc101@ic.ac.uk"], ["wc102@ic.ac.uk"]])
+        self.assertIn("wc102@ic.ac.uk", [e["email"] for e in self.events("welcome_sent")])
+        p = self.hub.run("allow", "add", "wc101", "wc103", "--no-welcome", env=trust)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(len(self.smtp.messages), n + 2)
+        self.smtp.fail = "auth"
+        p = self.hub.run("allow", "add", "wc104", env=trust)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("the welcome email to wc104@ic.ac.uk was not sent", p.stderr)
+        self.assertIn("added wc104@ic.ac.uk", p.stdout)
+
+    def test_the_email_banner_is_public(self):
+        s, raw, r = self.r("GET", "/email/welcome-banner.jpg")
+        self.assertEqual((s, r.getheader("Content-Type")), (200, "image/jpeg"))
+        self.assertTrue(raw.startswith(b"\xff\xd8"))
+        for bad in ("/email/nope.jpg", "/email/../app.js", "/email/welcome.html", "/email/%2e%2e/app.js"):
+            self.assertEqual(self.r("GET", bad)[0], 404, bad)
+
     def test_reset_to_the_first_password(self):
         uid, who = self.person("rd101")
         token = self.device(who, "rd-laptop")
@@ -1020,9 +1122,12 @@ class PasswordPagesTest(unittest.TestCase):
             self.assertIn(says, self.js("document.getElementById('add-msg').textContent"))
         self.typ("#add-code", "pg501")
         self.assertFalse(self.js("document.getElementById('add-go').disabled"))
+        n = len(self.smtp.messages)
         self.click("#add-go")
         self.wait("document.getElementById('add-msg').textContent.startsWith('Added pg501@ic.ac.uk')", "added")
-        self.assertIn("first password pg501", self.js("document.getElementById('add-msg').textContent"))
+        self.assertIn("welcome email with their username and first password is on its way", self.js("document.getElementById('add-msg').textContent"))
+        self.assertTrue(accounts.mail_idle() and self.smtp.wait(n + 1))
+        self.assertEqual(self.smtp.messages[n]["to"], ["pg501@ic.ac.uk"])
         self.typ("#add-code", "PG502@ic.ac.uk")
         self.click("#add-go")
         self.wait("document.getElementById('add-msg').textContent.startsWith('Added pg502@ic.ac.uk')", "a full address")
@@ -1035,7 +1140,13 @@ class PasswordPagesTest(unittest.TestCase):
         self.click(f"{row} .icon-btn")
         self.wait("!!document.querySelector('.menu')", "menu")
         items = self.js("[...document.querySelectorAll('.menu button')].map(b => b.textContent)")
-        self.assertEqual(items, ["Make a password link", "Reset to the first password", "Remove…"])
+        self.assertEqual(items, ["Make a password link", "Send the welcome email again", "Reset to the first password", "Remove…"])
+        n = len(self.smtp.messages)
+        self.js("[...document.querySelectorAll('.menu button')][1].click()")
+        self.assertTrue(self.smtp.wait(n + 1) and accounts.mail_idle())
+        self.assertEqual(self.smtp.messages[n]["to"], ["pg501@ic.ac.uk"])
+        self.click(f"{row} .icon-btn")
+        self.wait("!!document.querySelector('.menu')", "menu")
         self.js("[...document.querySelectorAll('.menu button')][0].click()")
         self.wait(f"!!document.getElementById('link-{uid}')", "the link")
         self.assertRegex(self.js(f"document.getElementById('link-{uid}').value"), r"/set-password#t=[\w-]+$")

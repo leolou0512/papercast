@@ -2203,7 +2203,7 @@
     reset_asked: "asked for a new password", reset_unknown: "asked for a new password: not on the list", reset_limited: "asked for too many links",
     link_sent: "password link emailed", email_failed: "email failed", link_made: "password link made", link_used: "set a password with a link",
     reset_default: "reset to the first password", allowed: "added to the list", removed: "removed from the list",
-    role: "role changed", disabled: "disabled changed",
+    role: "role changed", disabled: "disabled changed", welcome_sent: "welcome email sent", welcome_failed: "welcome email failed",
   };
   const CODE_RX = /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/;
   function codeOf(v) {
@@ -2243,6 +2243,7 @@
       try {
         const r = await api("POST", "/api/admin/allowed", { email: c.code });
         S.set.added = r.state === "already" ? `${r.email} is already on the list.`
+          : r.welcome === "queued" ? `Added ${r.email}. The welcome email with their username and first password is on its way (tell them to look in junk too).`
           : `Added ${r.email}. Tell them: username ${r.username}, first password ${r.username}${r.user && !r.user.must_change ? " (or the one they had)" : ""}.`;
         again();
       } catch (err) { addMsg.className = "err"; addMsg.textContent = err.message; add.disabled = false; }
@@ -2273,6 +2274,10 @@
         panel(li, [out, copy, el("button", { type: "button", class: "text-btn", text: "Close", onclick: () => panel(li) }),
           el("p", { class: "muted", text: `Works once, for 24 hours: send it to ${u.username} yourself.` })]);
       } catch (e) { toast(e.message); }
+    }
+    async function welcomeAgain(u) {
+      try { await api("POST", `/api/admin/users/${u.id}/welcome`); toast(`Welcome email on its way to ${u.email}`, null, 4000); }
+      catch (e) { toast(e.message); }
     }
     function resetDefault(u, li) {
       const go = el("button", { type: "button", class: "btn-accent", text: "Reset" });
@@ -2313,10 +2318,14 @@
       more.addEventListener("click", (e) => {
         e.stopPropagation();
         openMenu(more, `user-${u.id}`, [mItem("Make a password link", () => linkFor(u, li))]
+          .concat(!mine && u.default_password && !u.disabled && j && j.email ? [mItem("Send the welcome email again", () => welcomeAgain(u))] : [])
           .concat(mine ? [] : [mItem("Reset to the first password", () => resetDefault(u, li)), mItem("Remove…", () => remove(u, li), "danger")]));
       });
       const sub = [u.name && u.name !== u.username ? u.username : u.email,
         u.default_password ? el("span", { class: "warn", text: "first password" }) : null,
+        !u.default_password ? null
+          : u.welcome_failed_at && !(u.welcome_at && u.welcome_at > u.welcome_failed_at) ? el("span", { class: "warn", text: "welcome email failed" })
+          : u.welcome_at ? `welcome emailed ${when(u.welcome_at)}` : null,
         u.last_login_at ? `last signed in ${when(u.last_login_at)}` : "never signed in",
         u.reset_asked_at ? el("span", { class: "warn", text: `asked for a new password ${when(u.reset_asked_at)}` }) : null,
         u.disabled ? el("span", { class: "warn", text: "disabled" }) : null,
@@ -2338,7 +2347,7 @@
     body.replaceChildren(...[
       el("p", { class: "intro", text: "Only Imperial addresses on this list can sign in. Contributors also add papers with papercast; admins also manage people and the base prompt." }),
       el("p", { class: "pref-h", text: "Add someone" }), addForm, addMsg,
-      el("p", { class: "muted", text: "They sign in with the short code as username and as first password, and choose their own straight away. They start as contributors." }),
+      el("p", { class: "muted", text: `They sign in with the short code as username and as first password, and choose their own straight away. They start as contributors.${j && j.email ? " The hub emails them a welcome with both." : ""}` }),
       el("p", { class: "pref-h sec", text: `On the list (${listed.length})` }), ul,
       j && j.email === false ? el("p", { class: "muted", id: "no-email", text: "This hub cannot send email yet, so someone who forgets their password shows up here as “asked for a new password”: reset them to the first password, or make them a password link." }) : null,
       off.length ? el("p", { class: "muted", id: "off-list", text: `Not on the list, so they cannot sign in: ${off.map((u) => u.username || u.email).join(", ")}. Add one again to bring the account back.` }) : null,

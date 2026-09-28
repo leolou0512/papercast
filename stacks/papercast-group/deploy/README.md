@@ -83,9 +83,15 @@ this machine's card only (`hosts.bs1.enabled = false`) and its GPU slot lock und
 an 80-word script (heading + two paragraphs, 3 chunks), the card idle (123 MiB used by the desktop,
 0 %). Admitted after 20 s (3 idle polls), engine load and CUDA-graph capture 107 s (cold
 compiler caches: stibnite's was 46 s warm), speech 28.8 s for 35.7 s of audio (real-time factor
-0.81, stibnite 0.83), 9.0 GB on the card while speaking, 164 s in all, the card back to 123 MiB
+0.81, stibnite 0.83), 9,032 MiB in use at one reading while speaking, 164 s in all, the card back to 123 MiB
 after. The MP3: 35.7 s, 96 kbit/s mono 44.1 kHz; **-16.18 LUFS** by pyloudnorm on the decoded file
-(target -16 ± 0.5), true peak -2.3 dBTP (limit -1); no chunk needed a second seed.
+(target -16 ± 0.5), true peak -2.3 dBTP (limit -1); no chunk retry recorded in metrics.json.
+Then the same script **through the worker** (`tools/voice_smoke.py`: the real worker and the
+real papercast-voice, `deploy/tests/fake_hub.py` as the hub): claimed, phases preparing →
+waiting-for-gpu → speaking → encoding reported, 90.7 s in all (engine load 34.6 s with the caches warm), the
+hub received 430,551 bytes of `audio/mpeg` (ID3-tagged), `X-Duration-S` 35.7, sha256 matching
+the voice's; the page's sentences said "Speaking on val-perovskite GPU 0" (not "stibnite").
+The MP3: `~/papercast-group/pcg-voice-smoke-twasx7vj/received.mp3` on perov.
 Not measured: a full-length episode on perov (`measure-gpu`), listening by ear.
 
 ## Running it
@@ -108,6 +114,13 @@ The first admin (local auth): `cd ~/papercast-group/app/papercast-group && set -
 Without a usable `systemd --user` at all, `install.sh` puts `deploy/watchdog.sh` in leo's
 crontab instead (every 2 min: start the hub and the worker if they are not running, `setsid
 nohup nice`; and a nightly line for backup and layout); `watchdog.sh stop|restart` by hand.
+[run 2026-09-28 by hand with the units stopped: both started at nice 10 in their own process
+groups, a second run started nothing, `stop` ended both, `nightly` ran its guarded steps.]
+
+Checked on perov 2026-09-28: `systemctl --user restart` of both units (new pids, active), the
+hub SIGKILLed (back by itself in 5 s, `NRestarts=1`), both timers' services run once (guarded
+messages, `success`), `uninstall.sh` (units, processes and code gone; data, token, voice kept)
+and `install.sh` again (all four active, the same worker token).
 
 ### The voice worker (`voice_worker.py`, SPEC section 9)
 
@@ -272,4 +285,5 @@ an A7/A8 mismatch (`Api.upload() takes 2 positional arguments but 4 were given`)
 | `tunnel.sh` | the quick tunnel |
 | `tests/` | the worker's tests: `fake_hub.py`, `fake_papercast_voice.py`, `test_voice_worker.py` |
 | `../tools/sync_to_perov.sh` | rsync of the repo to perov |
+| `../tools/voice_smoke.py` | one short episode through the worker and the real voice, a fake hub |
 | `../tests/e2e_test.py`, `../tests/fake_claude.py` | the end-to-end test |

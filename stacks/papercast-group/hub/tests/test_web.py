@@ -315,7 +315,8 @@ class Web(unittest.TestCase):
             # v2 without wording: v1's; v3 with its own, as JSON text
             st, j, _ = r.req("POST", "/api/admin/base", {"guideline": "Second."})
             self.assertEqual((st, j["version"]), (201, 2))
-            own = {"classes": [{"id": "test", "phrases": ["never say this"]}]}
+            own = {"classes": [{"id": "test", "wrong": "says a banned phrase", "fix": "Delete it.",
+                                "in": ["script"], "phrases": ["never say this"]}]}
             st, j, _ = r.req("POST", "/api/admin/base", {"guideline": "Third.", "wording": json.dumps(own)})
             self.assertEqual((st, j["version"], j["wording"]), (201, 3, own))
             st, j, _ = r.req("GET", "/api/admin/base")

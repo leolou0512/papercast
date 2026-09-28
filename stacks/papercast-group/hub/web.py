@@ -356,21 +356,15 @@ def put_prefs(req):
 # ---------------------------------------------------------------- base prompt (admin)
 
 def _wording_problems(w) -> list:
-    """The shape common/wording.py reads: classes, each with phrases that compile."""
+    """What common/wording.py's build() refuses (it is the reader, so it is the judge: the
+    listener-name class may be empty there, as the uploader's name fills it at check time)."""
     if not isinstance(w, dict) or not isinstance(w.get("classes"), list) or not w["classes"]:
         return ["wording must be an object with a non-empty list of classes"]
-    out = []
-    for i, c in enumerate(w["classes"]):
-        name = c.get("id", i) if isinstance(c, dict) else i
-        if not isinstance(c, dict) or not isinstance(c.get("phrases"), list) or not c["phrases"] \
-                or not all(isinstance(p, str) and p.strip() for p in c["phrases"]):
-            out.append(f"class {name!r}: phrases must be a non-empty list of words")
-            continue
-        try:
-            W._compile(c["phrases"], bool(c.get("case_sensitive")))
-        except Exception as e:          # a phrase that does not compile would check nothing
-            out.append(f"class {name!r}: {e}")
-    return out
+    try:
+        W.build(w)
+    except Exception as e:
+        return [str(e)]
+    return []
 
 
 def _base_rows():

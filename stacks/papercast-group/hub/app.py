@@ -106,6 +106,8 @@ class Request:
                 end = min(int(b), size - 1) if b else size - 1
             elif b:
                 start = max(0, size - int(b))
+            else:                           # "bytes=-" names no range
+                start = size
             if start > end or start >= size:
                 self.send(416, b"", ctype, {"Content-Range": f"bytes */{size}"})
                 return
@@ -203,7 +205,10 @@ def make_handler(cfg: C.Config):
                 if req._body is None and int(self.headers.get("Content-Length") or 0):
                     self.close_connection = True
                 if not req.sent:
-                    req.send_json(e.code, {"error": e.err, "message": e.msg, **e.extra})
+                    try:
+                        req.send_json(e.code, {"error": e.err, "message": e.msg, **e.extra})
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
             except (BrokenPipeError, ConnectionResetError):
                 pass
             except Exception:

@@ -1,0 +1,345 @@
+#!/usr/bin/env python3
+"""A fake `claude` for the pipeline's tests: never calls Anthropic, never spends anyone's usage.
+
+Emits stream-json in the shapes recorded from Claude Code 2.1.283 (Leo's runner's
+tests/fixtures): system/init (tools from --tools, permissionMode from the flag), assistant
+events with tool_use Write + a user tool_result, rate_limit_event, result. It acts as the
+agent too: it writes the files the prompt asks for into its cwd.
+
+State and behaviour live in $FAKE_CLAUDE_DIR, else in `fake-claude/` next to the job dir (the
+pipeline gives Claude Code a clean environment, so a test cannot pass a variable through; the
+cwd is <job>/work or <job>/grader):
+  calls.jsonl     one line per call: argv, cwd, environment names, kind, pid
+  sessions/       the prompts each session has seen (--session-id creates, --resume needs one)
+  scenario.json   what to do (every key optional):
+    paper: {...}                      paper.json the identify turn writes
+    script: kind or {"episode": k, "repair": k, "retry": k}   clean | digits | short | slop |
+                                      listener | none (no file)
+    explainer: kind or per turn       good (a crop and an unsafe SVG) | svg | meta | none
+    cut: none | delete | reword
+    grades: {"<paper title>": "essential"|"strong"|"weak"|"none"}, grade_default
+    grade_garbage: N                  the first N grading calls answer prose
+    limit: {"on": kind, "runs": N, "resets_at": epoch | null, "shape": "rejected" | "text"}
+    transient: {"on": kind, "runs": N}
+    hang: {"on": kind, "runs": N}     write script.md, then sleep until killed
+    badtools: true                    init lists Bash as well
+    lose_session: {"runs": N}         the next N --resume calls find no conversation
+"""
+import json
+import os
+import re
+import sys
+import time
+import uuid
+
+D = os.environ.get("FAKE_CLAUDE_DIR") or \
+    os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(os.getcwd()))), "fake-claude")
+os.makedirs(os.path.join(D, "sessions"), exist_ok=True)
+try:
+    with open(os.path.join(D, "scenario.json")) as fh:
+        SCEN = json.load(fh)
+except (OSError, ValueError):
+    SCEN = {}
+
+WORDS = ("the model learns a path from simple noise to the data and each step follows a "
+         "velocity that a network predicts so the training target is a straight line between "
+         "a noise sample and a data sample which makes the regression easy and stable while "
+         "the results show sharper images with fewer steps than the older methods needed").split()
+UNSAFE_SVG = ('<svg width="200" height="60" onload="alert(1)"><script>alert(2)</script>'
+              '<line x1="10" y1="30" x2="190" y2="30" stroke="currentColor" onclick="alert(3)"/>'
+              '<circle class="hl" cx="10" cy="30" r="6" fill="currentColor"/>'
+              '<text x="100" y="20" text-anchor="middle" fill="currentColor">noise to data</text></svg>')
+POINTS = ["Straight paths from noise to data turn training into a simple regression.",
+          "Sampling needs fewer solver steps than diffusion for the same image quality.",
+          "The same objective covers diffusion paths as a special case."]
+PAPER = {"title": "Flow Matching for Generative Modeling", "authors": ["Yaron Lipman", "Ricky T. Q. Chen"],
+         "year": 2022, "arxiv_id": "2210.02747", "doi": None, "url": "https://arxiv.org/abs/2210.02747"}
+
+
+def arg(argv, name, default=None):
+    if name in argv:
+        i = argv.index(name)
+        if i + 1 < len(argv):
+            return argv[i + 1]
+    return default
+
+
+def out(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def take(name, n):
+    """True for the first n calls (a counter shared by every process)."""
+    path = os.path.join(D, f"{name}.count")
+    try:
+        with open(path) as fh:
+            done = int(fh.read() or 0)
+    except (OSError, ValueError):
+        done = 0
+    if done >= int(n or 0):
+        return False
+    with open(path, "w") as fh:
+        fh.write(str(done + 1))
+    return True
+
+
+def kind_of(prompt):
+    if "Grade all" in prompt and "CHILD:" in prompt:
+        return "grade"
+    if "`paper.json` is not usable yet" in prompt:
+        return "paper_fix"
+    if prompt.startswith("[papercast] You will make one podcast episode"):
+        return "identify"
+    if "One more pass, cuts only" in prompt:
+        return "cut"
+    if "The episode is not finished yet" in prompt:
+        return "repair"
+    if "This is a retry" in prompt:
+        return "retry"
+    if "was interrupted" in prompt:
+        return "interrupted"
+    if "`script.md`: the spoken episode" in prompt:
+        return "episode"
+    return "other"
+
+
+def per_turn(key, kind, default):
+    v = SCEN.get(key)
+    if isinstance(v, dict):
+        return v.get(kind, v.get("default", default))
+    return default if v is None else v
+
+
+def script_text(kind, n_words=3000):
+    if kind == "short":
+        n_words = 400
+    words, i = [], 0
+    while len(words) < n_words:
+        words.append(WORDS[i % len(WORDS)])
+        i += 1
+    paras = [" ".join(words[k:k + 120]).capitalize() + "." for k in range(0, len(words), 120)]
+    if kind == "digits":
+        paras[0] = "In 2023 the authors reported 3.5 times fewer steps. " + paras[0]
+    elif kind == "slop":
+        paras.insert(0, "At its heart the method is a testament to straight paths.")
+    elif kind == "listener":
+        paras.insert(0, "Alice, the straight path is the whole trick here.")
+    return "# Flow Matching for Generative Modeling\n\n" + "\n\n".join(paras) + "\n"
+
+
+def explainer_text(kind):
+    figs = [{"crop": "page=1;box=0.1,0.1,0.9,0.5", "caption": "The first page of the paper, with its title and abstract."},
+            {"svg": UNSAFE_SVG, "caption": "A straight path joins a noise sample to a data sample."}]
+    points = list(POINTS)
+    if kind == "svg":
+        figs = figs[1:]
+    elif kind == "meta":
+        points = ["Flow Matching: three things the audio can't show"] + points
+        figs[0]["caption"] = "Paper crops, each with what to look for."
+    return json.dumps({"points": points, "figures": figs}, indent=1) + "\n"
+
+
+CLAIMS = """---
+title: Flow Matching for Generative Modeling
+authors: [Yaron Lipman, Ricky T. Q. Chen]
+year: 2022
+tags: [generative models, flow matching]
+---
+- Regressing a vector field along straight probability paths trains continuous normalizing flows without simulation.
+- Optimal transport paths sample faster than diffusion paths at the same quality.
+"""
+
+
+class Agent:
+    def __init__(self, sid, model):
+        self.sid, self.model, self.n = sid, model, 0
+
+    def assistant(self, block):
+        self.n += 1
+        out({"type": "assistant", "message": {"model": self.model + "-20260101", "id": "msg_" + uuid.uuid4().hex[:12],
+             "type": "message", "role": "assistant", "content": [block], "stop_reason": None,
+             "usage": {"input_tokens": 10, "cache_creation_input_tokens": 300,
+                       "cache_read_input_tokens": 8000 + 500 * self.n, "output_tokens": 40}},
+             "parent_tool_use_id": None, "session_id": self.sid, "uuid": str(uuid.uuid4())})
+
+    def write(self, rel, content):
+        path = os.path.join(os.getcwd(), rel)
+        tid = "toolu_" + uuid.uuid4().hex[:16]
+        self.assistant({"type": "tool_use", "id": tid, "name": "Write",
+                        "input": {"file_path": path, "content": content[:200]}})
+        with open(path, "w") as fh:
+            fh.write(content)
+        out({"type": "user", "message": {"role": "user", "content": [
+            {"tool_use_id": tid, "type": "tool_result", "content": f"File created successfully at: {path}"}]},
+            "parent_tool_use_id": None, "session_id": self.sid})
+
+    def read(self, rel):
+        self.assistant({"type": "tool_use", "id": "toolu_" + uuid.uuid4().hex[:16], "name": "Read",
+                        "input": {"file_path": os.path.join(os.getcwd(), rel)}})
+
+    def result(self, text="", is_error=False, extra=None):
+        r = {"type": "result", "subtype": "success", "is_error": is_error, "duration_ms": 50,
+             "num_turns": self.n, "result": text, "stop_reason": "end_turn", "session_id": self.sid,
+             "total_cost_usd": 0.0, "modelUsage": {self.model: {"contextWindow": 200000}},
+             "permission_denials": [], "terminal_reason": "completed", "uuid": str(uuid.uuid4())}
+        r.update(extra or {})
+        out(r)
+
+
+def grade_answer(prompt):
+    grades = SCEN.get("grades") or {}
+    default = SCEN.get("grade_default", "weak")
+    answers, child = [], None
+    for line in prompt.splitlines():
+        m = re.match(r'^CHILD: "(.*)" \(', line)
+        if m:
+            child = m.group(1)
+            continue
+        m = re.match(r'^\s*\[(\d+)\] "(.*)" \(', line)
+        if m:
+            parent = m.group(2)
+            g = grades.get(parent) or grades.get(child) or default
+            answers.append({"i": int(m.group(1)), "g": g})
+    return json.dumps({"answers": answers})
+
+
+def limited(agent, lim):
+    at = lim.get("resets_at")
+    if lim.get("shape", "rejected") == "rejected":
+        info = {"status": "rejected", "rateLimitType": "five_hour", "overageStatus": "rejected",
+                "isUsingOverage": False}
+        if at:
+            info["resetsAt"] = int(at)
+        out({"type": "rate_limit_event", "rate_limit_info": info, "session_id": agent.sid})
+        text = f"Claude AI usage limit reached|{int(at)}" if at else "Claude AI usage limit reached"
+        err = {"error": "rate_limit"}
+    else:
+        out({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed_warning"}, "session_id": agent.sid})
+        text, err = lim.get("text", "You've hit your limit"), {}
+    out({"type": "assistant", "message": {"model": "<synthetic>", "id": "x", "content": [
+        {"type": "text", "text": text}]}, "parent_tool_use_id": None, "session_id": agent.sid, **err})
+    agent.result(text, is_error=True, extra={"terminal_reason": "api_error", "api_error_status": 429})
+    sys.exit(1)
+
+
+def episode_files(agent, kind, need):
+    """The episode's three files (the ones in `need`)."""
+    s = per_turn("script", kind, "clean")
+    e = per_turn("explainer", kind, "good")
+    agent.read("guideline.md")
+    if os.path.exists("paper.pdf"):
+        agent.read("paper.pdf")
+    if "script.md" in need and s != "none":
+        agent.write("script.md", script_text(s))
+    hang = SCEN.get("hang")
+    if isinstance(hang, dict) and hang.get("on") == kind and take("hang", hang.get("runs", 1)):
+        with open(os.path.join(D, f"hanging.{os.getpid()}"), "w") as fh:
+            fh.write(agent.sid)
+        time.sleep(300)
+    if "explainer.json" in need and e != "none":
+        agent.write("explainer.json", explainer_text(e))
+    if "claims.md" in need:
+        agent.write("claims.md", CLAIMS)
+
+
+def main():
+    argv = sys.argv[1:]
+    prompt = arg(argv, "-p", "") or ""
+    model = arg(argv, "--model", "claude-opus-5-5")
+    kind = kind_of(prompt)
+    with open(os.path.join(D, "calls.jsonl"), "a") as fh:
+        fh.write(json.dumps({"argv": argv, "cwd": os.getcwd(), "env": sorted(os.environ),
+                             "kind": kind, "pid": os.getpid(), "t": time.time()}) + "\n")
+    resume = arg(argv, "--resume")
+    sid = resume or arg(argv, "--session-id") or str(uuid.uuid4())
+    spath = os.path.join(D, "sessions", re.sub(r"[^a-zA-Z0-9-]", "", sid) + ".json")
+    agent = Agent(sid, model)
+    if resume:
+        lose = SCEN.get("lose_session")
+        if not os.path.exists(spath) or (isinstance(lose, dict) and take("lose", lose.get("runs", 1))):
+            agent.result("", is_error=True, extra={"subtype": "error_during_execution", "result": None,
+                                                   "errors": [f"No conversation found with session ID: {sid}"]})
+            sys.exit(1)
+    tools = sorted(t for t in (arg(argv, "--tools", "") or "").split(",") if t)
+    if SCEN.get("badtools") and kind != "grade":
+        tools = sorted(tools + ["Bash"])
+    out({"type": "system", "subtype": "init", "cwd": os.getcwd(), "session_id": sid, "tools": tools,
+         "mcp_servers": [], "model": model, "permissionMode": arg(argv, "--permission-mode", "default"),
+         "slash_commands": [], "apiKeySource": "none", "claude_code_version": "2.1.999"})
+    seen = []
+    if "--no-session-persistence" not in argv:
+        try:
+            with open(spath) as fh:
+                seen = json.load(fh)
+        except (OSError, ValueError):
+            seen = []
+        seen.append(kind)
+        with open(spath, "w") as fh:
+            json.dump(seen, fh)
+    lim = SCEN.get("limit")
+    if isinstance(lim, dict) and lim.get("on") == kind and take("limit", lim.get("runs", 1)):
+        limited(agent, lim)
+    tr = SCEN.get("transient")
+    if isinstance(tr, dict) and tr.get("on") == kind and take("transient", tr.get("runs", 1)):
+        text = 'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}'
+        agent.result(text, is_error=True, extra={"api_error_status": 529})
+        sys.exit(1)
+    if kind == "grade":
+        if take("garbage", SCEN.get("grade_garbage", 0)):
+            agent.assistant({"type": "text", "text": "I think these are all related."})
+            agent.result("I think these are all related.")
+            return
+        ans = grade_answer(prompt)
+        agent.assistant({"type": "text", "text": ans})
+        agent.result(ans)
+        return
+    if kind in ("identify", "paper_fix") or (kind in ("retry", "interrupted") and "episode" not in seen[:-1]):
+        paper = SCEN.get("paper", PAPER)
+        if kind == "paper_fix":
+            paper = SCEN.get("paper_fixed", PAPER)
+        if os.path.exists("paper.pdf"):
+            agent.read("paper.pdf")
+        agent.write("paper.json", json.dumps(paper) if isinstance(paper, dict) else str(paper))
+        agent.result("")
+        return
+    if kind in ("episode", "retry", "interrupted"):
+        need = [f for f in ("script.md", "explainer.json", "claims.md")
+                if kind == "episode" or not os.path.exists(f)] or ["script.md", "explainer.json", "claims.md"]
+        episode_files(agent, "episode" if kind == "episode" else "retry", need)
+        agent.result("")
+        return
+    if kind == "repair":
+        s = per_turn("script", "repair", "clean")
+        e = per_turn("explainer", "repair", "svg")
+        if s != "none":
+            agent.write("script.md", script_text(s))
+        if e != "none":
+            agent.write("explainer.json", explainer_text(e))
+        if not os.path.exists("claims.md"):
+            agent.write("claims.md", CLAIMS)
+        agent.result("")
+        return
+    if kind == "cut":
+        c = SCEN.get("cut", "none")
+        if c == "delete":
+            with open("script.md") as fh:
+                paras = fh.read().split("\n\n")
+            del paras[2]
+            agent.write("script.md", "\n\n".join(paras))
+            with open("explainer.json") as fh:
+                ex = json.load(fh)
+            ex["points"] = ex["points"][:-1]
+            agent.write("explainer.json", json.dumps(ex, indent=1))
+        elif c == "reword":
+            with open("script.md") as fh:
+                t = fh.read()
+            agent.write("script.md", t.replace("sharper", "crisper", 1))
+        agent.result("")
+        return
+    agent.assistant({"type": "text", "text": "ok"})
+    agent.result("ok")
+
+
+if __name__ == "__main__":
+    main()

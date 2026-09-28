@@ -1,0 +1,24 @@
+{
+ "about": "Semantic Scholar answers for the pipeline's link tests, in the Graph API's shapes (paper, /references, /citations; key = path, @offset for a later page). Hand-written from the API's documented form, not recorded.",
+ "/paper/ARXIV:2210.02747": {"paperId": "s2fm", "externalIds": {"ArXiv": "2210.02747"},
+                             "title": "Flow Matching for Generative Modeling", "year": 2022},
+ "/paper/s2fm/references": {"offset": 0, "next": 3, "data": [
+   {"isInfluential": true, "citedPaper": {"paperId": "s2ddpm", "externalIds": {"ArXiv": "2006.11239"},
+     "title": "Denoising Diffusion Probabilistic Models", "year": 2020}},
+   {"isInfluential": false, "citedPaper": {"paperId": "s2sde", "externalIds": {"ArXiv": "2011.13456v2", "DOI": null},
+     "title": "Score-Based Generative Modeling through Stochastic Differential Equations", "year": 2020}},
+   {"isInfluential": false, "citedPaper": null}
+ ]},
+ "/paper/s2fm/references@3": {"offset": 3, "data": [
+   {"isInfluential": false, "citedPaper": {"paperId": "s2adam", "externalIds": {"ArXiv": "1412.6980"},
+     "title": "Adam: A Method for Stochastic Optimization", "year": 2014}},
+   {"isInfluential": false, "citedPaper": {"paperId": "s2node", "externalIds": {},
+     "title": "Neural Ordinary Differential Equations", "year": 2018}}
+ ]},
+ "/paper/s2fm/citations": {"offset": 0, "data": [
+   {"isInfluential": true, "citingPaper": {"paperId": "s2sd3", "externalIds": {"ArXiv": "2403.03206"},
+     "title": "Scaling Rectified Flow Transformers for High-Resolution Image Synthesis", "year": 2024}},
+   {"isInfluential": false, "citingPaper": {"paperId": "s2ppo", "externalIds": {},
+     "title": "Proximal Policy Optimization Algorithms", "year": 2017}}
+ ]}
+}

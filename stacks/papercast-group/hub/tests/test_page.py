@@ -218,7 +218,8 @@ class PageBase(unittest.TestCase):
             self.as_user(user)
         b = self.b
         b.goto(self.base + "/")
-        b.js("localStorage.removeItem('pcg.last'); localStorage.removeItem('pcg.sort'); sessionStorage.removeItem('pcg.tag')")
+        b.js("localStorage.removeItem('pcg.last'); localStorage.removeItem('pcg.sort'); sessionStorage.removeItem('pcg.tag');"
+             " sessionStorage.removeItem('pcg.filters'); sessionStorage.removeItem('pcg.q')")
         b.goto(self.base + "/")
         b.wait_js("document.querySelectorAll('#rows .row').length > 0", 10, "page started")
 

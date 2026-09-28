@@ -20,7 +20,8 @@ write (the paper is copied or downloaded there):
     meta.json lookup.json claim.json prompt.json prefs.json links.json
     out/                   script.md explainer.json claims.md as checked and cut (frozen)
     cut/                   the pre-cut copies (cut.py), out of the agent's reach
-    explainer.html manifest.json bundle.tar.gz upload.json result.json
+    text.txt               the PDF's text (pdftotext), for the links and the hub's search
+    explainer.html paper.txt manifest.json bundle.tar.gz upload.json result.json
 
 Steps, each skipped when state.json says it is done, so a job killed anywhere (sleep, reboot,
 a closed terminal, Claude's usage limit) runs again from where it stopped:
@@ -31,7 +32,8 @@ a closed terminal, Claude's usage limit) runs again from where it stopped:
   episode   script.md, explainer.json, claims.md; the checks with one repair turn; the cut pass
   explainer explainer.html from explainer.json (crops when poppler is installed)
   links     Semantic Scholar references and citations in the library, graded by haiku
-  bundle    manifest.json + the files, validated (common.bundle), tar.gz
+  bundle    manifest.json + the files (and the paper's text, for the hub's search, when
+            pdftotext made one), validated (common.bundle), tar.gz
   upload    POST /api/cli/episodes; then the hub's checking state is polled
 
 Results: {"status": "uploaded" | "rejected", "episode_id", "paper_id", "state", ...};
@@ -1185,10 +1187,22 @@ class Job:
                 "paper_id": c.get("paper_id") if c.get("mode") == "version" else None,
                 "paper": paper,
                 "files": {"script": "script.md", "explainer_json": "explainer.json",
-                          "explainer_html": "explainer.html", "claims": "claims.md"},
+                          "explainer_html": "explainer.html", "claims": "claims.md",
+                          **({"paper_text": "paper.txt"} if self._paper_text() is not None else {})},
                 "links": lk.get("links") or [],
                 "stats": {"words": ep.get("words"), "est_minutes": ep.get("minutes"),
                           "wall_s": round(wall)}}
+
+    def _paper_text(self) -> bytes | None:
+        """The paper's own text for the hub's search (never shown to anyone): text.txt, which
+        the links step pulled out of the PDF, as UTF-8 and at most 2 MB; None without one."""
+        try:
+            with open(self.p("text.txt"), "rb") as fh:
+                data = fh.read(cbundle.PAPER_TEXT_MAX + 4)
+        except OSError:
+            return None
+        data = cbundle.paper_text(data)
+        return data if data.strip() else None
 
     def _bundle(self, force: bool = False) -> None:
         if not force and self.done("bundle") and os.path.isfile(self.p("bundle.tar.gz")):
@@ -1199,6 +1213,10 @@ class Job:
                  "explainer.json": self.p("out", "explainer.json"),
                  "explainer.html": self.p("explainer.html"),
                  "claims.md": self.p("out", "claims.md")}
+        text = self._paper_text()
+        if text is not None:
+            write_bytes(self.p("paper.txt"), text)
+            files["paper.txt"] = self.p("paper.txt")
         problems = cbundle.validate(m, set(files) | {"manifest.json"})
         problems += self._hub_checks(m, files)
         if problems:

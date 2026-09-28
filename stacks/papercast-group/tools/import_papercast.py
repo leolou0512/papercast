@@ -9,7 +9,9 @@ Sources, only ever read (never written, never moved):
   year, arxiv_id, doi, tags; created_at; the runner's state), final/ (script.md,
   explainer.html, claims.md, meta.json; final/audio/episode.mp3 once voiced), cut/explainer.json
   (the explainer's source; final/ keeps only the built page), voice/status.json (the MP3's
-  duration). paper.pdf, concepts.md, text, chat and agent logs are not imported.
+  duration), text.txt (the PDF's text: it becomes the episode's paper.txt, which the hub only
+  searches, never shows; at most 2 MB). paper.pdf, concepts.md, chat and agent logs are not
+  imported.
 - --lineage (NAS_setup/stacks/papercast/web/static/lineage.json): the links, graphs[].edges as
   [parent, child, grade, ...] (parent = the earlier paper), each graph's settled positions
   (nodes[].x/y), and papers{} for the cleaned title, the map label, the corrected year and url.
@@ -27,7 +29,8 @@ are the seed graphs, with members added or removed where his differ from the tag
 positions as the map layout. No graph_log rows: the import is the starting state, not an edit.
 
 Run again, it adds only what is new: ids come from Leo's folder names, files are copied only when
-missing, rows only when absent (an episode that was waiting and now has its MP3 becomes ready).
+missing, rows only when absent (an episode that was waiting and now has its MP3 becomes ready; one
+imported before paper.txt was carried gets its paper.txt, and the hub's search picks it up).
 """
 from __future__ import annotations
 
@@ -50,7 +53,9 @@ LINEAGE = Path("/home/leo/NAS_setup/stacks/papercast/web/static/lineage.json")
 S2_FROM = Path("/home/leo/papercast-itest/lineage/lineage.json")
 WPM = 150                                                     # the hub's estimate (SPEC.md section 6)
 COPY = [("script.md", "final/script.md"), ("explainer.html", "final/explainer.html"),
-        ("explainer.json", "cut/explainer.json"), ("claims.md", "final/claims.md"), ("meta.json", "final/meta.json")]
+        ("explainer.json", "cut/explainer.json"), ("claims.md", "final/claims.md"), ("meta.json", "final/meta.json"),
+        ("paper.txt", "text.txt")]
+PAPER_TEXT_MAX = 2 * 1024 * 1024       # common/bundle.py's limit for the paper's text
 
 
 def _json(p: Path):
@@ -159,6 +164,7 @@ class Plan:
         self.found, self.c = found, c
         self.papers = {}            # leo_id -> hub paper id
         self.new_papers, self.matched, self.new_eps, self.have_eps, self.gain_audio = [], [], [], [], []
+        self.gain_text = []         # imported before, without the paper's text: it is copied now
         batch = {}                  # (column, value) -> paper id, for papers this import makes
         for e in found["entries"]:
             keys = db.identity(e)
@@ -187,6 +193,8 @@ class Plan:
                 self.have_eps.append(e)
                 if known[1] == "waiting-for-gpu" and "audio.mp3" in e["files"]:
                     self.gain_audio.append(e)
+                if "paper.txt" in e["files"]:
+                    self.gain_text.append(e)
             else:
                 self.new_eps.append(e)
         self.links_ok, self.links_missing_end, self.links_present, self.links_self = [], [], [], []
@@ -233,7 +241,7 @@ class Plan:
             f"episodes: {len(self.new_eps)} new, made by {maker or '(no --maker yet: needed for --apply)'}"
             + (f"; {len(self.gain_audio)} imported before now have their MP3" if self.gain_audio else ""),
             f"  with script {n('script.md')}, explainer page {n('explainer.html')}, explainer.json {n('explainer.json')}, "
-            f"claims {n('claims.md')}, meta {n('meta.json')}",
+            f"claims {n('claims.md')}, meta {n('meta.json')}, the paper's text {n('paper.txt')} (for the search only)",
             f"  with audio {n('audio.mp3')} ({mb(audio_b)}, {hours:.1f} h) -> ready; "
             f"{len(E) - n('audio.mp3')} without -> waiting-for-gpu",
             f"  Leo's states: " + ", ".join(f"{s} {sum(1 for e in E if e['leo_state'] == s)}"
@@ -264,11 +272,19 @@ class Plan:
 
 
 def _copy(src: Path, dst: Path) -> bool:
-    """src -> dst unless dst is there; through a .part file, so a crash leaves no half file."""
+    """src -> dst unless dst is there; through a .part file, so a crash leaves no half file.
+    The paper's text is cut to PAPER_TEXT_MAX, between two characters, as the CLI cuts it."""
     if dst.exists():
         return False
     tmp = dst.with_name(dst.name + ".part")
-    shutil.copyfile(src, tmp)
+    if dst.name == "paper.txt":
+        with open(src, "rb") as f:
+            data = f.read(PAPER_TEXT_MAX + 4).decode("utf-8", "replace").replace("\x00", "").encode("utf-8")
+        if len(data) > PAPER_TEXT_MAX:
+            data = data[:PAPER_TEXT_MAX].decode("utf-8", "ignore").encode("utf-8")
+        tmp.write_bytes(data)
+    else:
+        shutil.copyfile(src, tmp)
     os.replace(tmp, dst)
     return True
 
@@ -285,6 +301,10 @@ def apply(plan: Plan, data: Path, maker_email: str, maker_name: str, queue_voice
         d.mkdir(parents=True, exist_ok=True)
         for name, src in e["files"].items():
             done["files"] += _copy(src, d / name)
+    for e in plan.gain_text:                       # the hub's search notices it within minutes
+        d = cfg.episodes / episode_id(e["leo_id"])
+        if d.is_dir():
+            done["files"] += _copy(e["files"]["paper.txt"], d / "paper.txt")
     with db.transaction():
         u = c.execute("SELECT id FROM users WHERE email = ?", (maker_email,)).fetchone()
         if u:

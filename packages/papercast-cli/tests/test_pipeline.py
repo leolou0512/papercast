@@ -118,8 +118,10 @@ class FullJob(PipelineCase):
             m = json.load(tf.extractfile("manifest.json"))
             html = tf.extractfile("explainer.html").read()
             script = tf.extractfile("script.md").read()
+        text = {"paper.txt"} if pdf.available()["text"] else set()          # the PDF's text, for the hub's search
         self.assertEqual(names, {"manifest.json", "script.md", "explainer.json", "explainer.html",
-                                 "claims.md"})
+                                 "claims.md"} | text)
+        self.assertEqual(m["files"].get("paper_text"), "paper.txt" if text else None)
         self.assertEqual(cbundle.validate(m, names), [])
         self.assertTrue(html.lower().startswith(b"<!doctype html"))
         self.assertLessEqual(len(html), 8 << 20)
@@ -350,6 +352,47 @@ class Limit(PipelineCase):
         self.assertEqual(r["status"], "uploaded")
         self.assertEqual(self.kinds(), ["identify", "episode", "cut", "grade", "grade"])
         self.assertEqual(len(self.jread("links.json")["links"]), 3)
+
+
+class PaperText(PipelineCase):
+    """The paper's own text goes to the hub for its search (never shown): what pdftotext made
+    of the PDF, as UTF-8, at most 2 MB; without pdftotext the bundle simply has none."""
+
+    @unittest.skipUnless(pdf.available()["text"], "pdftotext is not installed")
+    def test_the_pdfs_text_is_in_the_bundle(self):
+        self.scenario()
+        self.write_job()
+        api = FakeApi()
+        self.run_job(api)
+        with tarfile.open(self.jpath("bundle.tar.gz"), "r:gz") as tf:
+            sent = tf.extractfile("paper.txt").read()
+        with open(self.jpath("text.txt"), "rb") as fh:
+            self.assertEqual(sent, fh.read())
+        self.assertIn(b"Flow Matching", sent)
+        self.assertEqual(api.uploads[0]["manifest"]["files"]["paper_text"], "paper.txt")
+
+    def test_a_long_text_is_cut_to_2_mb(self):
+        self.scenario()
+        self.write_job()
+        from papercast_cli.pipeline.run import Job
+        job = Job(self.job, FakeApi(), lambda *a: None)
+        with open(self.jpath("text.txt"), "wb") as fh:
+            fh.write(("word " * 500_000).encode())
+        got = job._paper_text()
+        self.assertEqual(len(got), cbundle.PAPER_TEXT_MAX)
+        os.unlink(self.jpath("text.txt"))
+        self.assertIsNone(job._paper_text())
+
+    def test_without_pdftotext_there_is_none(self):
+        pdf.DISABLED.add("pdftotext")
+        self.scenario()
+        self.write_job()
+        api = FakeApi()
+        r = self.run_job(api)
+        self.assertEqual(r["status"], "uploaded")
+        self.assertNotIn("paper_text", api.uploads[0]["manifest"]["files"])
+        with tarfile.open(self.jpath("bundle.tar.gz"), "r:gz") as tf:
+            self.assertNotIn("paper.txt", tf.getnames())
 
 
 class Explainer(PipelineCase):

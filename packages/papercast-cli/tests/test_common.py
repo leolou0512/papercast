@@ -450,6 +450,25 @@ class Bundle(unittest.TestCase):
         self.assertIn("'../../etc/passwd'", got[0])
         self.assertEqual(bundle.validate(manifest(), NAMES_OK | {"extra.txt"}), [])  # ignored
 
+    def test_paper_text(self):
+        """The paper's own text, for the hub's search: optional, a plain name in the bundle,
+        at most 2 MB; paper_text() makes any bytes into that."""
+        m = manifest()
+        m["files"]["paper_text"] = "paper.txt"
+        self.assertEqual(bundle.validate(m, NAMES_OK | {"paper.txt"}), [])
+        self.assertIn("files.paper_text names 'paper.txt', which is not in the bundle", bundle.validate(m, NAMES_OK))
+        m["files"]["paper_text"] = "../paper.txt"
+        self.assertIn("files.paper_text", " ".join(bundle.validate(m, NAMES_OK)))
+        m["files"]["paper_text"] = "paper.txt"
+        big = dict({n: 1000 for n in NAMES_OK}, **{"paper.txt": bundle.PAPER_TEXT_MAX + 1})
+        self.assertIn("files.paper_text: paper.txt is 2.0 MB, at most 2.0 MB", " ".join(bundle.validate(m, big)))
+        self.assertEqual(bundle.paper_text(b"plain text"), b"plain text")
+        self.assertEqual(bundle.paper_text(b"a\x00b \xff c"), "ab \ufffd c".encode())
+        long = ("é" * (bundle.PAPER_TEXT_MAX // 2 + 10)).encode()          # 2 bytes a letter
+        cut = bundle.paper_text(long)
+        self.assertLessEqual(len(cut), bundle.PAPER_TEXT_MAX)
+        self.assertEqual(cut.decode("utf-8"), "é" * (len(cut) // 2))       # cut between two letters
+
     def test_sizes(self):
         sizes = {n: 1000 for n in NAMES_OK}
         big = dict(sizes, **{"script.md": checks.SCRIPT_MAX_BYTES + 1})

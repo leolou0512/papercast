@@ -612,11 +612,25 @@ class TestRevisions(Base):
         self.assertIsNone(log["redo"]["any"])
         self.link(a, c)                                             # my own new change: nothing of mine to redo
         self.assertIsNone(h.ok("GET", "/api/graph-log")["redo"]["mine"])
+        # a new change that was undone and redone since is still a new change
+        h.undo()                                                    # a->c undone
+        self.assertIsNotNone(h.ok("GET", "/api/graph-log")["redo"]["mine"])
+        st, js = h.undo(redo=True)                                  # a->c back
+        self.assertEqual(st, 200)
+        self.assertIsNone(h.ok("GET", "/api/graph-log")["redo"]["mine"], "a->b's old undo is redoable after a->c came back")
+        self.assertEqual(h.link_row(a, b)["state"], "removed")
         # undo, undo, then redo, redo walks forward again
-        h.undo()
-        h.undo()                                                    # the b->c link is Bob's: mine is a->b's undo
+        x, y, z = h.paper("Xi paper", 2021), h.paper("Ypsilon paper", 2022), h.paper("Zeta paper", 2023)
+        self.link(x, y)
+        self.link(y, z)
+        h.undo()                                                    # y->z
+        h.undo()                                                    # x->y
+        st, js = h.undo(redo=True)                                  # x->y again
+        self.assertEqual(h.link_row(x, y)["state"], "active")
         log = h.ok("GET", "/api/graph-log")
-        self.assertEqual(log["redo"]["mine"]["kind"], "undo")
+        self.assertEqual(log["redo"]["mine"]["target"], str(h.link_row(y, z)["id"]), "y->z cannot be redone")
+        h.undo(redo=True)
+        self.assertEqual(h.link_row(y, z)["state"], "active")
 
     def test_graph_events_carry_the_revision(self):
         h, a, b, gid = self.h, self.a, self.b, self.gid
@@ -710,6 +724,10 @@ class TestSuggestions(Base):
         self.assertEqual(h.req("POST", f"/api/link-suggestions/{sb['id']}/accept", {})[1]["error"], "dismissed")
         self.assertTrue(h.ok("POST", f"/api/link-suggestions/{sb['id']}/dismiss")["already"])
         self.assertEqual(h.req("POST", "/api/link-suggestions/999/accept", {})[0], 404)
+        # accepting again changes nothing, not even who accepted it
+        who = db.conn().execute("SELECT decided_by FROM link_suggestions WHERE id = ?", (sa["id"],)).fetchone()[0]
+        self.assertTrue(h.ok("POST", f"/api/link-suggestions/{sa['id']}/accept", {}, who="bob")["already"])
+        self.assertEqual(db.conn().execute("SELECT decided_by FROM link_suggestions WHERE id = ?", (sa["id"],)).fetchone()[0], who)
 
     def test_the_rules_as_for_links(self):
         h, a, b, c = self.h, self.a, self.b, self.c
@@ -733,6 +751,14 @@ class TestSuggestions(Base):
         st, js = h.req("POST", f"/api/link-suggestions/{sug[(q, r)]}/accept", {})
         self.assertEqual((st, js["error"]), (409, "cycle"))
         self.assertIsNone(h.link_row(q, r))
+        # a person removed the pair's link since: accepting the old suggestion does not bring it back
+        self.assertEqual(self.upload(h.paper("Sigma paper", 2023, ["sg"]), [(r, "builds_on", "s")])["suggested"], 1)
+        t = h.ok("GET", "/api/graphs/" + self.gid)["suggestions"][-1]
+        lk2 = self.link(t["src"], t["dst"], "w", who="bob")
+        h.ok("DELETE", f"/api/links/{lk2['id']}", who="bob")
+        st, js = h.req("POST", f"/api/link-suggestions/{t['id']}/accept", {})
+        self.assertEqual((st, js["error"]), (409, "removed"))
+        self.assertEqual(h.link_row(t["src"], t["dst"])["state"], "removed")
         # the pair got linked by hand meanwhile: accepting is done already, no second row
         self.link(a, c, "w")
         js = h.ok("POST", f"/api/link-suggestions/{sug[(a, c)]}/accept", {})
@@ -756,6 +782,7 @@ class TestSuggestions(Base):
         self.mode("auto")
         self.assertEqual(len(self.view(gid)["suggestions"]), 3)
         self.assertEqual(h.req("POST", "/api/link-suggestions/accept-all", {}, who="alice")[0], 403)
+        self.assertEqual(h.req("POST", "/api/link-suggestions/accept-all", {"graph_id": [gid]}, who="root")[0], 400)
         n = h.log_count()
         js = h.ok("POST", "/api/link-suggestions/accept-all", {"graph_id": gid}, who="root")
         self.assertEqual((js["accepted"], js["skipped"]), (3, []))

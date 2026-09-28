@@ -843,10 +843,12 @@ def _reaches(adj, a, b, skip=None) -> bool:
     return False
 
 
-def _depths(c, rows) -> dict:
-    """Revert-chain depth of each row: 0 a change, odd an undo, even (> 0) a redo."""
+def _depths(c, rows, roots=None) -> dict:
+    """Revert-chain depth of each row: 0 a change, odd an undo, even (> 0) a redo. With `roots`
+    (a dict), each row's change at the start of its chain goes there too."""
     known = {r["id"]: r for r in rows}
     depth: dict = {}
+    root: dict = {} if roots is None else roots
     for r in rows:
         chain, rid = [], r["id"]
         while rid is not None and rid not in depth:
@@ -859,9 +861,12 @@ def _depths(c, rows) -> dict:
             chain.append(rid)
             rid = x["revert_of"]
         base = depth.get(rid, -1) if rid is not None else -1
+        top = root.get(rid) if rid is not None else None
         for x in reversed(chain):
             base += 1
             depth[x] = base
+            top = x if top is None else top
+            root[x] = top
     return depth
 
 
@@ -1236,11 +1241,14 @@ on_paper_created = resolve_pending
 def _candidates(c, user) -> dict:
     """Among the newest 100 ops: per scope, the change to undo (the newest un-reverted change or
     redo), the undo to redo, and the newest un-reverted row of any kind. `mine` is the person's
-    own edits (not the agent's links from their uploads). As in an editor, a new change in scope
-    after an undo leaves nothing to redo there (a redo does not: redo, redo, redo walks back)."""
+    own edits (not the agent's links from their uploads). As in an editor, a change made after an
+    undo leaves nothing to redo there, also when that change was undone and redone since; redoing
+    older undos does not (undo, undo, then redo, redo walks forward again): an undo can be redone
+    while no change in effect (un-reverted, or redone) in scope is newer than it."""
     rows = c.execute("SELECT * FROM graph_log ORDER BY id DESC LIMIT ?", (UNDO_WINDOW,)).fetchall()
-    depth = _depths(c, rows)
-    res = {s: {"undo": None, "redo": None, "latest": None, "changed": False} for s in ("mine", "any")}
+    roots: dict = {}
+    depth = _depths(c, rows, roots)
+    res = {s: {"undo": None, "redo": None, "latest": None, "newest": 0} for s in ("mine", "any")}
     for r in rows:
         if r["reverted_by"] is not None:
             continue
@@ -1253,13 +1261,12 @@ def _candidates(c, user) -> dict:
             if slot["latest"] is None:
                 slot["latest"] = r
             if kind == "redo":
-                if slot["redo"] is None and not slot["changed"]:
+                if slot["redo"] is None and slot["newest"] < r["id"]:
                     slot["redo"] = r
             else:
                 if slot["undo"] is None:
                     slot["undo"] = r
-                if d == 0:
-                    slot["changed"] = True
+                slot["newest"] = max(slot["newest"], roots.get(r["id"], r["id"]))   # the change it has in effect
     return res
 
 
@@ -1674,9 +1681,12 @@ def _accept(c, w, adj, user_id, s):
     src, dst = s["src"], s["dst"]
     row = c.execute("SELECT * FROM links WHERE src = ? AND dst = ?", (src, dst)).fetchone()
     if row is not None and row["state"] == "active":
-        c.execute("UPDATE link_suggestions SET state = 'accepted', decided_by = ?, decided_at = ?, link_id = ? WHERE id = ?",
-                  (user_id, db.now(), row["id"], s["id"]))
+        if s["state"] == "open":
+            c.execute("UPDATE link_suggestions SET state = 'accepted', decided_by = ?, decided_at = ?, link_id = ? WHERE id = ?",
+                      (user_id, db.now(), row["id"], s["id"]))
         return "exists", _link_snap(row), None
+    if row is not None:
+        return "removed", None, None
     ps, pd = _paper_row(c, src), _paper_row(c, dst)
     if ps["year"] and pd["year"] and ps["year"] > pd["year"]:
         return "order", None, None
@@ -1710,6 +1720,8 @@ def h_accept(req, sid):
         if not (cur and cur[0] == "active"):
             _fresh(c, w, bg, base)
         outcome, link, lid = _accept(c, w, _adj(c), req.user["id"], s)
+        if outcome == "removed":
+            raise HTTPError(409, "removed", "a person removed that link: it stays removed (add it by hand to bring it back)")
         if outcome == "order":
             raise HTTPError(400, "order", "the earlier paper must be the one built on")
         if outcome == "cycle":
@@ -1746,6 +1758,8 @@ def h_accept_all(req):
     graph) the rules still allow becomes the admin's link, one log row each."""
     ensure_schema()
     gid = req.json().get("graph_id")
+    if gid is not None and not isinstance(gid, str):
+        raise HTTPError(400, "bad_graph", "graph_id is a graph's id")
     ids, sids, skipped, gids = [], [], [], []
     with _tx() as c:
         w, adj = _world(), _adj(c)
@@ -1754,10 +1768,6 @@ def h_accept_all(req):
             raise HTTPError(404, "not_found", "no such graph")
         for s in c.execute("SELECT * FROM link_suggestions WHERE state = 'open' ORDER BY id").fetchall():
             if mem is not None and not (s["src"] in mem and s["dst"] in mem):
-                continue
-            row = c.execute("SELECT state FROM links WHERE src = ? AND dst = ?", (s["src"], s["dst"])).fetchone()
-            if row is not None and row[0] == "removed":
-                skipped.append({"id": s["id"], "reason": "removed"})
                 continue
             outcome, link, lid = _accept(c, w, adj, req.user["id"], s)
             if outcome in ("accepted", "exists"):

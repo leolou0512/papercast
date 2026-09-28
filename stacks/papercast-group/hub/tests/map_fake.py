@@ -387,9 +387,16 @@ class FakeHub:
 
     def candidates(self, me):
         """graph.py's _candidates: per scope, the change (or redo) to undo and the undo to redo among
-        the newest 100; `mine` is the person's own edits; a new change leaves nothing to redo."""
+        the newest 100; `mine` is the person's own edits; a change in effect newer than an undo
+        leaves it nothing to redo."""
         newest = sorted(self.s["log"], key=lambda e: -e["id"])[:100]
-        res = {s: {"undo": None, "redo": None, "changed": False} for s in ("mine", "any")}
+        byid = {y["id"]: y for y in self.s["log"]}
+
+        def root(e):
+            while e.get("revert_of") is not None and e["revert_of"] in byid:
+                e = byid[e["revert_of"]]
+            return e["id"]
+        res = {s: {"undo": None, "redo": None, "newest": 0} for s in ("mine", "any")}
         for e in newest:
             if e["reverted_by"] is not None:
                 continue
@@ -399,13 +406,12 @@ class FakeHub:
                     continue
                 slot = res[scope]
                 if d % 2:
-                    if slot["redo"] is None and not slot["changed"]:
+                    if slot["redo"] is None and slot["newest"] < e["id"]:
                         slot["redo"] = e
                 else:
                     if slot["undo"] is None:
                         slot["undo"] = e
-                    if d == 0:
-                        slot["changed"] = True
+                    slot["newest"] = max(slot["newest"], root(e))
         return res
 
     def affected(self, e):

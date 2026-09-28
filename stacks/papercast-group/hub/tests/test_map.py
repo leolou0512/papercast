@@ -1400,6 +1400,39 @@ class MapTest(unittest.TestCase):
         self.tap_button(".pm-card", "Dismiss")
         self.wait(f"{M}.state().pending === 0 && {M}.state().sugg.n === 1", "dismissed")
 
+    # ------------------------------------------------------------------ 24. a read that overtakes an edit's answer
+    def test_24_a_read_overtaking_my_edit_does_not_make_my_next_edit_stale(self):
+        self.http_errors_ok = True
+        self.open()
+        # my regrade lands on the hub at once, its answer comes late; a read overtakes it
+        self.hub.lag[("PUT", r"^/api/links/5$")] = 1.2
+        self.js(f"{M}.selectLink(5)")
+        self.js("document.querySelector('#map .pm-card .pm-seg [data-grade=e]').click()")
+        self.until(lambda: self.hub.s["links"][5]["grade"] == "e", "the regrade on the hub")
+        self.js("H.map.refresh()")
+        self.wait(f"{M}.state().rev === 8 && {M}.state().pending === 1", "the read, before the answer")
+        # my next edit, made now, goes after the answer: with the revision the regrade made
+        self.js(f"{M}.selectLink(4)")
+        self.press(".pm-card", "Remove link")
+        self.wait(f"{M}.state().pending === 0", "both answered", 5)
+        self.assertFalse(self.hub.active(4), "my own quick edit was refused")
+        self.assertEqual(self.revs_sent("DELETE", r"^/api/links/4"), [(RL, 8)])
+        self.assertIsNone(self.msg() if (self.msg() or "").endswith("Try again.") else None)
+        # the same, with Bob's change in between: an edit made before the read goes as it was made
+        self.hub.lag[("PUT", r"^/api/links/1$")] = 1.2
+        self.js(f"{M}.selectLink(1)")
+        self.js("document.querySelector('#map .pm-card .pm-seg [data-grade=w]').click()")
+        self.until(lambda: self.hub.s["links"][1]["grade"] == "w", "the regrade on the hub")
+        self.js(f"{M}.selectLink(3)")
+        self.js("document.querySelector('#map .pm-card .pm-seg [data-grade=w]').click()")        # made on revision 9
+        self.hub.change_as(BOB, "rename", RL, "RL by Bob")                                        # revision 11
+        self.js("H.map.refresh()")
+        self.wait(f"{M}.state().rev === 11", "the read with Bob's change")
+        self.wait(f"{M}.state().pending === 0", "answered", 5)
+        self.assertEqual(self.revs_sent("PUT", r"^/api/links/3$"), [(RL, 9)])          # as it was made: refused
+        self.assertEqual(self.hub.s["links"][3]["grade"], "e", "an edit made before Bob's change went through")
+        self.wait("(m => !m.hidden && m.textContent.startsWith('Bob just changed'))(document.querySelector('#map .pm-msg'))", "said")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -949,27 +949,34 @@
     var EQ = Promise.resolve();
     function seen(g) { return g && !g.tmp && g.rev != null ? { g: g, rev: g.rev, ep: g.revEp || 0 } : null; }
     function send(sn, method, path, body) {
+      var g = sn && sn.g, out = false;
       var p = EQ.then(function () {
         var b = body, q = "";
-        if (sn && sn.g.rev != null) {
-          var base = (sn.g.revEp || 0) === sn.ep ? sn.g.rev : sn.rev;
-          if (method === "DELETE") q = (path.indexOf("?") < 0 ? "?" : "&") + "base_rev=" + base + "&graph_id=" + encodeURIComponent(sn.g.id);
-          else b = Object.assign({}, body || {}, { base_rev: base, graph_id: sn.g.id });
+        if (g && g.rev != null) {
+          var base = (g.revEp || 0) === sn.ep ? g.rev : sn.rev;
+          if (method === "DELETE") q = (path.indexOf("?") < 0 ? "?" : "&") + "base_rev=" + base + "&graph_id=" + encodeURIComponent(g.id);
+          else b = Object.assign({}, body || {}, { base_rev: base, graph_id: g.id });
         }
+        if (g) { g.inflight = (g.inflight || 0) + 1; out = true; }
         return call(method, path + q, b);
       });
       // the next edit waits for this one's answer, but not for ever (a request the network lost)
       EQ = Promise.race([p.then(function () {}, function () {}), new Promise(function (res) { setTimeout(res, 10000); })]);
-      return p.then(function (r) { took(r); return r; });
+      var landed = function () { if (out && !--g.inflight) g.seenRv = null; };
+      return p.then(function (r) { took(r); landed(); return r; }, function (err) { landed(); throw err; });
     }
-    // an edit's answer: the graphs it changed are at these revisions now (one up from what is
-    // drawn: it is what is drawn; more: someone else's change is in between, so ask again)
+    // An edit's answer: the graphs it changed are at these revisions now. One up from what is
+    // drawn: it is what is drawn now. Drawn already (the hub's answer to a read overtook this
+    // one): someone else's change is in it only when that read saw a newer revision than this
+    // edit made (`seenRv`), and then the edits people made before it came go as they were made.
     function took(r) {
       var revs = r && r.revs;
       if (!revs || typeof revs !== "object") return;
       Object.keys(revs).forEach(function (id) {
         var g = byId[id], nr = revs[id];
-        if (!g || !g.data || g.rev == null || nr == null || nr === g.rev) return;
+        if (!g || !g.data || g.rev == null || nr == null) return;
+        if (g.seenRv != null && g.seenRv > nr) { g.revEp = (g.revEp || 0) + 1; return; }
+        if (nr === g.rev) return;
         if (nr === g.rev + 1) g.rev = nr; else { g.stale = true; if (g === cur) soon({ graph: true }); }
       });
     }
@@ -982,11 +989,12 @@
       if (!g) return true;
       if (b.deleted) { soon({ list: true, log: true }); say(quote(g.meta.name) + " was deleted meanwhile."); return true; }
       if (b.by && b.actor === "human") editedBy(g, b.by, b.at);
-      reload(g).then(function () {
+      g.revEp = (g.revEp || 0) + 1;              // the edits made before this answer came go as they were made
+      reload(g).then(function (ok) {
         loadList(); loadLog(true);
         var who = b.actor !== "human" ? (b.actor === "agent" ? "An upload just changed" : "This graph just changed") :
-          isMe(b.by) ? "You changed this graph in another window" : (nameOf(b.by) || "Someone") + " just changed";
-        say(who + (/changed$/.test(who) ? " this graph" : "") + "; it’s up to date now. Try again.");
+          isMe(b.by) ? "An edit of yours just changed" : (nameOf(b.by) || "Someone") + " just changed";
+        say(who + " this graph; " + (ok ? "it’s up to date now. Try again." : "it could not be loaded again: " + (g.loadErr || "the hub did not answer") + "."));
       });
       return true;
     }
@@ -2000,24 +2008,28 @@
       g.loadErr = null;
       var seq = (g.seq || 0) + 1; g.seq = seq;
       var s0 = settled, n0 = ++LOADS.n;
-      var done = function () { g.waiters = (g.waiters || []).filter(function (w) { if (n0 > w.after) { w.res(); return false; } return true; }); };
+      var done = function (ok) { g.waiters = (g.waiters || []).filter(function (w) { if (n0 > w.after) { w.res(ok); return false; } return true; }); };
       g.busy = call("GET", "/api/graphs/" + encodeURIComponent(g.id)).then(function (r) {
         if (settled !== s0) { g.again = true; return; }
         g.data = normGraph(r); g.stale = false;
         if (r && r.graph) Object.assign(g.meta, normMeta(r.graph), g.mp || {});
         // the revision of what is drawn now (a new one from here, not from an edit of ours: note it)
+        // (an edit of ours on its way: the new revision may be only that edit's; its answer says)
         var rv = r && (r.rev != null ? r.rev : r.graph && r.graph.rev);
-        if (rv != null) { if (g.rev != null && rv !== g.rev) g.revEp = (g.revEp || 0) + 1; g.rev = rv; }
+        if (rv != null) {
+          if (g.rev != null && rv !== g.rev) { if (g.inflight) g.seenRv = Math.max(g.seenRv || 0, rv); else g.revEp = (g.revEp || 0) + 1; }
+          g.rev = rv;
+        }
         if (r && r.graph && r.graph.changed) editedBy(g, r.graph.changed.by, r.graph.changed.at, r.graph.changed.actor);
         rebuild(g);
         if (g === cur) { afterChange(); applyWant(true); }
         else renderTabs();
-        done();
+        done(true);
       }, function (err) {
         g.loadErr = errText(err);
         if (err.status === 404) { g.stale = true; soon({ list: true }); }
         if (g === cur) renderEmpty();
-        done();
+        done(false);
       }).then(function () {
         g.busy = null;
         if (g.again) { g.again = false; loadGraph(g); }

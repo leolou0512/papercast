@@ -336,7 +336,7 @@ class TestGraphs(Base):
             self.assertIsInstance(n["x"], float)
             self.assertEqual(n["title"], db.conn().execute("SELECT title FROM papers WHERE id = ?", (n["id"],)).fetchone()[0])
         self.assertEqual(len(v["links"]), 6)
-        self.assertEqual(set(v["links"][0]), {"id", "src", "dst", "grade", "origin"})
+        self.assertEqual(set(v["links"][0]), {"id", "src", "dst", "grade", "origin", "created_at", "by"})
         # labels: set, cleared, undone
         r = h.ok("PUT", f"/api/papers/{b}/label", {"label": "  My   B "})
         self.assertEqual(r["paper"], {"id": b, "label": "My B", "custom": True})

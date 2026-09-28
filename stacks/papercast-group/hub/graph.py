@@ -322,8 +322,9 @@ def _world() -> _World:
         for r in c.execute("SELECT graph_id, paper_id, how FROM graph_members"):
             w.how[r[0]][r[1]] = r[2]
         w.members = {gid: _members(g, w.how.get(gid, {}), papers) for gid, g in w.graphs.items()}
-        w.links = [dict(r) for r in c.execute("SELECT id, src, dst, grade, origin FROM links "
-                                              "WHERE state = 'active' ORDER BY id")]
+        w.links = [dict(r) for r in c.execute(
+            "SELECT l.id, l.src, l.dst, l.grade, l.origin, l.created_at, l.created_by, u.name AS by_name "
+            "FROM links l LEFT JOIN users u ON u.id = l.created_by WHERE l.state = 'active' ORDER BY l.id")]
         w.pos = defaultdict(dict)
         for r in c.execute("SELECT graph_id, paper_id, x, y FROM layout"):
             w.pos[r[0]][r[1]] = (r[2], r[3])
@@ -505,7 +506,9 @@ def _view(gid: str):
     current = st.get("sig") == layout_sig(ids, [(l["src"], l["dst"]) for l in links]) and len(placed) == len(ids)
     view = {"graph": _graph_item(w, g),
             "nodes": nodes,
-            "links": [{"id": l["id"], "src": l["src"], "dst": l["dst"], "grade": l["grade"], "origin": l["origin"]}
+            "links": [{"id": l["id"], "src": l["src"], "dst": l["dst"], "grade": l["grade"], "origin": l["origin"],
+                       "created_at": l.get("created_at"),     # the map's link card: "added by the agent for Alice"
+                       "by": {"id": l["created_by"], "name": l.get("by_name")} if l.get("created_by") is not None else None}
                       for l in links],
             **info,
             "layout": {"rev": st.get("rev", 0), "updated_at": st.get("updated_at"), "current": current}}

@@ -1,19 +1,33 @@
 """The hub's database: SQLite at $PCG_DATA/hub.db (SPEC.md section 3).
 
 The schema below is the contract. A1 owns this file: migrations, indexes, and the helpers named
-in SPEC.md section 3. Columns may be added, never renamed. JSON columns hold text."""
+in SPEC.md section 3. Columns may be added, never renamed. JSON columns hold text.
+
+SCHEMA is version 1 and stays as it is; every later change is a numbered migration after it
+(MIGRATIONS), so a database made by any earlier version reaches the same shape as a new one.
+meta.schema_version says which migrations have run.
+
+    python3 -m hub.db migrate [--data DIR]     migrations, then the seeds (seed_defaults)
+    python3 -m hub.db version [--data DIR]     the database's schema version
+
+app.serve() calls migrate() only; the seeds (base prompt v1, wording, the five topic graphs) come
+from `python3 -m hub.db migrate`, which the install runs, so a test's empty database stays empty."""
 from __future__ import annotations
 
+import argparse
+import base64
+import hashlib
+import importlib.util
 import json
 import re
 import secrets
 import sqlite3
+import sys
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 1
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
@@ -206,6 +220,47 @@ CREATE TABLE IF NOT EXISTS voice_jobs (
 );
 """
 
+# ---- migrations: version n turns a version n-1 database into version n. Each runs once, in one
+# transaction with the version bump, and is written so that running it again changes nothing.
+
+def _columns(c, table: str) -> set:
+    return {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
+
+
+def _add_column(c, table: str, column: str, decl: str) -> None:
+    if column not in _columns(c, table):
+        c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
+def _m2_paper_label(c) -> None:
+    """papers.label: the short name a node wears on the map ("Reverse-time SDE"). Leo's
+    hand-made labels come in with the import; NULL means the map derives one from the title."""
+    _add_column(c, "papers", "label", "TEXT")
+
+
+# Lookups on columns that grow with the library and that no primary key or UNIQUE covers.
+# tools/loadcheck.py measures them (1,000 fake papers, 2026-09-28: every page query under 7 ms
+# with or without these; a paper's parents 0.12 -> 0.01 ms). Small tables (claims, tokens) need none.
+M3_INDEXES = [
+    ("links_dst", "links(dst)"),                          # a paper's parents: UNIQUE(src, dst) serves only src
+    ("episodes_made_by", "episodes(made_by)"),            # someone's own episodes: cli ?mine=1, the voice fairness
+    ("voice_jobs_state", "voice_jobs(state, queued_at)"),  # the voice queue, oldest first
+    ("graph_log_user", "graph_log(user_id, id)"),         # revert scope "mine": one user's newest ops
+]
+
+
+def _m3_indexes(c) -> None:
+    """The indexes in M3_INDEXES."""
+    for name, on in M3_INDEXES:          # one statement at a time: executescript() would commit
+        c.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {on}")
+
+
+MIGRATIONS = [
+    (2, _m2_paper_label),
+    (3, _m3_indexes),
+]
+SCHEMA_VERSION = MIGRATIONS[-1][0] if MIGRATIONS else 1      # what migrate() brings a database to
+
 # ---- small helpers every module uses (A1 may extend, never change their meaning)
 
 def now() -> str:
@@ -273,7 +328,211 @@ def conn() -> sqlite3.Connection:
     return c
 
 
-def migrate() -> None:
-    c = conn()
-    c.executescript(SCHEMA)
-    c.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
+def close() -> None:
+    """Close this thread's connection (tests, tools that switch data dirs)."""
+    c = getattr(_local, "c", None)
+    if c is not None:
+        c.close()
+    _local.c = _local.path = None
+
+
+def schema_version(c=None) -> int:
+    c = c or conn()
+    try:
+        r = c.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+    except sqlite3.OperationalError:          # no meta table: an empty file
+        return 0
+    return int(r[0]) if r else 0
+
+
+_migrate_lock = threading.Lock()
+
+
+def migrate() -> int:
+    """Bring hub.db to SCHEMA_VERSION: the version 1 tables where missing, then each migration
+    not yet run, in order. Safe to call at every start, from several processes at once (each
+    step re-reads the version inside its own write transaction). Returns the version."""
+    with _migrate_lock:
+        c = conn()
+        c.executescript(SCHEMA)                  # CREATE ... IF NOT EXISTS: a no-op once there
+        c.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '1')")
+        v = schema_version(c)
+        if v > SCHEMA_VERSION:
+            raise RuntimeError(f"hub.db is at schema version {v}, newer than this code "
+                               f"({SCHEMA_VERSION}): update the hub before starting it")
+        for n, fn in MIGRATIONS:
+            if n <= v:
+                continue
+            with transaction() as t:
+                if schema_version(t) >= n:       # another process got there first
+                    continue
+                fn(t)
+                t.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(n),))
+        return schema_version(c)
+
+
+def meta_get(key: str, default=None):
+    r = conn().execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return r[0] if r else default
+
+
+def meta_set(key: str, value: str) -> None:
+    conn().execute("INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                   (key, value))
+
+
+# ---- paper identity (SPEC.md section 3)
+
+def identity(keys: dict) -> list:
+    """[(column, value)] for a paper's identity keys, normalised, in the SPEC's order: arXiv id
+    without its version, DOI lowercased, the PDF's sha256, the normalised title."""
+    ax = re.sub(r"v\d+$", "", re.sub(r"^arxiv:", "", (keys.get("arxiv_id") or "").strip(), flags=re.I))
+    return [(col, val) for col, val in (
+        ("arxiv_id", ax), ("doi", (keys.get("doi") or "").strip().lower()),
+        ("source_sha256", (keys.get("source_sha256") or "").strip().lower()),
+        ("title_norm", norm_title(keys.get("title") or ""))) if val]
+
+
+def find_paper(keys: dict, c=None):
+    """The paper these keys name, or None: the first key (identity() order) that matches any
+    paper decides. Returns a sqlite3.Row. `c`: another connection (a read-only one, say)."""
+    c = c or conn()
+    for col, val in identity(keys):
+        if val:
+            r = c.execute(f"SELECT * FROM papers WHERE {col} = ? ORDER BY created_at, id LIMIT 1", (val,)).fetchone()
+            if r is not None:
+                return r
+    return None
+
+
+# ---- seeds: what a new hub starts with (python3 -m hub.db migrate)
+
+# Leo's five topics, with the tags each one gathers: the GROUPS of his lineage build
+# (papercast-itest/lineage/build.py), the same lists as graphs[].tags in its lineage.json.
+SEED_GRAPHS = [
+    ("rl", "Reinforcement learning",
+     ["reinforcement learning", "policy gradient", "value-based learning", "offline learning",
+      "game playing", "sparse rewards", "multi-agent learning", "online learning",
+      "policy iteration", "imitation learning"]),
+    ("gen", "Diffusion and generative models",
+     ["diffusion", "generative models", "text-to-image", "fast sampling", "video generation",
+      "image generation", "flow matching", "image editing", "discrete diffusion", "guidance",
+      "audio synthesis", "3d generation"]),
+    ("mat", "Materials and molecules",
+     ["materials discovery", "interatomic potentials", "crystal generation", "crystal structures",
+      "materials synthesis", "chemical synthesis", "graph neural networks", "symmetry",
+      "protein design"]),
+    ("lm", "Language models", ["language models"]),
+    ("robot", "Robotics and agents", ["robotic manipulation", "sim-to-real", "vision language agents"]),
+]
+
+GROUP_DIR = Path(__file__).resolve().parent.parent          # stacks/papercast-group
+REPO_DIR = GROUP_DIR.parent.parent
+
+
+def seed_graph_id(key: str) -> str:
+    """A seed graph's id, the same on every hub ("rl" -> "g_" + 10 base32), so the import and
+    the fake data can find it however it was renamed since."""
+    h = hashlib.sha256(b"papercast-group seed graph " + key.encode()).digest()
+    return "g_" + base64.b32encode(h).decode().lower()[:10]
+
+
+def _common_dirs() -> list:
+    """Where papercast_cli/common lives: the repo's copy, then an installed package."""
+    out = [REPO_DIR / "packages" / "papercast-cli" / "papercast_cli" / "common"]
+    try:
+        spec = importlib.util.find_spec("papercast_cli")
+    except (ImportError, ValueError):
+        spec = None
+    if spec is not None and spec.submodule_search_locations:
+        out += [Path(p) / "common" for p in spec.submodule_search_locations]
+    return out
+
+
+def seed_sources() -> dict:
+    """The files the seeds come from (a key is absent when no file was found): `guideline`
+    = prompts/base-guideline.md, else common/base_guideline.md; `wording` = common/wording.json."""
+    out = {}
+    for p in [GROUP_DIR / "prompts" / "base-guideline.md"] + [d / "base_guideline.md" for d in _common_dirs()]:
+        if p.is_file():
+            out["guideline"] = p
+            break
+    for p in [d / "wording.json" for d in _common_dirs()]:
+        if p.is_file():
+            out["wording"] = p
+            break
+    return out
+
+
+def seed_defaults(cfg=None) -> dict:
+    """What a new hub starts with, added once and never again (idempotent):
+    - base prompt version 1 (the guideline file and wording.json, see seed_sources()), when
+      there is no base prompt yet and the guideline file exists; skipped otherwise, so a later
+      run seeds it once the file lands;
+    - the five topic graphs (SEED_GRAPHS), once: meta `seeded.graphs` remembers, so a seed
+      graph an admin deleted stays deleted.
+    Returns what it added: {"base_prompt": version | None, "graphs": [ids]}."""
+    if cfg is not None and _path != Path(cfg.data) / "hub.db":
+        init(cfg)
+    migrate()
+    src = seed_sources()
+    out = {"base_prompt": None, "graphs": []}
+    with transaction() as c:
+        have = c.execute("SELECT COUNT(*) FROM base_prompts").fetchone()[0]
+        if not have and "guideline" in src:
+            text = src["guideline"].read_text(encoding="utf-8")
+            wording = json.loads(src["wording"].read_text(encoding="utf-8")) if "wording" in src else {}
+            c.execute("INSERT INTO base_prompts(version, guideline, wording, created_by, created_at) VALUES (1, ?, ?, NULL, ?)",
+                      (text, dumps(wording), now()))
+            out["base_prompt"] = 1
+        if c.execute("SELECT 1 FROM meta WHERE key = 'seeded.graphs'").fetchone() is None:
+            t = now()
+            for key, name, tags in SEED_GRAPHS:
+                gid = seed_graph_id(key)
+                cur = c.execute("INSERT OR IGNORE INTO graphs(id, name, rule_tags, locked, created_by, created_at) "
+                                "VALUES (?, ?, ?, 0, NULL, ?)", (gid, name, dumps(tags), t))
+                if cur.rowcount:
+                    out["graphs"].append(gid)
+            c.execute("INSERT INTO meta(key, value) VALUES ('seeded.graphs', ?)", (t,))
+    return out
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog="python3 -m hub.db", description="The hub's database.")
+    ap.add_argument("command", choices=["migrate", "version"])
+    ap.add_argument("--data", help="the data dir (default: $PCG_DATA, as the hub reads it)")
+    a = ap.parse_args(argv)
+    from . import config as C
+    if a.data:
+        cfg = C.Config(data=Path(a.data))
+    else:
+        import os
+        cfg = C.Config(data=Path(os.environ.get("PCG_DATA", str(Path.home() / "papercast-group" / "data"))))
+    if a.command == "version":
+        if not (cfg.data / "hub.db").exists():
+            print(f"{cfg.data / 'hub.db'}: no database")
+            return 1
+        init(cfg)
+        print(schema_version())
+        return 0
+    cfg.data.mkdir(parents=True, exist_ok=True)
+    (cfg.data / "episodes").mkdir(exist_ok=True)
+    init(cfg)
+    before = schema_version()
+    v = migrate()
+    seeded = seed_defaults(cfg)
+    src = seed_sources()
+    print(f"{cfg.data / 'hub.db'}: schema version {before} -> {v}")
+    if seeded["base_prompt"]:
+        print(f"seeded base prompt v1 from {src['guideline']}" + (f" and {src['wording']}" if "wording" in src else " (no wording.json found: wording {})"))
+    elif not conn().execute("SELECT 1 FROM base_prompts LIMIT 1").fetchone():
+        print("no base prompt yet: neither prompts/base-guideline.md nor common/base_guideline.md exists")
+    if seeded["graphs"]:
+        print(f"seeded {len(seeded['graphs'])} topic graphs")
+    return 0
+
+
+if __name__ == "__main__":
+    # run as the package's module, not as a second copy called __main__ with its own connection
+    from hub import db as _db
+    sys.exit(_db.main())

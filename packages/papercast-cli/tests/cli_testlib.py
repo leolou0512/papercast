@@ -50,6 +50,7 @@ class FakeHub:
         self.prefs_put = True
         self.episodes: list[dict] = []
         self.lookup = {"paper": None, "claim": None}
+        self.slack = None           # {"enabled", "channel", "default"}; None: a hub without Slack (404)
         self.fail_next: list[int] = []            # statuses answered before anything else
         self.html_paths: set[str] = set()
         self.uploads: list[bytes] = []
@@ -123,6 +124,11 @@ class FakeHub:
                         return self._send(200, hub.prefs)
                 if p == "/api/cli/lookup":
                     return self._send(200, hub.lookup)
+                if p == "/api/cli/features" and hub.slack is not None:
+                    return self._send(200, {"slack": hub.slack})
+                if p == "/api/cli/slack" and method == "PUT" and hub.slack is not None:
+                    hub.slack = dict(hub.slack, default=body["default"])
+                    return self._send(200, hub.slack)
                 if p == "/api/cli/episodes" and method == "GET":
                     return self._send(200, {"episodes": hub.episodes})
                 if p == "/api/cli/episodes" and method == "POST":

@@ -71,7 +71,7 @@ OWNED = frozenset({"id", "state", "attempts", "interruptions", "pid", "created_a
                    "updated_at",
                    "started_at", "finished_at", "error", "question", "resume_at", "input", "kind",
                    "source", "source_name", "source_sha256", "yes", "version_of", "model",
-                   "client_version", "claude_bin"})
+                   "client_version", "claude_bin", "announce"})
 
 NOT_INSTALLED = ("Claude Code is not installed here (no `claude` on PATH). papercast runs Claude "
                  "Code on this computer under your own Claude login. Install it "
@@ -316,8 +316,9 @@ def duplicate_of(inp: dict) -> dict | None:
 
 
 def create(inp: dict, *, version_of: str | None = None, model: str | None = None,
-           yes: bool = False) -> dict:
-    """A new queued job for one parsed input (a PDF is copied into the job dir)."""
+           yes: bool = False, announce: dict | None = None) -> dict:
+    """A new queued job for one parsed input (a PDF is copied into the job dir). `announce`:
+    add's answer to "Post to #channel when it's ready?", {"slack": bool}, for the manifest."""
     config.private_dir(config.jobs_dir())
     jid = _new_id()
     d = job_dir(jid)
@@ -327,7 +328,7 @@ def create(inp: dict, *, version_of: str | None = None, model: str | None = None
            "created_t": t, "input": inp["input"], "kind": inp["kind"], "url": inp.get("url"),
            "arxiv_id": inp.get("arxiv_id"), "doi": inp.get("doi"),
            "source": None, "source_name": None, "source_sha256": None,
-           "version_of": version_of, "yes": bool(yes), "model": model,
+           "version_of": version_of, "yes": bool(yes), "model": model, "announce": announce,
            "device": config.load().get("device") or config.default_device(),
            "claude_bin": shutil.which("claude"),
            "state": "queued", "phase": None, "progress": None, "detail": None,
@@ -865,7 +866,7 @@ def retry(job: dict, yes: bool = False) -> dict:
             inp.update(path=str(d / (job.get("source") or "source.pdf")),
                        name=job.get("source_name"), source_sha256=job.get("source_sha256"))
         new = create(inp, version_of=job.get("paper_id") or job.get("version_of"),
-                     model=job.get("model"), yes=True)
+                     model=job.get("model"), yes=True, announce=job.get("announce"))
         update(d, superseded_by=new["id"])
         return new
     if st in ("running", "queued"):

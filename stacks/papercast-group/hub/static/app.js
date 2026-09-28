@@ -1144,7 +1144,7 @@
   // ------------------------------------------------------------------ settings
   // Preferences (how this person's own versions are made), Devices (where papercast is logged
   // in as them), and for admins Users and the Base prompt. Each tab reads the hub when opened.
-  const TABS = [["prefs", "Preferences"], ["devices", "Devices"], ["account", "Account", false, true], ["users", "Users", true], ["base", "Base prompt", true]];
+  const TABS = [["prefs", "Preferences"], ["devices", "Devices"], ["account", "Account", false, true], ["users", "Users", true], ["base", "Base prompt", true], ["slack", "Slack", true]];
   const PREF_TEXT = {
     maths: ["Maths", { words: "In words", "key-steps": "Key steps", full: "Full derivations" },
       "In words only, the key steps, or the whole derivation walked through (the equations go on the explainer page)."],
@@ -1182,7 +1182,7 @@
     }, label)));
     const body = $("set-body");
     body.replaceChildren(el("p", { class: "muted intro", id: "set-loading", text: "Loading…" }));
-    ({ prefs: prefsTab, devices: devicesTab, account: accountTab, users: passwordMode() ? peopleTab : usersTab, base: baseTab })[S.setTab](body);
+    ({ prefs: prefsTab, devices: devicesTab, account: accountTab, users: passwordMode() ? peopleTab : usersTab, base: baseTab, slack: slackTab })[S.setTab](body);
   }
   const stillOn = (t) => S.view === "settings" && S.setTab === t;
   const failed = (body, e) => body.replaceChildren(el("p", { class: "err", text: e.message }));
@@ -1240,6 +1240,34 @@
       el("div", { class: "pref" }, el("p", { class: "pref-h", text: "Note" }), note, count),
       sumLine,
       el("div", { class: "save-row" }, save, msg));
+    slackPref(body);
+  }
+
+  // papercast add's Slack question (hub/slack.py): this person's answer on Enter, saved at once.
+  // Shown when the hub has Slack set up, to those who can add papers.
+  async function slackPref(body) {
+    let j;
+    try { j = await api("GET", "/api/slack"); } catch (e) { return; }
+    if (!stillOn("prefs") || !j.enabled || !j.can_upload) return;
+    const old = $("pref-slack");
+    if (old) old.remove();
+    const msg = el("span", { class: "ok", id: "slack-msg", role: "status" });
+    const seg = el("div", { class: "seg", role: "radiogroup", "aria-label": `Post to ${j.channel}` });
+    const draw = () => seg.replaceChildren(...[[true, "Yes"], [false, "No"]].map(([v, label]) => el("button", {
+      type: "button", role: "radio", "aria-checked": String(j.default === v), "data-v": String(v),
+      onclick: async () => {
+        if (j.default === v) return;
+        const was = j.default;
+        j.default = v; draw(); msg.className = "ok"; msg.textContent = "";
+        try { const r = await api("PUT", "/api/slack", { default: v }); j.default = r.default; draw(); msg.textContent = "Saved"; }
+        catch (e) { j.default = was; draw(); msg.className = "err"; msg.textContent = e.message; }
+      },
+    }, label)));
+    draw();
+    body.append(el("div", { class: "pref", "data-k": "slack", id: "pref-slack" },
+      el("p", { class: "pref-h sec", text: `Post my new episodes to ${j.channel}` }), seg,
+      el("p", { class: "muted", text: "papercast add asks each time; this is the answer when you just press Enter, or when it runs without a terminal. Saved at once." }),
+      msg));
   }
 
   async function devicesTab(body) {
@@ -1587,6 +1615,39 @@
       body.replaceChildren(...kids);
     };
     draw();
+  }
+
+  // Slack (admins): whether it is set up, where it posts, a test message, the last 20 posts.
+  const SLACK_STATE = { posted: "posted", pending: "waiting", sending: "sending", retrying: "trying again", failed: "failed", skipped: "not posted" };
+  async function slackTab(body) {
+    let j;
+    try { j = await api("GET", "/api/admin/slack"); } catch (e) { if (stillOn("slack")) failed(body, e); return; }
+    if (!stillOn("slack")) return;
+    const status = el("p", { id: "slack-status", class: j.configured ? "ok" : "err",
+      text: j.configured ? `Set up: episodes whose makers say yes are posted to ${j.channel} when they are ready.` : `Not set up: ${j.problem}` });
+    const res = el("span", { class: "ok", id: "slack-test-msg", role: "status" });
+    const test = el("button", { type: "button", class: "btn-accent", id: "slack-test", text: "Send test message", disabled: !j.configured });
+    test.addEventListener("click", async () => {
+      test.disabled = true; res.className = "ok"; res.textContent = "Sending…";
+      try {
+        const r = await api("POST", "/api/admin/slack/test", {});
+        res.className = r.ok ? "ok" : "err"; res.textContent = r.ok ? `Sent to ${j.channel}` : r.detail;
+      } catch (e) { res.className = "err"; res.textContent = e.message; }
+      test.disabled = false;
+    });
+    const posts = j.posts || [];
+    const ul = el("ul", { class: "items", id: "slack-posts" }, posts.map((p) => el("li", { class: "item", "data-id": p.episode_id, "data-state": p.state },
+      el("div", { class: "it-main" },
+        el("div", { class: "it-t", text: p.title || p.episode_id }),
+        el("div", { class: "it-s", text: [p.made_by && p.made_by.name ? `by ${p.made_by.name}` : "", SLACK_STATE[p.state] || p.state,
+          when(p.sent_at || p.updated_at || p.created_at), p.attempts > 1 ? `${p.attempts} tries` : ""].filter(Boolean).join(" · ") }),
+        p.detail ? el("div", { class: "it-s" }, el("span", { class: p.state === "skipped" ? "" : "warn", text: p.detail })) : null))));
+    if (!posts.length) ul.replaceChildren(el("li", { class: "muted intro", text: "Nothing announced yet." }));
+    body.replaceChildren(
+      el("p", { class: "intro", text: `papercast add asks each maker whether to post their episode to ${j.channel}; the hub posts it with its link once the audio is ready. The webhook address stays in a file on the hub (${j.setting} in hub.env).` }),
+      status,
+      el("div", { class: "save-row" }, test, res),
+      el("p", { class: "pref-h sec", text: "Last 20" }), ul);
   }
 
   // ------------------------------------------------------------------ live events

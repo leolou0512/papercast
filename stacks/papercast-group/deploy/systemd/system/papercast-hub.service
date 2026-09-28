@@ -1,0 +1,54 @@
+# papercast-group hub: the web page, the CLI's API and the voice queue, on 127.0.0.1 only (the
+# Cloudflare tunnel is the way in). A system unit run as the service account @USER@, installed by
+# deploy/install.sh --system (@H@ is the install, /srv/papercast on perov). HANDOVER.md says how
+# to look after it.
+[Unit]
+Description=papercast-group hub (127.0.0.1 only)
+Documentation=file://@H@/HANDOVER.md
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@USER@
+Group=@USER@
+EnvironmentFile=@H@/etc/hub.env
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=@H@/app/current/papercast-group
+# run_hub.py, not `-m hub.app`: see its docstring (one HTTPError class, not two).
+ExecStart=@H@/venv/bin/python @H@/app/current/papercast-group/deploy/run_hub.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+# Shared machine: stay out of other people's way.
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+# New files are readable by the group papercast (the admins), never by others.
+UMask=0027
+# The hub itself is small (stdlib HTTP, SQLite, the layout's numpy): a runaway stops here.
+MemoryMax=4G
+# Hardening: it writes only under @H@ (and there only where the account owns the files: data/,
+# backups/, cache/), never sees anyone's home, gets no privileges and no devices.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=@H@
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

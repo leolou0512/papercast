@@ -1,0 +1,64 @@
+# papercast-group voice worker: takes finished scripts from the hub, one at a time, and voices
+# them with papercast-voice (Breeze TTS 2 on this machine's GPU, waiting while anyone else uses
+# it). A system unit run as @USER@, installed by deploy/install.sh --system; @H@ is the install.
+[Unit]
+Description=papercast-group voice worker (Breeze on the local GPU)
+Documentation=file://@H@/HANDOVER.md
+After=network.target papercast-hub.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@USER@
+Group=@USER@
+EnvironmentFile=@H@/etc/worker.env
+# The voice runs with a cleaned environment (HOME, USER, LANG, PATH): HOME is cache/, so whatever
+# its engines keep in a home (CUDA's, torch's caches) goes there. Its models, compiler caches and
+# Hugging Face home are under @H@/voice.
+Environment=PYTHONUNBUFFERED=1 HOME=@H@/cache XDG_CACHE_HOME=@H@/cache HF_HOME=@H@/cache/huggingface
+WorkingDirectory=@H@
+ExecStart=@H@/venv/bin/python @H@/app/current/papercast-group/deploy/voice_worker.py
+Restart=always
+RestartSec=10
+# Stopping the unit stops the voice it started (the whole cgroup gets SIGTERM). Finished chunks
+# stay on disk, and the next start carries on with the same episode (worker/current.json).
+KillMode=control-group
+TimeoutStopSec=40
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+UMask=0027
+# Measured on stibnite: the Breeze engine process 5.7 GB resident, the orchestrator 1.4 GB at
+# its final check; the CPU voice (Kokoro, only if asked for) 11.8 GB. 24 GB covers either with
+# room, and stops a leak before it reaches other people's jobs (perov has 251 GB, shared).
+MemoryMax=24G
+MemorySwapMax=0
+OOMPolicy=continue
+# Hardening as the hub's, but with the GPU: only the NVIDIA devices (all of /dev/nvidia* are
+# 0666 on perov, so no SupplementaryGroups= is needed; a machine whose nodes belong to a group,
+# video say, would add SupplementaryGroups=video). No PrivateDevices, which would hide them.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=@H@
+ProtectHome=yes
+PrivateTmp=yes
+DevicePolicy=closed
+DeviceAllow=char-nvidia rw
+DeviceAllow=char-nvidia-uvm rw
+DeviceAllow=char-nvidia-caps r
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

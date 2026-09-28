@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
-# The way in from the internet, on perov, and how the hub signs people in. Cloudflare only
-# carries the traffic: a named tunnel from papercast.virtualatoms.org to http://127.0.0.1:8480,
-# which the domain owner makes in his dashboard (README.md "Production"); he sends its token.
-# Sign-in is the hub's own: passwords, with the group's list of allowed Imperial emails.
+# The way in from the internet, and how the hub signs people in. Cloudflare only carries the
+# traffic: a named tunnel from papercast.virtualatoms.org to the hub on http://127.0.0.1:8400
+# (perov's PCG_PORT), which the domain owner made in his dashboard (README.md "Production"); he
+# sent its token. Sign-in is the hub's own: passwords, with the group's list of allowed Imperial
+# emails.
 #
-#   bash deploy/cloudflare.sh tunnel             start the tunnel (token in ~/papercast-group/tunnel.token, 600)
+# Both modes (lib.sh): on perov the system install (units papercast-*, settings and tokens in
+# /srv/papercast/etc; it runs itself under sudo, and papercastctl auth|url|email calls it);
+# elsewhere leo's user install (~/papercast-group, units pcg-*). Paths below are the system's.
+#
+#   bash deploy/cloudflare.sh tunnel             start the tunnel (token in /srv/papercast/etc/tunnel.token, 600;
+#                                                papercastctl tunnel-token FILE puts it there)
 #   bash deploy/cloudflare.sh url --url https://papercast.virtualatoms.org
 #                                                the hub's public address (links, Secure cookies); restarts the hub
 #   bash deploy/cloudflare.sh auth password [--admin EMAIL]...
@@ -15,25 +21,24 @@
 #   bash deploy/cloudflare.sh admins EMAIL...    put these on the list as admins (python3 -m hub.auth bootstrap)
 #   bash deploy/cloudflare.sh email --host smtp.gmail.com --port 587 --user U --from U [--test ADDRESS]
 #                                                the SMTP account for "forgot password" links; the password
-#                                                goes in ~/papercast-group/smtp.password (600), never in hub.env
+#                                                goes in /srv/papercast/etc/smtp.password (600), never in hub.env
 #   bash deploy/cloudflare.sh status
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
-H=${PCG_HOME:-$HOME/papercast-group}
-E=$H/hub.env
+use_mode "$(detect_mode)"
+need_root "$0" "$@"
+E=$ETC/hub.env
 UNITS=$HOME/.config/systemd/user
-PY=$H/venv/bin/python
-APP=$H/app/papercast-group
 ADMINS_DEFAULT="yl6719@ic.ac.uk a.ganose@ic.ac.uk"
 USAGE="usage: cloudflare.sh tunnel | url --url URL | auth password|local|cf-access [...] | admins EMAIL... | email --host H --from F [--user U] [--port P] [--test ADDRESS] | status"
 
-port() { local p; p=$(get_env "$E" PCG_PORT); echo "${p:-8480}"; }
-code_of() { curl -s -m 15 -o /dev/null -w '%{http_code}' "$1" || true; }
-hub() { (cd "$APP" && set -a && . "$E" && set +a && "$PY" -m hub.auth "$@"); }
+port() { hub_port; }
+code_of() { http_code "$1"; }
+hub() { hub_py -m hub.auth "$@"; }
 
 # restart the hub and wait until it answers; prints the code of GET / (000: nothing answered)
 restart_hub() {
-    systemctl --user restart pcg-hub.service
+    sctl restart "$U_HUB.service"
     local c=000
     for _ in $(seq 1 20); do
         c=$(code_of "http://127.0.0.1:$(port)/")
@@ -41,6 +46,17 @@ restart_hub() {
         sleep 1
     done
     echo "${c:-000}"
+}
+
+# the tunnel's log since it last started
+tunnel_log() {
+    if [ "$MODE" = system ]; then
+        local inv
+        inv=$(systemctl show -p InvocationID --value "$U_TUNNEL" 2>/dev/null || true)
+        journalctl --no-pager -o cat "_SYSTEMD_INVOCATION_ID=$inv"
+    else
+        journalctl --user -u "$U_TUNNEL" -n 50 --no-pager
+    fi
 }
 
 admins() {
@@ -53,19 +69,28 @@ admins() {
 cmd=${1:-status}; shift || true
 case "$cmd" in
 tunnel)
-    tok=$H/tunnel.token
-    [ -s "$tok" ] || die "no token at $tok: umask 077; cat > $tok (paste, Enter, Ctrl-D)"
-    chmod 600 "$tok"
-    [ -x "$HOME/.local/bin/cloudflared" ] || die "no cloudflared in ~/.local/bin (deploy/tunnel.sh installs it)"
-    mkdir -p "$UNITS"
-    sed "s#@H@#$H#g" "$APP/deploy/systemd/pcg-tunnel.service" > "$UNITS/pcg-tunnel.service"
-    systemctl --user daemon-reload
-    systemctl --user enable --now pcg-tunnel.service
-    sleep 8
-    if journalctl --user -u pcg-tunnel -n 50 --no-pager | grep -q "Registered tunnel connection"; then
-        echo "tunnel up: $(journalctl --user -u pcg-tunnel -n 50 --no-pager | grep -c 'Registered tunnel connection') connection(s) to Cloudflare"
+    tok=$ETC/tunnel.token
+    if [ "$MODE" = system ]; then
+        [ -s "$tok" ] || die "no token at $tok: papercastctl tunnel-token FILE"
+        [ -z "${PCG_ETC_OWNER:-}" ] || chown "$PCG_ETC_OWNER" "$tok"
+        chmod 600 "$tok"
+        [ -f "$PCG_SYS_UNITS/$U_TUNNEL.service" ] || die "no $U_TUNNEL unit here (install.sh --system first)"
+        systemctl enable -q "$U_TUNNEL.service"
+        systemctl restart "$U_TUNNEL.service"
     else
-        journalctl --user -u pcg-tunnel -n 15 --no-pager
+        [ -s "$tok" ] || die "no token at $tok: umask 077; cat > $tok (paste, Enter, Ctrl-D)"
+        chmod 600 "$tok"
+        [ -x "$HOME/.local/bin/cloudflared" ] || die "no cloudflared in ~/.local/bin (deploy/tunnel.sh installs it)"
+        mkdir -p "$UNITS"
+        sed "s#@H@#$H#g" "$APP/deploy/systemd/pcg-tunnel.service" > "$UNITS/pcg-tunnel.service"
+        systemctl --user daemon-reload
+        systemctl --user enable --now pcg-tunnel.service
+    fi
+    sleep 8
+    if tunnel_log | grep -q "Registered tunnel connection"; then
+        echo "tunnel up: $(tunnel_log | grep -c 'Registered tunnel connection') connection(s) to Cloudflare"
+    else
+        tunnel_log | tail -15 | sed -E 's/eyJ[A-Za-z0-9_=-]{20,}/<token>/g'
         die "the tunnel did not register (above)"
     fi
     ;;
@@ -81,7 +106,7 @@ url)
     case "$url" in https://*) ;; *) die "--url must be https://... (the tunnel's public address)" ;; esac
     set_env "$E" PCG_PUBLIC_URL "$url"
     c=$(restart_hub)
-    [ "$c" != 000 ] || die "the hub does not answer on 127.0.0.1:$(port) (journalctl --user -u pcg-hub)"
+    [ "$c" != 000 ] || die "the hub does not answer on 127.0.0.1:$(port) (logs: papercastctl logs hub, or journalctl --user -u pcg-hub)"
     echo "hub: public address $url (GET / -> $c)"
     ;;
 auth)
@@ -164,9 +189,10 @@ email)
     [ -n "$host" ] && [ -n "$from" ] || die "email needs --host and --from (and --user for a login)"
     case "$from" in *[[:space:]\<\>\"\'\$\`\;\&\|]*|*@*@*) die "--from is the bare address, like papercast.group@gmail.com (the emails say it is from papercast)" ;; *@*) ;; *) die "--from must be an email address" ;; esac
     case "$smtp_port" in 587|465) ;; *) die "--port is 587 (STARTTLS) or 465 (TLS from the start)" ;; esac
-    pw=$H/smtp.password
+    pw=$ETC/smtp.password
     if [ -n "$user" ]; then
-        [ -s "$pw" ] || die "no password at $pw: umask 077; cat > $pw (paste the app password, Enter, Ctrl-D)"
+        [ -s "$pw" ] || die "no password at $pw: umask 077; cat > $pw (paste the app password, Enter, Ctrl-D; or papercastctl email ... --password-file -)"
+        [ -z "${PCG_ETC_OWNER:-}" ] || chown "$PCG_ETC_OWNER" "$pw"
         chmod 600 "$pw"
         set_env "$E" PCG_SMTP_USER "$user"
         set_env "$E" PCG_SMTP_PASSWORD_FILE "$pw"
@@ -182,7 +208,8 @@ email)
     ;;
 status)
     grep -E '^PCG_(AUTH|PUBLIC_URL|CF_TEAM|ADMIN_EMAILS|SMTP_HOST|SMTP_PORT|SMTP_USER|SMTP_FROM)=' "$E" || true
-    for u in pcg-hub pcg-voice pcg-tunnel; do printf '%-11s %s\n' "$u" "$(systemctl --user is-active $u 2>/dev/null || true)"; done
+    w=11; [ "$MODE" = user ] || w=17
+    for u in "$U_HUB" "$U_VOICE" "$U_TUNNEL"; do printf "%-${w}s %s\n" "$u" "$(sctl is-active "$u" 2>/dev/null || true)"; done
     ;;
 *) die "$USAGE" ;;
 esac

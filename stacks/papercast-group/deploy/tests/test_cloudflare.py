@@ -60,7 +60,7 @@ class CloudflareScript(unittest.TestCase):
         self.tmp.cleanup()
 
     def run_sh(self, *args, code="303"):
-        env = {**os.environ, "PCG_HOME": str(self.h), "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_LOG": str(self.log),
+        env = {**os.environ, "PCG_MODE": "user", "PCG_HOME": str(self.h), "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_LOG": str(self.log),
                "FAKE_ROOT_CODE": code, "HOME": self.tmp.name, "PYTHONPATH": str(GROUP) + os.pathsep + str(GROUP.parents[1] / "packages" / "papercast-cli")}
         return subprocess.run(["bash", str(SCRIPT), *args], env=env, capture_output=True, text=True, timeout=120)
 

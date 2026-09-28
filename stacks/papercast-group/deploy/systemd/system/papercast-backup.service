@@ -1,0 +1,39 @@
+# Nightly backup of the hub's data (tools/backup.py: hub.db by SQLite's online backup, episodes/
+# hard-linked to the previous backup where unchanged; the newest 14 kept) into @H@/backups.
+# Started by papercast-backup.timer, or by hand: papercastctl backup-now.
+[Unit]
+Description=papercast-group nightly backup
+Documentation=file://@H@/HANDOVER.md
+
+[Service]
+Type=oneshot
+User=@USER@
+Group=@USER@
+EnvironmentFile=@H@/etc/hub.env
+Environment=PCG_BACKUP_DIR=@H@/backups
+WorkingDirectory=@H@/app/current/papercast-group
+# $$ is a literal $ for the shell (systemd would expand $PCG_DATA itself otherwise).
+ExecStart=/bin/sh -c 'if [ -f tools/backup.py ]; then exec @H@/venv/bin/python tools/backup.py --data "$$PCG_DATA" --dest "$$PCG_BACKUP_DIR"; else echo "tools/backup.py is not installed yet: nothing backed up"; fi'
+Nice=19
+IOSchedulingClass=idle
+UMask=0027
+MemoryMax=4G
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=@H@
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native

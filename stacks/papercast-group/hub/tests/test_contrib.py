@@ -254,13 +254,16 @@ class ContribTest(unittest.TestCase):
         code, out_a = self.h.upload(a, H.bundle(H.manifest(claim_id=acl["claim_id"], paper_over={
             "arxiv_id": "2104.00001", "doi": "10.7777/TWIN", "title": "Twin paper"})))
         self.assertEqual(code, 201)
-        code, out_b = self.h.upload(b, H.bundle(H.manifest(claim_id=bcl["claim_id"], paper_over={
-            "arxiv_id": None, "doi": "doi:10.7777/twin", "title": "Twin paper (journal version)", "year": None})))
+        code, out_b = self.h.upload(b, H.bundle(H.manifest(
+            claim_id=bcl["claim_id"], prefs={"settings": {"emphasis": "weird", "maths": "key-steps"}, "note": 3},
+            paper_over={"arxiv_id": None, "doi": "doi:10.7777/twin", "title": "Twin paper (journal version)",
+                        "year": None})))
         self.assertEqual(code, 201, out_b)
         self.assertEqual((out_b["paper_id"], out_b["new_paper"]), (out_a["paper_id"], False))
         self.assertIsNotNone(db.conn().execute("SELECT done_at FROM claims WHERE id = ?", (bcl["claim_id"],)).fetchone()[0])
         for u, o in ((a, out_a), (b, out_b)):
             self.assertEqual(self.h.wait_checked(u, o["episode_id"])["state"], "waiting-for-gpu")
+        self.assertEqual(self.h.wait_checked(b, out_b["episode_id"])["prefs_summary"], "key steps")
 
     # ---- upload: what a bundle may not be
 
@@ -269,23 +272,25 @@ class ContribTest(unittest.TestCase):
         pid, _ = self.paper(a, 2)
         outside = self.h.tmp / "outside-evil.txt"
         before = sorted(os.listdir(self.h.cfg.episodes))
-        cases = {
-            "absolute path": [({"name": str(outside)}, b"x")],
-            "dot dot": [("../../outside-evil.txt", b"x")],
-            "dot dot in the middle": [("sub/../../../outside-evil.txt", b"x")],
-            "symlink": [({"name": "evil-link", "type": tarfile.SYMTYPE, "linkname": str(self.h.tmp)}, None),
-                        ("evil-link/outside-evil.txt", b"x")],
-            "hard link": [({"name": "evil-hard", "type": tarfile.LNKTYPE, "linkname": "/etc/passwd"}, None)],
-            "char device": [({"name": "evil-dev", "type": tarfile.CHRTYPE, "devmajor": 1, "devminor": 3}, None)],
-            "block device": [({"name": "evil-blk", "type": tarfile.BLKTYPE, "devmajor": 8, "devminor": 0}, None)],
-            "fifo": [({"name": "evil-fifo", "type": tarfile.FIFOTYPE}, None)],
-            "backslash": [("..\\..\\outside-evil.txt", b"x")],
+        cases = {   # the members, and the reason the first guard gives
+            "absolute path": ([({"name": str(outside)}, b"x")], "an absolute path"),
+            "dot dot": ([("../../outside-evil.txt", b"x")], "climbs out with .."),
+            "dot dot in the middle": ([("sub/../../../outside-evil.txt", b"x")], "climbs out with .."),
+            "symlink": ([({"name": "evil-link", "type": tarfile.SYMTYPE, "linkname": str(self.h.tmp)}, None),
+                         ("evil-link/outside-evil.txt", b"x")], "a link"),
+            "hard link": ([({"name": "evil-hard", "type": tarfile.LNKTYPE, "linkname": "/etc/passwd"}, None)], "a link"),
+            "char device": ([({"name": "evil-dev", "type": tarfile.CHRTYPE, "devmajor": 1, "devminor": 3}, None)],
+                            "a device or pipe"),
+            "block device": ([({"name": "evil-blk", "type": tarfile.BLKTYPE, "devmajor": 8, "devminor": 0}, None)],
+                             "a device or pipe"),
+            "fifo": ([({"name": "evil-fifo", "type": tarfile.FIFOTYPE}, None)], "a device or pipe"),
+            "backslash": ([("..\\..\\outside-evil.txt", b"x")], "backslashes"),
         }
-        for what, extra in cases.items():
+        for what, (extra, why) in cases.items():
             with self.subTest(what):
                 code, err = self.h.upload(a, H.bundle(H.manifest(paper_id=pid), extra=extra))
                 self.assertEqual((code, err["error"]), (400, "bad_bundle"), err)
-                self.assertTrue(err["problems"], err)
+                self.assertTrue(any(why in p for p in err["problems"]), err)
                 self.assertFalse(outside.exists())
                 self.assertEqual(sorted(os.listdir(self.h.cfg.episodes)), before)
                 self.assertEqual(self.tmp_left(), [])
@@ -317,6 +322,9 @@ class ContribTest(unittest.TestCase):
         code, err = self.h.upload(a, big)
         self.assertEqual((code, err["error"]), (400, "bad_bundle"))
         self.assertIn("more than 60 MB", err["message"])
+        big = H.bundle(man, extra=[(f"pad{i}.bin", b"\0" * (20 * 1024 * 1024)) for i in range(3)])
+        code, err = self.h.upload(a, big)             # 60 MB of files, over the limit with the rest
+        self.assertEqual((code, err["message"]), (400, "the bundle unpacks to more than 60 MB"))
         # the same with a huge pax header instead of a file (tarfile would read it into memory)
         buf = io.BytesIO()
         with gzip.GzipFile(fileobj=buf, mode="wb") as g:
@@ -326,7 +334,7 @@ class ContribTest(unittest.TestCase):
             for _ in range(70):
                 g.write(b"\0" * (1024 * 1024))
         code, err = self.h.upload(a, buf.getvalue())
-        self.assertEqual((code, err["error"]), (400, "bad_bundle"))
+        self.assertEqual((code, err["message"]), (400, "the bundle unpacks to more than 60 MB"))
         # not a gzip, the wrong type, no manifest, a broken manifest
         code, err = self.h.upload(a, b"plain text, not gzip")
         self.assertEqual((code, err["error"]), (400, "bad_bundle"))

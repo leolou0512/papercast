@@ -764,6 +764,8 @@ def _land(req, manifest: dict, stage: Path, names: set) -> dict:
         (epdir / "bundle-manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
         pr = manifest.get("prefs") if isinstance(manifest.get("prefs"), dict) else {}
         settings = pr.get("settings") if isinstance(pr.get("settings"), dict) else {}
+        # the client's word only: a value outside the schema is left out of the summary
+        settings = {k: v for k, v in settings.items() if k in P.SCHEMA and v in P.SCHEMA[k]}
         base_v = manifest.get("base_version")
         base_v = base_v if isinstance(base_v, int) and not isinstance(base_v, bool) else None
         now = db.now()

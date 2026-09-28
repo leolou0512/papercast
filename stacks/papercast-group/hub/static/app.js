@@ -778,6 +778,7 @@
     titleInto($("s-title"), p);
     renderState(c);
     renderVersions(p, c);
+    renderVoice(c);
     renderPlayer();
     onScroll();
   }
@@ -850,7 +851,7 @@
   function loadAudio(eid, then) {
     const e = epById(eid), pid = S.epPaper.get(eid), a = A();
     if (!e || !e.has_audio) return false;
-    const src = `/audio/${eid}.mp3`;
+    const src = audioUrl(e);
     if (S.audioEp === eid && a.getAttribute("src") === src) {
       if (then && S.audioReady === eid) then(a); else if (then) S.afterReady = then;
       return true;
@@ -1142,16 +1143,17 @@
   }
 
   // ------------------------------------------------------------------ settings
-  // Preferences (how this person's own versions are made), Devices (where papercast is logged
-  // in as them), and for admins Users and the Base prompt. Each tab reads the hub when opened.
-  const TABS = [["prefs", "Preferences"], ["devices", "Devices"], ["account", "Account", false, true], ["users", "Users", true], ["base", "Base prompt", true]];
+  // Preferences (how this person's own versions are made), Voice (who reads them: those who
+  // make versions), Devices (where papercast is logged in as them), and for admins Users and the
+  // Base prompt. Each tab reads the hub when opened.
+  const TABS = [["prefs", "Preferences"], ["voice", "Voice", false, false, true], ["devices", "Devices"], ["account", "Account", false, true], ["users", "Users", true], ["base", "Base prompt", true]];
   const PREF_TEXT = {
     maths: ["Maths", { words: "In words", "key-steps": "Key steps", full: "Full derivations" },
       "In words only, the key steps, or the whole derivation walked through (the equations go on the explainer page)."],
     emphasis: ["What gets more time", { balanced: "Balanced", theory: "Theory", method: "Method", practice: "Practice" }, ""],
     background: ["What the listener already knows", { newcomer: "New to the field", field: "Works in the field", specialist: "Specialist" }, ""],
   };
-  const tabsFor = () => TABS.filter((t) => (!t[2] || isAdmin()) && (!t[3] || passwordMode()));
+  const tabsFor = () => TABS.filter((t) => (!t[2] || isAdmin()) && (!t[3] || passwordMode()) && (!t[4] || makesVersions()));
   function openSettings(which) {
     S.open = null;
     closeExplainer(); closeMenu();
@@ -1182,7 +1184,7 @@
     }, label)));
     const body = $("set-body");
     body.replaceChildren(el("p", { class: "muted intro", id: "set-loading", text: "Loading…" }));
-    ({ prefs: prefsTab, devices: devicesTab, account: accountTab, users: passwordMode() ? peopleTab : usersTab, base: baseTab })[S.setTab](body);
+    ({ prefs: prefsTab, voice: voiceTab, devices: devicesTab, account: accountTab, users: passwordMode() ? peopleTab : usersTab, base: baseTab })[S.setTab](body);
   }
   const stillOn = (t) => S.view === "settings" && S.setTab === t;
   const failed = (body, e) => body.replaceChildren(el("p", { class: "err", text: e.message }));
@@ -1587,6 +1589,185 @@
       body.replaceChildren(...kids);
     };
     draw();
+  }
+
+  // ------------------------------------------------------------------ voices
+  // The narrator. Each person's own, for the versions they make (Settings, Voice); and a
+  // version's own, which its maker or an admin can change ("Voice: … Change" in the window):
+  // the hub records it again in the fair queue, this version plays on meanwhile, and when the
+  // new audio lands this page moves to it at the same sentence. The audio's revision is in its
+  // URL (?v=), so no browser plays a cached old one. Samples come from tools/make_voice_samples.py.
+  S.voices = null; S.vpick = null;
+  const makesVersions = () => !!S.me && (S.me.role === "contributor" || S.me.role === "admin");
+  function audioUrl(e) {
+    const r = e && e.voice && e.voice.rev;
+    return `/audio/${e.id}.mp3${r > 1 ? `?v=${r}` : ""}`;
+  }
+  function voicesList() {
+    if (!S.voices) S.voices = api("GET", "/api/voices").catch((e) => { S.voices = null; throw e; });
+    return S.voices;
+  }
+  function nth(n) {
+    const t = n % 100, u = n % 10;
+    return `${n}${t >= 11 && t <= 13 ? "th" : u === 1 ? "st" : u === 2 ? "nd" : u === 3 ? "rd" : "th"}`;
+  }
+  function pendingText(pd) {
+    const who = pd.name || "the new voice";
+    if (pd.state === "retrying") return `${who}: it failed, trying again`;
+    if (pd.state !== "working") return `changing to ${who}${pd.position ? `, ${nth(pd.position)} in line` : ""}`;
+    if (pd.phase === "speaking") return `recording ${who}, ${speakPct(pd)}%`;
+    if (pd.phase === "encoding") return `${who}: making the MP3`;
+    return `${who}: waiting for the GPU`;
+  }
+
+  // One sample plays at a time, never over the episode.
+  const sample = { a: null, id: null };
+  function sampleAudio() {
+    if (!sample.a) {
+      sample.a = new Audio();
+      for (const ev of ["play", "pause", "ended", "error"]) sample.a.addEventListener(ev, drawSampleButtons);
+    }
+    return sample.a;
+  }
+  function playSample(x) {
+    const a = sampleAudio();
+    if (sample.id === x.id && !a.paused) { a.pause(); return; }
+    if (!A().paused) A().pause();
+    sample.id = x.id;
+    a.src = x.sample;
+    a.play().catch((e) => { if (e.name !== "AbortError") toast(`Cannot play the sample: ${e.message}`); });
+    drawSampleButtons();
+  }
+  function stopSample() { if (sample.a && !sample.a.paused) sample.a.pause(); }
+  function drawSampleButtons() {
+    const on = sample.a && !sample.a.paused && !sample.a.ended ? sample.id : null;
+    for (const b of document.querySelectorAll(".vplay[data-sample]")) {
+      const playing = b.dataset.sample === on;
+      if (b.getAttribute("aria-pressed") === String(playing)) continue;
+      b.setAttribute("aria-pressed", String(playing));
+      b.innerHTML = playing ? I.pause(16) : I.play(16);
+    }
+  }
+  // The presets as radio rows, each with its sample (the Versions list's look).
+  function voiceRows(list, sel, pick) {
+    return list.map((x) => el("div", { class: "vrow", "data-voice": x.id },
+      el("button", { type: "button", class: "ver", role: "radio", "aria-checked": String(x.id === sel), onclick: () => pick(x.id) },
+        el("span", { class: "mark", "aria-hidden": "true" }),
+        el("span", { class: "v-main" }, el("span", { class: "v-who", text: x.name }), x.about ? el("span", { class: "v-sum", text: x.about }) : null)),
+      x.sample
+        ? el("button", { type: "button", class: "icon-btn vplay", "data-sample": x.id, "aria-pressed": "false", "aria-label": `Play the sample of ${x.name}`,
+          html: I.play(16), onclick: () => playSample(x) })
+        : el("button", { type: "button", class: "text-btn vnone", disabled: true, "aria-label": `${x.name}: sample not made yet`, text: "sample not made yet" })));
+  }
+
+  // The window: "Voice: Warm male · Change", and the chooser under the player.
+  function renderVoice(c) {
+    let line = $("w-voice"), box = $("vchoose");
+    if (!line) { line = el("p", { class: "maker vline", id: "w-voice", hidden: true }); $("w-maker").after(line); }
+    if (!box) { box = el("section", { class: "versions vchoose", id: "vchoose", hidden: true }); $("versions").before(box); }
+    const v = c && c.has_audio ? c.voice : null;
+    if (!v || (!v.name && !v.can_change && !v.pending)) {
+      line.hidden = true; box.hidden = true; box.dataset.sig = "";
+      return;
+    }
+    const pd = v.pending, kids = [el("span", { text: `Voice: ${v.name || "original"}` })];
+    if (pd) {
+      kids.push(el("span", { class: "vpend", text: ` · ${pendingText(pd)}` }));
+      if (v.can_change && pd.state !== "working") kids.push(" · ", el("button", { type: "button", class: "text-btn vbtn", id: "voice-cancel", text: "Cancel", onclick: () => undoChange(c.id) }));
+    } else if (v.can_change) {
+      kids.push(" · ", el("button", { type: "button", class: "text-btn vbtn", id: "voice-change", text: "Change", "aria-expanded": String(!!S.vpick && S.vpick.eid === c.id),
+        onclick: () => { S.vpick = S.vpick && S.vpick.eid === c.id ? null : { eid: c.id, id: v.id }; stopSample(); renderWin(); } }));
+    }
+    if (v.error && !pd) kids.push(el("span", { class: "verr", text: ` · Couldn’t change it to ${v.error}` }));
+    const sig = JSON.stringify([c.id, v, !!S.vpick && S.vpick.eid === c.id]);
+    if (line.dataset.sig !== sig) { line.dataset.sig = sig; line.replaceChildren(...kids); }
+    line.hidden = false;
+    if (!S.vpick || S.vpick.eid !== c.id || pd || !v.can_change) { box.hidden = true; box.dataset.sig = ""; return; }
+    voicesList().then((j) => {
+      if (!S.vpick || S.vpick.eid !== c.id) return;
+      const bsig = JSON.stringify([c.id, S.vpick.id, v.id]);
+      box.hidden = false;
+      if (box.dataset.sig === bsig) return;
+      box.dataset.sig = bsig;
+      const to = j.voices.find((x) => x.id === S.vpick.id);
+      const go = el("button", { type: "button", class: "btn-accent", id: "voice-go", disabled: !to || S.vpick.id === v.id,
+        text: to && S.vpick.id !== v.id ? `Record it in ${to.name}` : "Pick a voice", onclick: () => askChange(c.id, S.vpick.id) });
+      box.replaceChildren(el("div", { class: "col" }, el("h3", { class: "sec-h", text: "Voice" }),
+        el("div", { class: "vlist", role: "radiogroup", "aria-label": "Voice for this version" },
+          voiceRows(j.voices, S.vpick.id, (id) => { S.vpick.id = id; renderWin(); })),
+        el("p", { class: "vnote", text: "It is recorded again in that voice, in the same queue as new versions. This one plays until the new one is ready." }),
+        el("div", { class: "save-row" }, go, el("button", { type: "button", class: "text-btn", id: "voice-close", text: "Cancel", onclick: () => { S.vpick = null; stopSample(); renderWin(); } }))));
+      drawSampleButtons();
+    }).catch((e) => toast(e.message));
+  }
+  function setVoice(eid, v) {
+    const e = epById(eid);
+    if (e) e.voice = Object.assign({}, e.voice || {}, v);
+    const pid = S.epPaper.get(eid);
+    if (S.open === pid) renderWin();
+  }
+  async function askChange(eid, id) {
+    const b = $("voice-go");
+    if (b) b.disabled = true;
+    try {
+      const v = await api("PUT", `/api/episodes/${eid}/voice`, { voice: id });
+      S.vpick = null; stopSample();
+      setVoice(eid, v);
+      if (v.pending) toast(`Recording it in ${v.pending.name}. This version plays until it is ready.`);
+    } catch (e) { if (b) b.disabled = false; toast(e.message); }
+  }
+  async function undoChange(eid) {
+    try { setVoice(eid, await api("DELETE", `/api/episodes/${eid}/voice`)); } catch (e) { toast(e.message); }
+  }
+  // The new audio of a version this page has loaded: carry on in it at the same sentence (the
+  // hub maps the second), playing if it was.
+  async function voiceSwapped(d) {
+    const eid = d.episode_id || d.id, a = A();
+    if (S.audioEp !== eid || !a.getAttribute("src")) return;
+    const was = !a.paused && !a.ended, t = a.currentTime || 0;
+    let v;
+    try { v = await api("GET", `/api/episodes/${eid}/voice?at=${t.toFixed(2)}&rev=${d.voice_swap.from_rev}`); } catch (x) { return; }
+    const e = epById(eid);
+    if (!e || S.audioEp !== eid) return;
+    e.voice = Object.assign({}, e.voice || {}, v);
+    if (v.duration_s) e.duration_s = v.duration_s;
+    S.dirty = false;                  // the old audio's second is not saved over the new one's
+    a.pause();
+    const now = Date.now();
+    store.set(posKey(eid), JSON.stringify({ s: v.at, at: now }));
+    e.position_s = v.at; e.position_at = now;
+    loadAudio(eid, was ? (x) => { x.play().catch(() => {}); } : null);
+    toast(`Now in the new voice${v.name ? `: ${v.name}` : ""}.`);
+  }
+  window.addEventListener("papercast:event", (ev) => {
+    const d = ev.detail || {};
+    if (d.kind === "episode" && d.data && d.data.voice_swap) voiceSwapped(d.data);
+  });
+
+  // Settings, Voice: my voice for new versions, and every voice's sample.
+  async function voiceTab(body) {
+    stopSample();
+    let j;
+    try { j = await voicesList(); } catch (e) { if (stillOn("voice")) failed(body, e); return; }
+    if (!stillOn("voice")) return;
+    const msg = el("span", { class: "ok", id: "voice-msg", role: "status" });
+    const list = el("div", { class: "vlist", id: "voice-list", role: "radiogroup", "aria-label": "My voice" });
+    const draw = () => { list.replaceChildren(...voiceRows(j.voices, j.mine, pick)); drawSampleButtons(); };
+    const pick = async (id) => {
+      if (id === j.mine) return;
+      const was = j.mine;
+      j.mine = id; draw();
+      msg.className = "ok"; msg.textContent = "";
+      try {
+        const r = await api("PUT", "/api/voices/mine", { voice: id });
+        j.mine = r.mine; msg.textContent = "Saved";
+      } catch (e) { j.mine = was; draw(); msg.className = "err"; msg.textContent = e.message; }
+    };
+    draw();
+    body.replaceChildren(
+      el("p", { class: "intro", text: "The voice your new versions are recorded in. A version you made can be recorded again in another voice from its page." }),
+      el("div", { class: "pref" }, el("p", { class: "pref-h", text: "My voice" }), list),
+      el("div", { class: "save-row" }, msg));
   }
 
   // ------------------------------------------------------------------ live events

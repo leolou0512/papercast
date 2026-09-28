@@ -988,7 +988,7 @@ class PasswordPagesTest(unittest.TestCase):
         self.js("location.hash = 'settings=account'")
         self.wait("!!document.getElementById('acct-pw-save')", "the account tab")
         tabs = self.js("[...document.querySelectorAll('#set-tabs .tab')].map(t => t.textContent)")
-        self.assertEqual(tabs, ["Preferences", "Devices", "Account"])
+        self.assertEqual(tabs, ["Preferences", "Voice", "Devices", "Account"])
         self.typ("#acct-name", "Pat Gray")
         self.click("#acct-name-save")
         self.wait("document.getElementById('acct-name-msg').textContent === 'Saved'", "name saved")

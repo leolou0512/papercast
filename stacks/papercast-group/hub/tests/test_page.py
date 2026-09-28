@@ -479,7 +479,7 @@ class Page(PageBase):
             self.home(A)
             b.js("location.hash = 'settings=users'")
             b.wait_js("document.querySelectorAll('#users .item').length === 3", 5, "users")
-            self.assertEqual(b.js(tabs), ["Preferences", "Devices", "Users", "Base prompt"])
+            self.assertEqual(b.js(tabs), ["Preferences", "Voice", "Devices", "Users", "Base prompt"])
             self.assertIsNone(b.js("document.getElementById('invite-link')"))          # not the local sign-in
             sel = f"document.querySelector('#users .item[data-id=\"{self.bob}\"] select')"
             b.js(f"{sel}.value = 'admin'; {sel}.dispatchEvent(new Event('change'))")

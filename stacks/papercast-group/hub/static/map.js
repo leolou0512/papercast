@@ -758,10 +758,11 @@
         aimTip.textContent = text; aimTip.classList.toggle("warn", bad);
         aimTip.hidden = false; aimKey = key; aw = aimTip.offsetWidth; ah = aimTip.offsetHeight;
       }
-      var p = aim.p, x, y;
-      if (aim.touch) { x = p.x - aw / 2; y = p.y - ah - 44; }       // above the finger
-      else { x = p.x + 16; y = p.y + 18; if (x + aw > W - 8) x = p.x - aw - 12; if (y + ah > H - 8) y = p.y - ah - 12; }
-      aimTip.style.transform = "translate(" + Math.round(Math.max(8, Math.min(W - aw - 8, x))) + "px," + Math.round(Math.max(8, y)) + "px)";
+      // over the paper it snapped to (its label, under it, stays in sight), clear of a finger;
+      // under the label when there is no room above
+      var T = aimTarget(), x = T.x - aw / 2, y = T.y - T.r - ah - (aim.touch ? 44 : 10);
+      if (y < chromeBottom() + 4) y = T.y + T.r + 26;
+      aimTip.style.transform = "translate(" + Math.round(Math.max(8, Math.min(W - aw - 8, x))) + "px," + Math.round(Math.max(8, Math.min(H - ah - 8, y))) + "px)";
     }
 
     /* ---------- pointer: drag nodes, pan, pinch, wheel; a click picks ---------- */
@@ -957,7 +958,8 @@
         }
         return call(method, path + q, b);
       });
-      EQ = p.then(function () {}, function () {});
+      // the next edit waits for this one's answer, but not for ever (a request the network lost)
+      EQ = Promise.race([p.then(function () {}, function () {}), new Promise(function (res) { setTimeout(res, 10000); })]);
       return p.then(function (r) { took(r); return r; });
     }
     // an edit's answer: the graphs it changed are at these revisions now (one up from what is
@@ -1424,7 +1426,7 @@
         else if (err.status === 409) say(no + thing(e) + " was changed after that edit" + (b.message && b.message !== b.error ? " (" + String(b.message).replace(/\.$/, "") + ")" : "") + ".");
         else say("Could not " + (redo ? "redo" : "undo") + ": " + errText(err) + ".");
       }).then(function () {
-        LOG.undoing = false; settled++;
+        LOG.undoing = false; LOG.stale = true; settled++;
         graphs.forEach(function (g) { g.stale = true; });
         loadList(); if (cur && !cur.tmp) loadGraph(cur); loadLog(true);
       });
@@ -1886,7 +1888,7 @@
         e.stopPropagation(); return;
       }
       if (draft || linkFrom != null) { cancelDraft(); e.stopPropagation(); }
-      else if (selId != null || selLink != null) { select(null); e.stopPropagation(); }
+      else if (selId != null || selLink != null || selSugg != null) { select(null); e.stopPropagation(); }
       else if (opts.onClose) { opts.onClose(); e.stopPropagation(); }
     }
     document.addEventListener("keydown", onKey, true);

@@ -198,7 +198,24 @@ Page CSP as Leo's (`PAGE_CSP` in stacks/papercast/web/app.py): no inline script 
   page shows it first: "Undo: Bob removed PPO → DPO, 3 min ago"), else 409 `moved`. The inverse is
   applied against the current state: if the thing changed since (current != `after`), 409
   `conflict` with detail and nothing changes. A revert is itself logged (`revert_of`), so it can
-  be undone.
+  be undone. With `"redo": true` it redoes the undo that `GET /api/graph-log`'s `redo[scope]`
+  names (`undo[scope]` names the op to undo); after a new change in a scope there is nothing to
+  redo there, as in an editor.
+- **Revisions**: every graph has a revision, one up with every change touching it (members, links
+  among them, name, tags, lock, a member's label, delete, undo, redo; members that come or go by
+  their tags or episodes count on the next read). `GET /api/graphs/<id>` gives it (`rev`,
+  `graph.rev`). Any edit may send `base_rev` and `graph_id` (the JSON body; the query for a
+  DELETE): when that graph is at another revision, 409 `stale` `{rev, base_rev, by, actor, at}`
+  and nothing changes; an edit whose result is there already answers 200 with `"already": true`.
+  Edit answers carry `revs: {graph id: rev}`; graph events are `{id, change: "edit", graph_rev,
+  by, actor, log_op, deleted}` (also `change: "layout"`, `"suggestions"`, `"settings"`).
+- **Links from uploads**: `GET /api/graph-settings` → `{"agent_links": "auto"|"suggest",
+  "suggestions": n}`, `PUT` (admin) `{"agent_links"}`; automatic by default. While "suggest",
+  `apply_agent_links` keeps the links it would add (same rules) as suggestions, listed by
+  `GET /api/graphs/<id>` as `suggestions: [{id, src, dst, grade, by, created_at}]`;
+  `POST /api/link-suggestions/<id>/accept` makes one the person's `link.add` (base_rev as any
+  edit), `/dismiss` drops it for good (that pair is never suggested again), and
+  `POST /api/link-suggestions/accept-all {"graph_id"?}` (admin) accepts every open one.
 - API: `GET /api/graphs` → list; `POST /api/graphs {"name","tags"?}`; `GET /api/graphs/<id>` →
   `{"graph", "nodes": [{"id","label","title","year","made_by","x","y","deg"}], "links":
   [{"id","src","dst","grade","origin"}], "roots", "start", "path", "descendants"}`;
@@ -214,9 +231,12 @@ Page CSP as Leo's (`PAGE_CSP` in stacks/papercast/web/app.py): no inline script 
 - **Map UI** (A6): start from `stacks/papercast/web/static/map.js` + `map.css` (Leo's current map:
   WebGL + 2D fallback, settled positions, hover card, Start here, listening order); add editing:
   select two papers → "Add link" (grade), a selected link → change grade / remove, "New graph",
-  add or remove papers from a graph, "Undo" (shows what it will undo, both scopes), a History
-  panel (last 100, who, when), locked graphs read-only for non-admins. Colours as now plus
-  Listened per person.
+  add or remove papers from a graph, "Undo" and "Redo" (each shows what it will do, both scopes;
+  Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z, Ctrl+Y), a History panel (last 100, who, when), locked graphs
+  read-only for non-admins, deleting a graph after a dialog (its maker or an admin). A new link is
+  aimed: an arrow from the first paper to the pointer that snaps to a paper. Suggested links show
+  on request, dashed. Every edit sends `base_rev`; a stale one brings the map up to date at once;
+  the page's live events keep every open map current. Colours as now plus Listened per person.
 
 ## 9. Voice (A3 queue, A10 worker)
 

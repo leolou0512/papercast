@@ -238,25 +238,21 @@ def _m2_paper_label(c) -> None:
     _add_column(c, "papers", "label", "TEXT")
 
 
+# Lookups on columns that grow with the library and that no primary key or UNIQUE covers.
+# tools/loadcheck.py measures them (1,000 fake papers, 2026-09-28: every page query under 7 ms
+# with or without these; a paper's parents 0.12 -> 0.01 ms). Small tables (claims, tokens) need none.
+M3_INDEXES = [
+    ("links_dst", "links(dst)"),                          # a paper's parents: UNIQUE(src, dst) serves only src
+    ("episodes_made_by", "episodes(made_by)"),            # someone's own episodes: cli ?mine=1, the voice fairness
+    ("voice_jobs_state", "voice_jobs(state, queued_at)"),  # the voice queue, oldest first
+    ("graph_log_user", "graph_log(user_id, id)"),         # revert scope "mine": one user's newest ops
+]
+
+
 def _m3_indexes(c) -> None:
-    """Indexes for the lookups the primary keys do not cover (measured by tools/loadcheck.py):
-    a paper's parents on the map (links by dst), someone's own episodes (cli `?mine=1`, delete
-    rights), episodes by state (the voice queue, the checks), the voice queue's order, a user's
-    devices, and an identity's open claim."""
-    # one statement at a time: executescript() would commit the migration's transaction
-    for sql in (
-        "CREATE INDEX IF NOT EXISTS links_dst ON links(dst)",
-        "CREATE INDEX IF NOT EXISTS episodes_made_by ON episodes(made_by)",
-        "CREATE INDEX IF NOT EXISTS episodes_state ON episodes(state)",
-        "CREATE INDEX IF NOT EXISTS voice_jobs_state ON voice_jobs(state, queued_at)",
-        "CREATE INDEX IF NOT EXISTS tokens_user ON tokens(user_id)",
-        "CREATE INDEX IF NOT EXISTS claims_arxiv ON claims(arxiv_id)",
-        "CREATE INDEX IF NOT EXISTS claims_doi ON claims(doi)",
-        "CREATE INDEX IF NOT EXISTS claims_sha ON claims(source_sha256)",
-        "CREATE INDEX IF NOT EXISTS claims_title ON claims(title_norm)",
-        "CREATE INDEX IF NOT EXISTS graph_log_user ON graph_log(user_id, id)",
-    ):
-        c.execute(sql)
+    """The indexes in M3_INDEXES."""
+    for name, on in M3_INDEXES:          # one statement at a time: executescript() would commit
+        c.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {on}")
 
 
 MIGRATIONS = [

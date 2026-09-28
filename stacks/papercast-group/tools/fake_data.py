@@ -211,7 +211,9 @@ def wipe(data: Path) -> None:
 
 
 def generate(data: Path, papers: int = 60, users: int = 5, seed: int = 1, audio: str = "auto",
-             ffmpeg: str | None = None, do_wipe: bool = False) -> dict:
+             ffmpeg: str | None = None, do_wipe: bool = False, ready_without_audio: bool = False) -> dict:
+    """The library above; `ready_without_audio` is for measurements only (tools/loadcheck.py):
+    without tones, ready episodes stay ready, with a duration but no audio.mp3."""
     data = Path(data).expanduser().resolve()
     if (data / "hub.db").exists():
         db.init(C.Config(data=data))
@@ -238,6 +240,9 @@ def generate(data: Path, papers: int = 60, users: int = 5, seed: int = 1, audio:
                 tones = make_tones(exe, Path(tmp))
         if audio == "tone" and not tones:
             raise SystemExit("--audio tone: ffmpeg (with libmp3lame) is needed; give --ffmpeg PATH")
+    made_tones = bool(tones)
+    if ready_without_audio and not tones:
+        tones = [(24.0, None), (36.0, None), (48.0, None)]
 
     counts = {"users": 0, "papers": 0, "episodes": 0, "audio": 0, "links": 0, "listened": 0,
               "positions": 0, "graph_log": 0, "graphs": 0}
@@ -381,7 +386,7 @@ def generate(data: Path, papers: int = 60, users: int = 5, seed: int = 1, audio:
                                   "explainer_html": "explainer.html", "claims": "claims.md"},
                         "links": [], "stats": {"words": words, "est_minutes": est, "wall_s": r.randint(900, 2400)}}
             (d / "bundle-manifest.json").write_text(json.dumps(manifest, indent=1), encoding="utf-8")
-            if e["state"] == "ready":
+            if e["state"] == "ready" and tone[1] is not None:
                 (d / "audio.mp3").write_bytes(tone[1])
                 counts["audio"] += 1
             e["duration"] = dur
@@ -515,7 +520,7 @@ def generate(data: Path, papers: int = 60, users: int = 5, seed: int = 1, audio:
                           (gid, p["id"], x, y, iso(T0 + timedelta(days=27))))
         counts["graphs"] = len(members)
     counts["data"] = str(data)
-    counts["tones"] = bool(tones)
+    counts["tones"] = made_tones
     return counts
 
 

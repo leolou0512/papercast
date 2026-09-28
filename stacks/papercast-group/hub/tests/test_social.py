@@ -80,7 +80,7 @@ class Comments(unittest.TestCase):
         st, c = self.post("At 12:40 the derivation is clearer.", user=B, episode_id=self.eb)
         self.assertEqual(st, 201, c)
         self.assertEqual((c["user"], c["episode_id"], c["parent_id"], c["deleted"], c["edited_at"]),
-                         ({"id": self.bob, "name": "Bob"}, self.eb, None, False, None))
+                         ({"id": self.bob, "name": "Bob", "avatar": None}, self.eb, None, False, None))
         self.assertIn(c["id"], [x["id"] for x in self.comments(user=CAROL)])     # anyone signed in reads
         # only its writer edits, an admin included
         for who in (A, CAROL):
@@ -226,7 +226,7 @@ class Board(unittest.TestCase):
                              "Federico uploaded Denoising Fake Diffusion Models",
                              "Dan joined", "Federico joined", "Carol joined", "Bob joined", "Alice joined"])
         it = self.board()["items"][0]
-        self.assertEqual((it["kind"], it["paper_id"], it["user"], it["title"]), ("upload", self.flow, {"id": self.dan, "name": "Dan"}, "Fake Flow Matching"))
+        self.assertEqual((it["kind"], it["paper_id"], it["user"], it["title"]), ("upload", self.flow, {"id": self.dan, "name": "Dan", "avatar": None}, "Fake Flow Matching"))
         # the newest 5, and more
         j = self.board(limit=5)
         self.assertEqual((len(j["items"]), j["more"]), (5, True))

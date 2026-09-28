@@ -69,8 +69,8 @@ class Web(unittest.TestCase):
         self.assertFalse(p2["listened"])
         eps = p2["episodes"]
         self.assertEqual([e["id"] for e in eps], [self.e2a, self.e2b])         # first made first
-        self.assertEqual(eps[0]["made_by"], {"id": self.alice, "name": "Alice"})
-        self.assertEqual(eps[1]["made_by"], {"id": self.bob, "name": "Bob"})
+        self.assertEqual(eps[0]["made_by"], {"id": self.alice, "name": "Alice", "avatar": None})
+        self.assertEqual(eps[1]["made_by"], {"id": self.bob, "name": "Bob", "avatar": None})
         self.assertEqual([e["prefs_summary"] for e in eps], ["derivations", "practical"])
         self.assertEqual([e["mine"] for e in eps], [True, False])
         self.assertEqual([e["can_delete"] for e in eps], [True, True])        # Alice is an admin
@@ -163,7 +163,7 @@ class Web(unittest.TestCase):
     def test_config(self):
         st, j, _ = self.r.req("GET", "/api/config", user=B)
         self.assertEqual(st, 200)
-        self.assertEqual(j["me"], {"id": self.bob, "name": "Bob", "email": B, "role": "contributor"})
+        self.assertEqual(j["me"], {"id": self.bob, "name": "Bob", "email": B, "role": "contributor", "avatar": None})
         self.assertEqual(j["auth"], "header")
         self.assertRegex(j["build"], r"^[0-9a-f]{12}$")
         self.assertEqual(j["undo_days"], 30)

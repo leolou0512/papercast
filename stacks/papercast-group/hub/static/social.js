@@ -89,6 +89,8 @@
   function mount(ctx) {
     const me = () => ctx.me() || {};
     const admin = () => !!ctx.isAdmin();
+    // a person's picture, or their initials (avatar.js, through app.js); an empty text without it
+    const face = (u, size) => (u && ctx.avatar ? ctx.avatar(u, size) : document.createTextNode(""));
     let offset = 0;                 // the hub's clock minus this device's (ms), from the board's "now"
     const now = () => Date.now() + offset;
     const ms = (iso) => { const t = Date.parse(iso || ""); return isNaN(t) ? 0 : t; };
@@ -314,7 +316,7 @@
       if (c.deleted) { n.item.replaceChildren(el("p", { class: "c-gone", text: "comment deleted" })); return; }
       if (C.editing === c.id) { n.item.replaceChildren(editBox(c)); return; }
       const note = versionNote(c);
-      const meta = el("div", { class: "c-meta" }, el("span", { class: "c-who", text: c.user.name }), " · ",
+      const meta = el("div", { class: "c-meta" }, face(c.user, "m"), el("span", { class: "c-who", text: c.user.name }), " · ",
         whenNode(c.created_at, "c-when"), c.edited_at ? el("span", { text: " · edited", title: stamp(c.edited_at) }) : null,
         note ? el("span", { class: "c-ver", text: ` · ${note}` }) : null);
       const body = el("div", { class: "c-body md" }, richText(c.body, timeLinker(c)));
@@ -525,7 +527,7 @@
       if (!n || sig === B.nsig) { B.nsig = n ? sig : ""; return; }
       B.nsig = sig;
       nText.replaceChildren(richText(n.body, null));
-      nMeta.replaceChildren(el("span", { class: "bd-by", text: `Pinned by ${n.user.name} · ` }), whenNode(n.created_at),
+      nMeta.replaceChildren(face(n.user, "s"), el("span", { class: "bd-by", text: `Pinned by ${n.user.name} · ` }), whenNode(n.created_at),
         admin() ? el("button", { type: "button", class: "text-btn", id: "bd-unpin", text: "Unpin", onclick: unpin }) : null);
     }
     async function unpin() {
@@ -535,6 +537,7 @@
       catch (e) { ctx.toast(e.message); }
     }
     function itemNode(it, unread) {
+      const who = face(it.user, "s");
       const text = el("span", { class: "bd-text" }, it.lead, it.title ? el("span", { class: "bd-t", text: it.title }) : null, it.tail || null);
       const when = el("span", { class: "bd-when" }, " · ", whenNode(it.at));
       let link;
@@ -545,11 +548,11 @@
           if (it.comment_id) C.focus = { pid: it.paper_id, cid: it.comment_id };
           ctx.openPaper(it.paper_id);
           if (C.pid === it.paper_id) showFocus();
-        } }, text, when);
+        } }, who, text, when);
       } else if (it.graph_id) {
-        link = el("button", { type: "button", class: "bd-link", onclick: () => ctx.openGraph(it.graph_id) }, text, when);
+        link = el("button", { type: "button", class: "bd-link", onclick: () => ctx.openGraph(it.graph_id) }, who, text, when);
       } else {
-        link = el("div", { class: "bd-link bd-plain" }, text, when);
+        link = el("div", { class: "bd-link bd-plain" }, who, text, when);
       }
       return el("li", { class: `bd-item${unread ? " unread" : ""}`, "data-key": it.key, "data-kind": it.kind }, link);
     }

@@ -51,6 +51,8 @@ stacks/papercast-group/
   hub/graph.py                  links, graphs, edit log, revert         (A5)
   hub/layout.py                 settled positions (ground state)        (A5)
   hub/static/map.js map.css     the map with editing                    (A6)
+  hub/avatars.py                profile pictures: upload checks, storage, serving
+  hub/static/avatar.js          the pictures (or initials) next to names on the page
   hub/tests/test_<module>.py    each owner's tests
   prompts/base-guideline.md     base prompt v1 (group)                  (A9)
   deploy/                       perov install, systemd units, tunnel, backup, voice worker (A10)

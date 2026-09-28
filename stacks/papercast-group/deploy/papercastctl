@@ -190,6 +190,7 @@ restore)
     # copies, never links: the hub writes into its files, a link would change the backup
     as_pc cp -a "$b/hub.db" "$H/data/hub.db"
     as_pc cp -a "$b/episodes" "$H/data/episodes"
+    [ ! -d "$b/avatars" ] || as_pc cp -a "$b/avatars" "$H/data/avatars"      # profile pictures (hub/avatars.py)
     hub_py -m hub.db migrate
     systemctl start "$U_HUB" "$U_VOICE"
     echo "hub: GET / -> $(wait_hub)"

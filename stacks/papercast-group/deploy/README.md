@@ -34,7 +34,7 @@ admin later runs with sudo.
 | `src/` | root | the tree the release came from (the three trees below, committed files only; `src/.revision`) |
 | `bin/` | root | `uv` 0.11.33, `ffmpeg` 7.0.2, `cloudflared` 2026.8.2, `papercastctl` (`/usr/local/bin/papercastctl` links here) |
 | `etc/` | root dir, files papercast 0600 | `hub.env`, `worker.env`, `worker.token` (the hub keeps only its sha256), `tunnel.token`, `smtp.password` when email is set up |
-| `data/` | papercast, group-readable | `hub.db` and `episodes/<episode_id>/` (the voice job is `episodes/<id>/voice/`); `search.db`, the search index (rebuilt from those at the hub's start if deleted; the backup leaves it out) |
+| `data/` | papercast, group-readable | `hub.db`, `episodes/<episode_id>/` (the voice job is `episodes/<id>/voice/`) and `avatars/` (profile pictures, `<user id>-<version>.jpg`); `search.db`, the search index (rebuilt from those at the hub's start if deleted; the backup leaves it out) |
 | `backups/` | papercast | nightly, `tools/backup.py`, the newest 14; one more before each update |
 | `voice/` | papercast | papercast-voice with Breeze TTS 2 and Kokoro (14 GB), `voice/voice.json`, its compiler caches |
 | `python/` | papercast | the uv-managed CPython 3.11.15 the voice's venvs run on (perov's own is 3.10) |

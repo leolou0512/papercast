@@ -810,7 +810,7 @@ class Map(PageBase):
                             " papers: __map.opts.papers instanceof Map ? __map.opts.papers.size : -1,"
                             " fns: [typeof __map.opts.onOpen, typeof __map.opts.onClose]})"))
         self.assertEqual(o, {"api": "", "graphs": True, "editable": True, "papers": 3, "fns": ["function", "function"],
-                             "me": {"id": self.alice, "name": "Alice", "email": A, "role": "admin"}})
+                             "me": {"id": self.alice, "name": "Alice", "email": A, "role": "admin", "avatar": None}})
         publish("graph", {"id": "g_test"})
         publish("log", {"id": 1})
         b.wait_js("__map.events.includes('graph') && __map.events.includes('log')", 5, "graph events to the map")

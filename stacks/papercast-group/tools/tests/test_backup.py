@@ -80,6 +80,23 @@ class TestBackup(unittest.TestCase):
         self.assertEqual((r["linked"], r["copied"]), (1, 2))
         self.assertEqual(r["previous"], a.name)
 
+    def test_profile_pictures(self):
+        pics = self.data / "avatars"
+        pics.mkdir()
+        (pics / "1-0123456789abcdef.jpg").write_bytes(b"\xff\xd8\xff" + b"\0" * 300 + b"\xff\xd9")
+        a = backup.backup(self.data, self.dest, when=T0)
+        pa = Path(a["path"]) / "avatars/1-0123456789abcdef.jpg"
+        self.assertEqual(pa.read_bytes(), (pics / "1-0123456789abcdef.jpg").read_bytes())
+        self.assertEqual((a["avatars"]["files"], a["avatars"]["copied"], a["files"]), (1, 1, 2))   # episodes' count is its own
+        (pics / "2-fedcba9876543210.jpg").write_bytes(b"\xff\xd8\xff" + b"\1" * 300 + b"\xff\xd9")
+        b = backup.backup(self.data, self.dest, when=T0 + timedelta(days=1))
+        pb = Path(b["path"]) / "avatars/1-0123456789abcdef.jpg"
+        self.assertEqual(os.stat(pa).st_ino, os.stat(pb).st_ino)          # unchanged: a link to the last backup's
+        self.assertEqual((b["avatars"]["linked"], b["avatars"]["copied"]), (1, 1))
+        self.assertTrue((Path(b["path"]) / "avatars/2-fedcba9876543210.jpg").is_file())
+        with self.assertRaises(SystemExit):
+            backup.backup(self.data, pics / "bk")
+
     def test_keeps_newest(self):
         (self.dest / "notes").mkdir(parents=True)                        # not a backup: left alone
         names = []

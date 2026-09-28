@@ -178,6 +178,20 @@ def _link(out, i, link) -> None:
         out.append(f"{label}.source: s2 or text")
 
 
+def _announce(out, a) -> None:
+    """"announce": {"slack": true}: the uploader asked for the episode to be posted to the
+    group's Slack channel once it is ready (papercast add's question; the hub posts)."""
+    if a is not None and not (isinstance(a, dict) and isinstance(a.get("slack", False), bool)):
+        out.append('announce: an object like {"slack": true}, or left out')
+
+
+def announce(answer) -> dict:
+    """The manifest's "announce" for a job's answer to add's question: {} when there is none."""
+    if isinstance(answer, dict) and isinstance(answer.get("slack"), bool):
+        return {"announce": {"slack": answer["slack"]}}
+    return {}
+
+
 def validate(manifest, names) -> list[str]:
     """Problems with a manifest, given the file names in the bundle (the tar's member names as
     stored): [] when fine. `names` may be a dict {name: size in bytes}; then each file's size and
@@ -231,6 +245,7 @@ def validate(manifest, names) -> list[str]:
         for k in ("est_minutes", "wall_s"):
             if stats.get(k) is not None and not (_num(stats[k]) and stats[k] >= 0):
                 out.append(f"stats.{k}: a number, zero or more")
+    _announce(out, m.get("announce"))
     if sizes is not None:
         files = m.get("files") if isinstance(m.get("files"), dict) else {}
         for k, limit in FILE_MAX.items():

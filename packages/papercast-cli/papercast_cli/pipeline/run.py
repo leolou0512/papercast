@@ -1188,7 +1188,8 @@ class Job:
                           "explainer_html": "explainer.html", "claims": "claims.md"},
                 "links": lk.get("links") or [],
                 "stats": {"words": ep.get("words"), "est_minutes": ep.get("minutes"),
-                          "wall_s": round(wall)}}
+                          "wall_s": round(wall)},
+                **cbundle.announce(self.job.get("announce"))}     # add's Slack question
 
     def _bundle(self, force: bool = False) -> None:
         if not force and self.done("bundle") and os.path.isfile(self.p("bundle.tar.gz")):

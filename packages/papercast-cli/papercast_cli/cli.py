@@ -1,9 +1,11 @@
 """`papercast`: the command line (SPEC.md section 11).
 
   papercast login [--server URL]      log this computer in to the group's hub
-  papercast add <pdf|url|arXiv id>... make episodes (in the background, at most 2 at once)
+  papercast add <pdf|url|arXiv id>... make episodes (in the background, at most 2 at once);
+                                      asks whether to post them to the group's Slack channel
   papercast status [--all] [--json]   how far each one is, and the hub's side
-  papercast prefs [--maths ...]       your listening preferences (stored on the hub)
+  papercast prefs [--maths ...]       your listening preferences (stored on the hub), and
+                  [--slack on|off]    whether add's Slack question defaults to yes
   papercast cancel|retry <job>        stop a job, or run it again
   papercast whoami | logout | worker
 """
@@ -79,6 +81,52 @@ def _ask(question: str) -> bool:
         return input(question).strip().lower() in ("y", "yes")
     except EOFError:
         return False
+
+
+def _ask_default(question: str, default: bool) -> bool:
+    """[Y/n] or [y/N]: Enter (or no more input) takes the default."""
+    try:
+        a = input(question).strip().lower()
+    except EOFError:
+        return default
+    if a.startswith("y"):
+        return True
+    if a.startswith("n"):
+        return False
+    return default
+
+
+def _slack_features(api: Api) -> dict:
+    """The hub's Slack: {"enabled", "channel", "default"}; {} for a hub without it."""
+    try:
+        f = api.get("/api/cli/features", retries=0, timeout=10)
+    except (ApiError, PapercastError):
+        return {}
+    f = f.get("slack") if isinstance(f, dict) else None
+    return f if isinstance(f, dict) else {}
+
+
+def _announce(api: Api, flag: bool | None, me, n: int) -> dict | None:
+    """Post to the group's Slack channel when the episode is ready? Asked once for all of this
+    run's papers, and only when the hub has Slack set up. --slack / --no-slack answer it; without
+    a terminal, the person's default does (papercast prefs --slack). The hub posts, so the
+    answer goes into job.json and from there into the bundle's manifest."""
+    if not isinstance(me, dict):                 # the hub did not answer: only a flag counts
+        return None if flag is None else {"slack": flag}
+    slack = _slack_features(api)
+    if not slack.get("enabled"):
+        if flag:
+            _err("This hub has no Slack channel set up, so nothing will be posted there.")
+        return None
+    if flag is not None:
+        return {"slack": flag}
+    default = slack.get("default") is not False
+    if not sys.stdin.isatty():
+        return {"slack": default}
+    where = slack.get("channel") or "the group's Slack channel"
+    when = "it's" if n == 1 else "they're"
+    return {"slack": _ask_default(f"Post to {where} when {when} ready? "
+                                  f"{'[Y/n]' if default else '[y/N]'} ", default)}
 
 
 def _check_hub(api: Api, inp: dict, me: dict, yes: bool) -> tuple[bool, str | None]:
@@ -157,7 +205,7 @@ def cmd_add(args) -> int:
         raise PapercastError(f"Uploading needs the contributor role on {cfg['server']}; yours is "
                              "viewer. Ask an admin of the group.")
 
-    made = []
+    todo = []
     for inp in inputs:
         dup = jobs.duplicate_of(inp)
         if dup:
@@ -168,8 +216,12 @@ def cmd_add(args) -> int:
             go, version_of = _check_hub(api, inp, me, args.yes)
             if not go:
                 continue
+        todo.append((inp, version_of))
+    announce = _announce(api, args.slack, me, len(todo)) if todo else None
+    made = []
+    for inp, version_of in todo:
         job = jobs.create(inp, version_of=version_of, model=args.model,
-                          yes=args.yes or bool(version_of))
+                          yes=args.yes or bool(version_of), announce=announce)
         made.append(job)
         print(f"{job['id']}  queued  {jobs.label(job)}"
               + (f"  (your own version of {version_of})" if version_of else ""))
@@ -278,15 +330,43 @@ def _show_prefs(p: dict) -> None:
         print(f"\nShown on your episodes as: {prefs_mod.summary(settings)}")
 
 
+def _show_slack(slack: dict) -> None:
+    if slack.get("enabled"):
+        on = slack.get("default") is not False
+        print(f"{'slack':<11} {'on' if on else 'off':<10} add asks \"Post to "
+              f"{slack.get('channel') or 'Slack'} when it's ready?\"; Enter means "
+              f"{'yes' if on else 'no'} (--slack on|off)")
+
+
+def _set_slack(api: Api, cfg: dict, on: bool) -> None:
+    """papercast prefs --slack on|off: add's default answer, kept on the hub."""
+    try:
+        r = api.put("/api/cli/slack", {"default": on})
+    except NotFound:
+        raise PapercastError(f"{cfg['server']} cannot post to Slack (this hub has no Slack "
+                             "yet), so there is no default to set.")
+    r = r.get("slack", r) if isinstance(r, dict) else {}
+    where = r.get("channel") or "the group's Slack channel"
+    print(f"Saved. papercast add asks \"Post to {where} when it's ready? "
+          f"{'[Y/n]' if on else '[y/N]'}\"; Enter, or running without a terminal, means "
+          f"{'yes' if on else 'no'}.")
+    if r.get("enabled") is False:
+        print(f"(Slack is not set up on {cfg['server']} yet, so nothing is posted for now.)")
+
+
 def cmd_prefs(args) -> int:
     cfg = config.require_login()
     api = Api.from_config(cfg, retries=1, timeout=20)
     cur = api.prefs()
     cur = cur if isinstance(cur, dict) else {}
     changes = {k: getattr(args, k) for k in prefs_mod.SCHEMA if getattr(args, k, None)}
+    if args.slack is not None:
+        _set_slack(api, cfg, args.slack == "on")
     if not changes and args.note is None:
-        _show_prefs(cur)
-        print("\nChange with e.g.: papercast prefs --maths full --note \"skip the history\"")
+        if args.slack is None:
+            _show_prefs(cur)
+            _show_slack(_slack_features(api))
+            print("\nChange with e.g.: papercast prefs --maths full --note \"skip the history\"")
         return 0
     settings = {**(cur.get("settings") or {}), **changes}
     note = (cur.get("note") or "") if args.note is None else args.note
@@ -394,6 +474,9 @@ def build_parser() -> argparse.ArgumentParser:
                                                 "(default: the pipeline's)")
     s.add_argument("--yes", "-y", action="store_true",
                    help="make your own version when the paper is on the hub already")
+    s.add_argument("--slack", action=argparse.BooleanOptionalAction, default=None,
+                   help="post (or not) to the group's Slack channel when it is ready, without "
+                        "asking (default: ask; without a terminal, your papercast prefs --slack)")
     s.set_defaults(func=cmd_add)
 
     s = sub.add_parser("prefs", help="show or change your listening preferences")
@@ -403,6 +486,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--note", metavar="TEXT",
                    help=f"a note for the writer, at most {prefs_mod.NOTE_MAX} characters "
                         "(\"\" clears it)")
+    s.add_argument("--slack", choices=("on", "off"),
+                   help="add's default answer to \"Post to the Slack channel when it's ready?\"")
     s.set_defaults(func=cmd_prefs)
 
     s = sub.add_parser("cancel", help="stop a job for good")

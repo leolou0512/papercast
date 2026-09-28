@@ -28,7 +28,7 @@ home, write outside `/srv/papercast`, or gain privileges). They start at boot.
 | `etc/` | settings (`hub.env`, `worker.env`) and secrets (`worker.token`, `tunnel.token`, `smtp.password`): 0600, readable by `papercast` only |
 | `app/current` | the running code (`app/releases/<time>/`); `app/previous` is the one before |
 | `src/` | the source that release was installed from |
-| `voice/` | the voice (papercast-voice, Breeze, Kokoro; 17 GB with its models) |
+| `voice/` | the voice (papercast-voice, Breeze, Kokoro; 14 GB with its models) |
 | `bin/` | `papercastctl`, `cloudflared`, `ffmpeg`, `uv` |
 | `venv/`, `python/`, `cache/`, `worker/` | the hub's Python, the voice's Python, caches, the episode being voiced |
 
@@ -72,7 +72,9 @@ Users). With a Gmail account and its app password:
 
 ## Update the code
 
-The code is the papercast-group git repository (ask Leo where it is kept). From a machine with it:
+The code is the papercast-group git repository. On 2026-09-28 it lived only on Leo's machine
+(stibnite, `/home/leo/papercast-group`, no remote): get a copy from him before he leaves. From a
+machine with it:
 
     bash stacks/papercast-group/tools/sync_to_perov.sh YOU@100.97.205.90 --install
 
@@ -93,8 +95,9 @@ Networks → Tunnels). If it leaks or is refreshed there:
 
     papercastctl tunnel-token FILE        # or - and paste it, Enter, Ctrl-D
 
-It replaces `etc/tunnel.token`, restarts the tunnel and checks it connects; if it does not, the old
-token is kept aside and the message says how to put it back.
+It replaces `etc/tunnel.token`, restarts the tunnel (up to 30 s: cloudflared lets requests finish)
+and checks it connects; if it does not, the old token is kept aside and the message says how to
+put it back.
 
 ## Backups and restore
 
@@ -109,7 +112,7 @@ Backups are on perov's own disk: copy `/srv/papercast/backups` elsewhere now and
 
 1. On the old machine: `sudo systemctl stop papercast-hub papercast-voice papercast-tunnel`.
 2. Copy all of `/srv/papercast` to the same path on the new machine, as root
-   (`sudo rsync -aH /srv/papercast/ root@NEW:/srv/papercast/`, about 20 GB with the voice).
+   (`sudo rsync -aH /srv/papercast/ root@NEW:/srv/papercast/`, about 15 GB with the voice).
 3. On the new machine (Ubuntu with systemd, python3.10 and the NVIDIA driver):
    `sudo bash /srv/papercast/src/stacks/papercast-group/deploy/install.sh --system`.
    That makes the account, fixes the owners, installs the units and starts them. Add `--voice` if

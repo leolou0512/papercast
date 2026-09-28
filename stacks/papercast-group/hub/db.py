@@ -255,9 +255,19 @@ def _m3_indexes(c) -> None:
         c.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {on}")
 
 
+def _m4_runtime_columns(c) -> None:
+    """Columns the auth and voice modules also add on first use (ALTER if missing), here so a
+    database has them from migrate() on: invites.for_user (a sign-in link for an existing
+    person), voice_jobs.served_seq (the fair order's tie-break) and voice_jobs.worker."""
+    _add_column(c, "invites", "for_user", "INTEGER REFERENCES users(id)")
+    _add_column(c, "voice_jobs", "served_seq", "INTEGER")
+    _add_column(c, "voice_jobs", "worker", "TEXT")
+
+
 MIGRATIONS = [
     (2, _m2_paper_label),
     (3, _m3_indexes),
+    (4, _m4_runtime_columns),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0] if MIGRATIONS else 1      # what migrate() brings a database to
 

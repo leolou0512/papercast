@@ -182,8 +182,11 @@ def make_handler(cfg: C.Config):
                         continue
                     req.user = auth.authenticate(req, level)
                     fn(req, *mt.groups())
-                    if not req.sent:
-                        req.send_json(204 if method != "GET" else 200, {})
+                    if not req.sent:            # a 204 has no body, or keep-alive breaks
+                        if method in ("GET", "HEAD"):
+                            req.send_json(200, {})
+                        else:
+                            req.send(204, b"", "application/json")
                     return
                 if method in ("GET", "HEAD"):
                     name = "index.html" if u.path in ("/", "/index.html") else u.path.lstrip("/")

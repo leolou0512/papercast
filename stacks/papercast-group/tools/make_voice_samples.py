@@ -39,11 +39,8 @@ if str(GROUP) not in sys.path:
 
 from hub import voices  # noqa: E402
 
-# Speakable as papercast-voice wants it (no digits, no symbols): about twenty seconds.
-TEXT = ("Here is the idea in one breath. A diffusion model learns to undo noise, one small step at "
-        "a time. Start from pure static, ask the network which way the data lies, take a small step, "
-        "and ask again. After a few hundred steps, what comes out looks like the pictures it was "
-        "trained on, though nobody ever drew it.")
+# The paragraph the hub's custom-voice previews say too (hub/voices.py SAMPLE_TEXT).
+TEXT = voices.SAMPLE_TEXT
 
 
 def now_iso() -> str:

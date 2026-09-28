@@ -1,0 +1,274 @@
+#!/usr/bin/env bash
+# papercastctl: look after papercast-group on this machine (the system install: the account
+# papercast, /srv/papercast, the units papercast-*). Installed by deploy/install.sh --system into
+# /srv/papercast/bin, linked from /usr/local/bin. Runs itself under sudo; whatever touches the
+# hub's data runs as the account (sudo -u papercast). HANDOVER.md has the whole story.
+#
+#   papercastctl status                     is everything up (units, hub, public address, tunnel,
+#                                           voice, timers, last backup, disk, GPU)
+#   papercastctl logs [hub|voice|tunnel|backup|layout|all] [-f] [-n N]
+#   papercastctl restart|start|stop [hub|voice|tunnel|all]
+#   papercastctl update [DIR] [--voice]     install the synced tree DIR (default: /srv/papercast/src,
+#                                           the one installed last); rolls back if the check fails
+#   papercastctl rollback                   back to the release before (app/previous), restarted
+#   papercastctl signin-link EMAIL          make EMAIL an admin on the list; prints their username,
+#                                           first password and a one-time set-password link
+#   papercastctl allow list | add EMAIL... [--note T] | remove EMAIL... | import FILE|-
+#   papercastctl admins EMAIL...            as signin-link, for several
+#   papercastctl backup-now                 a backup now (as the nightly one), then lists them
+#   papercastctl backups                    the backups there are
+#   papercastctl restore NAME [--yes]       the data from backup NAME (the hub stopped meanwhile;
+#                                           the data before stays in /srv/papercast/data.before-restore-<time>)
+#   papercastctl tunnel-token FILE|-        replace the Cloudflare tunnel's token, restart the tunnel
+#   papercastctl email --host H --port 587 --user U --from F [--password-file FILE|-] [--test ADDRESS]
+#   papercastctl auth password|local [...], url --url URL     (deploy/cloudflare.sh)
+#   papercastctl voice-test [--force] [--keep]   a short Breeze sample through the real worker, as
+#                                           the voice unit runs (its sandbox), with a stand-in hub
+#   papercastctl version
+[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
+set -euo pipefail
+PCG_SYS_HOME=${PCG_SYS_HOME:-/srv/papercast}
+if [ "$(id -u)" != 0 ] && [ -z "${PCG_NO_SUDO:-}" ]; then
+    exec sudo -- "$0" "$@"
+fi
+LIB=${PCG_LIB:-$PCG_SYS_HOME/app/current/papercast-group/deploy/lib.sh}
+[ -f "$LIB" ] || { echo "papercastctl: no $LIB (is papercast-group installed here?)" >&2; exit 1; }
+. "$LIB"
+use_mode system
+DEPLOY=$APP/deploy
+PORT=$(hub_port)
+
+unit_of() {
+    case "${1:-all}" in
+        hub|voice|tunnel|backup|layout) echo "papercast-$1" ;;
+        papercast-*) echo "$1" ;;
+        all) echo "$U_HUB $U_VOICE $U_TUNNEL" ;;
+        *) die "which unit: hub, voice, tunnel, backup, layout or all (not $1)" ;;
+    esac
+}
+
+wait_hub() {    # the code of GET / once the hub answers (000 after 30 s of nothing)
+    local c=000 i
+    for i in $(seq 1 30); do
+        c=$(http_code "http://127.0.0.1:$PORT/")
+        [ "$c" = 000 ] || break
+        sleep 1
+    done
+    echo "$c"
+}
+
+# tunnel_connections: how many connections to Cloudflare the running tunnel has registered
+tunnel_connections() {
+    local inv
+    inv=$(systemctl show -p InvocationID --value "$U_TUNNEL" 2>/dev/null || true)
+    [ -n "$inv" ] || { echo 0; return; }
+    journalctl --no-pager -o cat "_SYSTEMD_INVOCATION_ID=$inv" 2>/dev/null | grep -c 'Registered tunnel connection' || true
+}
+
+confirm() {     # confirm <question>: yes typed, or give up
+    local a
+    printf '%s Type yes: ' "$1"
+    read -r a
+    [ "$a" = yes ] || die "nothing done"
+}
+
+cmd=${1:-status}; shift || true
+case "$cmd" in
+status)
+    echo "papercast-group on $(hostname -s): $(cat "$H/app/current/VERSION" 2>/dev/null || echo 'no release')"
+    for u in "$U_HUB" "$U_VOICE" "$U_TUNNEL"; do
+        printf '  %-17s %-9s %s\n' "$u" "$(systemctl is-active "$u" 2>/dev/null || true)" \
+            "($(systemctl is-enabled "$u" 2>/dev/null || true), since $(systemctl show -p ActiveEnterTimestamp --value "$u" 2>/dev/null))"
+    done
+    printf '  %-17s GET / -> %s (sign-in: %s)\n' "hub 127.0.0.1:$PORT" "$(http_code "http://127.0.0.1:$PORT/")" \
+        "$(get_env "$ETC/hub.env" PCG_AUTH)"
+    pub=$(get_env "$ETC/hub.env" PCG_PUBLIC_URL)
+    case "$pub" in https://*) printf '  %-17s GET / -> %s\n' "$pub" "$(http_code "$pub/")" ;; esac
+    printf '  %-17s %s connection(s) to Cloudflare registered\n' tunnel "$(tunnel_connections)"
+    claim=$(journalctl -u "$U_HUB" -n 300 -o short-iso --no-pager 2>/dev/null | grep 'POST /api/voice/claim' | tail -1 |
+            sed -E 's/^([^ ]+) .*" ([0-9]{3}) .*/\1 -> \2/')
+    if [ -f "$H/worker/current.json" ]; then
+        printf '  %-17s holding %s\n' voice "$(tr -d '\n' < "$H/worker/current.json" | cut -c1-120)"
+    else
+        printf '  %-17s idle; the worker last asked for work %s\n' voice "${claim:-(not in the last 300 lines of the hub log)}"
+    fi
+    systemctl list-timers --no-pager "$U_BACKUP.timer" "$U_LAYOUT.timer" 2>/dev/null | sed -n '2,3p' | sed 's/^/  /'
+    last=$(ls -1d "$H"/backups/2* 2>/dev/null | tail -1 || true)
+    printf '  %-17s %s\n' "last backup" "$([ -n "$last" ] && basename "$last" || echo none)"
+    printf '  %-17s %s\n' disk "$(df -h --output=used,avail "$H" | tail -1 | awk '{print $1 " used, " $2 " free"}') ($(du -sh "$H/data" 2>/dev/null | cut -f1) data)"
+    if command -v nvidia-smi >/dev/null; then
+        printf '  %-17s %s\n' GPU "$(nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader 2>/dev/null | head -1)"
+    fi
+    ;;
+logs)
+    which=all args=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -f|--follow) args+=(-f); shift ;;
+            -n) args+=(-n "$2"); shift 2 ;;
+            --since) args+=(--since "$2"); shift 2 ;;
+            *) which=$1; shift ;;
+        esac
+    done
+    units=()
+    if [ "$which" = all ]; then units=(-u "$U_HUB" -u "$U_VOICE" -u "$U_TUNNEL" -u "$U_BACKUP" -u "$U_LAYOUT")
+    else units=(-u "$(unit_of "$which")"); fi
+    [ ${#args[@]} -gt 0 ] || args=(-n 100)
+    exec journalctl --no-pager "${units[@]}" "${args[@]}"
+    ;;
+restart|start|stop)
+    # shellcheck disable=SC2046  (a list of units)
+    systemctl "$cmd" $(unit_of "${1:-all}")
+    case "$cmd:${1:-all}" in
+        stop:*|*:voice|*:tunnel) ;;
+        *) echo "hub: GET / -> $(wait_hub)" ;;
+    esac
+    [ "$cmd" = stop ] || { sleep 2; for u in $(unit_of "${1:-all}"); do echo "$u $(systemctl is-active "$u" || true)"; done; }
+    ;;
+update)
+    src=$H/src
+    if [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; then src=$1; shift; fi
+    [ -f "$src/stacks/papercast-group/deploy/install.sh" ] ||
+        die "no stacks/papercast-group/deploy/install.sh in $src (sync the repo there first: tools/sync_to_perov.sh)"
+    exec bash "$src/stacks/papercast-group/deploy/install.sh" --system "$@"
+    ;;
+rollback)
+    prev=$(readlink "$H/app/previous" 2>/dev/null || true)
+    [ -n "$prev" ] && [ -d "$H/app/$prev" ] || die "no release before this one (app/previous)"
+    cur=$(readlink "$H/app/current")
+    ln -sfn "$prev" "$H/app/current.new"; mv -T "$H/app/current.new" "$H/app/current"
+    ln -sfn "$cur" "$H/app/previous.new"; mv -T "$H/app/previous.new" "$H/app/previous"
+    systemctl restart "$U_HUB" "$U_VOICE"
+    echo "app/current -> $prev (was $cur); hub: GET / -> $(wait_hub)"
+    echo "(the database keeps any migrations the newer release made; the backups have it from before)"
+    ;;
+signin-link)
+    [ $# -eq 1 ] || die "signin-link EMAIL"
+    hub_py -m hub.auth bootstrap "$1"
+    ;;
+admins)
+    [ $# -gt 0 ] || die "admins EMAIL..."
+    for a in "$@"; do hub_py -m hub.auth bootstrap "$a"; done
+    ;;
+allow)
+    what=${1:-list}; shift || true
+    case "$what" in
+        list|add|remove) hub_py -m hub.auth allow "$what" "$@" ;;
+        import)
+            [ $# -eq 1 ] || die "allow import FILE (one email per line; - for stdin)"
+            # read here (the account cannot read people's homes), handed over on stdin
+            if [ "$1" = - ]; then hub_py -m hub.auth allow import -
+            else [ -r "$1" ] || die "cannot read $1"; hub_py -m hub.auth allow import - < "$1"
+            fi ;;
+        *) die "allow list | add EMAIL... | remove EMAIL... | import FILE" ;;
+    esac
+    ;;
+backup-now)
+    systemctl start "$U_BACKUP.service"
+    inv=$(systemctl show -p InvocationID --value "$U_BACKUP.service")
+    journalctl --no-pager -o cat "_SYSTEMD_INVOCATION_ID=$inv" | grep -v -e '^Starting ' -e '^Finished ' -e 'Deactivated' -e 'Consumed' || true
+    echo "the newest backups:"
+    ls -1d "$H"/backups/2* 2>/dev/null | tail -3 | sed "s|^$H/backups/|  |"
+    ;;
+backups)
+    for b in "$H"/backups/2*; do
+        [ -d "$b" ] || continue
+        printf '  %s  %s\n' "$(basename "$b")" "$(du -sh "$b" 2>/dev/null | cut -f1)"
+    done
+    ;;
+restore)
+    name=${1:-}; yes=""; [ "${2:-}" = --yes ] && yes=1
+    [ -n "$name" ] || die "restore NAME (papercastctl backups lists them)"
+    b=$H/backups/$name
+    [ -f "$b/hub.db" ] && [ -d "$b/episodes" ] || die "no backup $b (papercastctl backups)"
+    [ -n "$yes" ] || confirm "Replace the hub's data with the backup $name? The hub stops for a moment; the data now is kept aside."
+    stamp=$(date -u +%Y%m%dT%H%M%SZ)
+    systemctl stop "$U_VOICE" "$U_HUB"
+    mv "$H/data" "$H/data.before-restore-$stamp"
+    mkdir "$H/data"; own_pc "$H/data"; chmod 0750 "$H/data"
+    # copies, never links: the hub writes into its files, a link would change the backup
+    as_pc cp -a "$b/hub.db" "$H/data/hub.db"
+    as_pc cp -a "$b/episodes" "$H/data/episodes"
+    hub_py -m hub.db migrate
+    systemctl start "$U_HUB" "$U_VOICE"
+    echo "hub: GET / -> $(wait_hub)"
+    echo "restored $name; the data before is $H/data.before-restore-$stamp (delete it once the page looks right)"
+    ;;
+tunnel-token)
+    [ $# -eq 1 ] || die "tunnel-token FILE (or - to paste it: Enter, then Ctrl-D)"
+    t=$ETC/tunnel.token
+    (umask 077; if [ "$1" = - ]; then cat > "$t.new"; else cat -- "$1" > "$t.new"; fi)
+    tr -d ' \r\n\t' < "$t.new" | grep -q . || { rm -f "$t.new"; die "that token is empty"; }
+    own_pc "$t.new"; chmod 600 "$t.new"
+    [ ! -f "$t" ] || cp -p "$t" "$t.before"
+    mv "$t.new" "$t"
+    systemctl enable -q "$U_TUNNEL"
+    systemctl restart "$U_TUNNEL"
+    n=0
+    for _ in $(seq 1 20); do n=$(tunnel_connections); [ "$n" -gt 0 ] && break; sleep 1; done
+    if [ "$n" -gt 0 ]; then
+        rm -f "$t.before"
+        echo "tunnel up with the new token: $n connection(s) to Cloudflare"
+    else
+        journalctl -u "$U_TUNNEL" -n 15 -o cat --no-pager | sed -E 's/eyJ[A-Za-z0-9_=-]{20,}/<token>/g'
+        echo "the tunnel did not register with the new token (above); the old one is in $t.before:" >&2
+        echo "  papercastctl tunnel-token $t.before   puts it back" >&2
+        exit 1
+    fi
+    ;;
+email)
+    pwf="" rest=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --password-file) pwf=$2; shift 2 ;;
+            *) rest+=("$1"); shift ;;
+        esac
+    done
+    if [ -n "$pwf" ]; then
+        (umask 077; if [ "$pwf" = - ]; then cat > "$ETC/smtp.password"; else cat -- "$pwf" > "$ETC/smtp.password"; fi)
+        own_pc "$ETC/smtp.password"; chmod 600 "$ETC/smtp.password"
+    fi
+    PCG_MODE=system exec bash "$DEPLOY/cloudflare.sh" email "${rest[@]}"
+    ;;
+auth|url)
+    PCG_MODE=system exec bash "$DEPLOY/cloudflare.sh" "$cmd" "$@"
+    ;;
+voice-test)
+    force="" keep=""
+    for a in "$@"; do case "$a" in --force) force=1 ;; --keep) keep=--keep ;; *) die "voice-test [--force] [--keep]" ;; esac; done
+    [ ! -f "$H/worker/current.json" ] || die "the worker is voicing an episode now ($H/worker/current.json): try later"
+    if command -v nvidia-smi >/dev/null; then
+        apps=$(nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader 2>/dev/null || true)
+        echo "GPU: $(nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader | head -1)"
+        if [ -n "$apps" ] && [ -z "$force" ]; then
+            echo "$apps" | while IFS=, read -r pid mem; do
+                echo "  in use: pid $pid ($(ps -o user= -p "$pid" 2>/dev/null || echo '?'),$mem)"
+            done
+            die "someone is computing on the card: not now (--force waits for it, as every episode does)"
+        fi
+    fi
+    # The sandbox of the voice unit, as systemd-run properties.
+    props=()
+    while IFS= read -r line; do
+        case "$line" in
+            NoNewPrivileges=*|Protect*=*|PrivateTmp=*|ReadWritePaths=*|DevicePolicy=*|DeviceAllow=*|\
+            SupplementaryGroups=*|Restrict*=*|LockPersonality=*|CapabilityBoundingSet=*|\
+            SystemCallArchitectures=*|Nice=*|IOScheduling*=*|UMask=*|MemoryMax=*|MemorySwapMax=*)
+                props+=(-p "$line") ;;
+        esac
+    done < <(sed -n '/^\[Service\]/,/^\[/p' "$PCG_SYS_UNITS/$U_VOICE.service")
+    d=$H/cache/voice-test
+    as_pc mkdir -p "$d/papercast-group"
+    echo "a short sample through the worker and papercast-voice, as $PCG_USER in the voice unit's sandbox (about 2-3 minutes)"
+    systemd-run --quiet --wait --pipe --collect --uid="$PCG_USER" --gid="$PCG_USER" \
+        --working-directory="$d" -p "Environment=HOME=$d LANG=C.UTF-8" "${props[@]}" \
+        "$PY" "$APP/tools/voice_smoke.py" --voice "$H/voice/bin/papercast-voice" $keep
+    ;;
+version)
+    cat "$H/app/current/VERSION"
+    ;;
+help|-h|--help)
+    sed -n '2,/^\[ -n/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
+    ;;
+*) die "unknown command $cmd (papercastctl help)" ;;
+esac

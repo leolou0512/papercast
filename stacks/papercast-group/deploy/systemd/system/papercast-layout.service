@@ -1,0 +1,38 @@
+# Nightly full layout of every graph (SPEC.md section 8: 8 starts, run to rest),
+# `python -m hub.layout --all`. Guarded: until hub/layout.py has a command line this says so and
+# succeeds. Started by papercast-layout.timer.
+[Unit]
+Description=papercast-group nightly graph layout
+Documentation=file://@H@/HANDOVER.md
+
+[Service]
+Type=oneshot
+User=@USER@
+Group=@USER@
+EnvironmentFile=@H@/etc/hub.env
+WorkingDirectory=@H@/app/current/papercast-group
+ExecStart=/bin/sh -c 'if grep -q "__main__" hub/layout.py; then exec @H@/venv/bin/python -m hub.layout --all; else echo "hub/layout.py has no command line yet: nothing laid out"; fi'
+Nice=15
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+UMask=0027
+MemoryMax=8G
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=@H@
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native

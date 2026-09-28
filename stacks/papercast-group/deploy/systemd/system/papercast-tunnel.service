@@ -1,0 +1,43 @@
+# papercast-group: the Cloudflare tunnel that carries papercast.virtualatoms.org to the hub on
+# 127.0.0.1. The token (a tunnel made in the domain owner's Cloudflare dashboard) is read from a
+# 600 file, never from the command line. A system unit run as @USER@; `papercastctl tunnel-token
+# FILE` replaces the token.
+[Unit]
+Description=papercast-group Cloudflare tunnel
+Documentation=file://@H@/HANDOVER.md
+After=network-online.target papercast-hub.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@USER@
+Group=@USER@
+ExecStart=@H@/bin/cloudflared tunnel --no-autoupdate run --token-file @H@/etc/tunnel.token
+Restart=always
+RestartSec=10
+Nice=10
+UMask=0077
+MemoryMax=1G
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=@H@
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # The voice on this machine: Leo's papercast-voice with the Breeze TTS 2 GPU voice, installed by
 # its own install.sh (stacks/papercast/voice/install.sh, run unmodified) into
-# $PCG_HOME/voice instead of stibnite's /home/leo/papercast/voice. As leo, no sudo. Safe to re-run.
+# $PCG_HOME/voice instead of stibnite's /home/leo/papercast/voice. Safe to re-run. In the user mode
+# as leo; in the system mode install.sh --system --voice runs it as the account papercast
+# (PCG_MODE=system, PCG_HOME=/srv/papercast, caches under /srv/papercast/cache).
 #
 #   bash deploy/install-voice.sh             papercast-voice + Kokoro (CPU) + Breeze (GPU), ~15 GB
 #
@@ -13,20 +15,23 @@ set -euo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$HERE/lib.sh"
 REPO=$(cd "$HERE/../../.." && pwd)
-VSRC=$REPO/stacks/papercast/voice
+VSRC=${PCG_VOICE_SRC:-$REPO/stacks/papercast/voice}
 V=$PCG_HOME/voice
+VCACHE=${PCG_VOICE_CACHE:-$PCG_HOME/voice-cache}
 
 [ "$(id -u)" != 0 ] || die "run as your own user, not root"
 [ -f "$VSRC/install.sh" ] || die "no $VSRC/install.sh (needs the repo's stacks/papercast/voice)"
 export PATH="$BIN:$PATH"
 ensure_uv
 
-mkdir -p "$PCG_HOME"
-chmod 700 "$PCG_HOME"
+if [ "$MODE" = user ]; then
+    mkdir -p "$PCG_HOME"
+    chmod 700 "$PCG_HOME"
+fi                                  # (system: /srv/papercast is root's; voice/ is the account's)
 say "papercast-voice -> $V (disk: $(df -h --output=avail / | tail -1 | tr -d ' ') free)"
 # The voice's install checks for speaking jobs in <state>/*/voice/status.json: the hub's
 # episodes are laid out the same way (episodes/<id>/voice/).
-PAPERCAST_VOICE_HOME=$V PAPERCAST_VOICE_CACHE=$PCG_HOME/voice-cache \
+PAPERCAST_VOICE_HOME=$V PAPERCAST_VOICE_CACHE=$VCACHE \
 PAPERCAST_STATE=$PCG_HOME/data/episodes \
     nice -n 10 bash "$VSRC/install.sh" --gpu breeze
 

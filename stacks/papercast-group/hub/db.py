@@ -387,16 +387,21 @@ def meta_set(key: str, value: str) -> None:
 
 # ---- paper identity (SPEC.md section 3)
 
-def find_paper(keys: dict):
-    """The paper these keys name, or None. Tried in the SPEC's order: arXiv id without its
-    version, DOI lowercased, the PDF's sha256, the normalised title; the first key that matches
-    decides. Returns a sqlite3.Row."""
-    c = conn()
+def identity(keys: dict) -> list:
+    """[(column, value)] for a paper's identity keys, normalised, in the SPEC's order: arXiv id
+    without its version, DOI lowercased, the PDF's sha256, the normalised title."""
     ax = re.sub(r"v\d+$", "", re.sub(r"^arxiv:", "", (keys.get("arxiv_id") or "").strip(), flags=re.I))
-    doi = (keys.get("doi") or "").strip().lower()
-    sha = (keys.get("source_sha256") or "").strip().lower()
-    title = norm_title(keys.get("title") or "")
-    for col, val in (("arxiv_id", ax), ("doi", doi), ("source_sha256", sha), ("title_norm", title)):
+    return [(col, val) for col, val in (
+        ("arxiv_id", ax), ("doi", (keys.get("doi") or "").strip().lower()),
+        ("source_sha256", (keys.get("source_sha256") or "").strip().lower()),
+        ("title_norm", norm_title(keys.get("title") or ""))) if val]
+
+
+def find_paper(keys: dict, c=None):
+    """The paper these keys name, or None: the first key (identity() order) that matches any
+    paper decides. Returns a sqlite3.Row. `c`: another connection (a read-only one, say)."""
+    c = c or conn()
+    for col, val in identity(keys):
         if val:
             r = c.execute(f"SELECT * FROM papers WHERE {col} = ? ORDER BY created_at, id LIMIT 1", (val,)).fetchone()
             if r is not None:

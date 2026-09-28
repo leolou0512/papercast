@@ -26,7 +26,8 @@ Cloudflare ──tunnel──▶ cloudflared (perov) ──▶ hub 127.0.0.1:848
 | `  repo/` | the source it was installed from (`tools/sync_to_perov.sh`; `repo/.revision` = commit) |
 | `  app -> app-<time>/` | the running code: `papercast-group/` (hub, deploy, tools), `papercast-cli/`, `VERSION` |
 | `  venv/` | Python 3.10 (system), numpy 2.2.6; `app/papercast-group` and `app/papercast-cli` on its path (a `.pth`) |
-| `  hub.env` (0600) | `PCG_DATA`, `PCG_AUTH`, `PCG_SECRET` (generated once), `PCG_BIND=127.0.0.1`, `PCG_PORT=8480`, `PCG_PUBLIC_URL`, `PCG_ADMIN_EMAILS`, `PCG_WORKER_TOKEN_SHA256` |
+| `  hub.env` (0600) | `PCG_DATA`, `PCG_AUTH`, `PCG_SECRET` (generated once), `PCG_BIND=127.0.0.1`, `PCG_PORT=8480`, `PCG_PUBLIC_URL`, `PCG_ADMIN_EMAILS`, `PCG_WORKER_TOKEN_SHA256`; for "forgot password" emails `PCG_SMTP_HOST`, `PCG_SMTP_PORT`, `PCG_SMTP_USER`, `PCG_SMTP_PASSWORD_FILE`, `PCG_SMTP_FROM` |
+| `  smtp.password` (0600) | the SMTP account's (app) password, when email is set up; never in `hub.env` |
 | `  worker.token` (0600), `worker.env` (0600) | the voice worker's token (the hub keeps only its sha256) and settings |
 | `  data/` | `hub.db` and `episodes/<episode_id>/` (the voice job is `episodes/<id>/voice/`) |
 | `  voice/` | papercast-voice with Breeze TTS 2 and Kokoro (~13 GB), `voice/voice.json` |
@@ -105,9 +106,11 @@ systemctl --user start pcg-backup                    # [run, guarded] tools/back
 cat ~/papercast-group/worker/current.json            # the episode being voiced, if any
 cat ~/papercast-group/data/episodes/<id>/voice/status.json   # the voice's own status
 ```
-The first admin (local auth): `cd ~/papercast-group/app/papercast-group && set -a && .
+The first admins: with password sign-in, `cloudflare.sh auth password` puts them on the list
+(below); one more at any time is `cd ~/papercast-group/app/papercast-group && set -a && .
 ~/papercast-group/hub.env && set +a && ~/papercast-group/venv/bin/python -m hub.auth bootstrap
-<email>` prints a one-time link (A2's command; `PCG_ADMIN_EMAILS` must name that email).
+<email>` (prints the username, the first password and a one-time 24-hour set-password link).
+Under local auth the same command prints a one-time sign-in link.
 
 **Linger** is on for leo on perov (`loginctl show-user leo` → `Linger=yes`, checked
 2026-09-28), so the units start at boot and survive logout. `install.sh` warns if it is off.
@@ -152,7 +155,7 @@ copy of the MP3 (the hub has it). A failure is `POST /api/voice/<id>/failed {"er
   voice: Leo's pick is Breeze; never automatic).
 
 Tests: `python3 -m unittest discover -s stacks/papercast-group/deploy/tests` (a fake hub, a fake
-papercast-voice with the real one's files and ids; 14 tests, about 20 s) [run on stibnite and perov].
+papercast-voice with the real one's files and ids; 14 tests, about 20 s) [run on stibnite and perov]; the same command runs `test_cloudflare.py` (5 tests, stibnite only).
 
 ## The quick tunnel (testing only)
 
@@ -188,37 +191,88 @@ cloudflared also prints), `PCG_PUBLIC_URL` set and the hub restarted with it, `d
 time limit (`--minutes 1`: ended after 60 s) both putting the old value back, nothing left
 running; and with the real cloudflared, the refusal reported and `PCG_PUBLIC_URL` untouched.
 
-## Production: papercast.virtualatoms.org (Cloudflare tunnel + Access)
+## Production: papercast.virtualatoms.org (a Cloudflare tunnel, the hub's own sign-in)
 
-The domain's owner does two things in his Cloudflare dashboard; perov needs no open port, since
-the tunnel connects out (checked 2026-09-28: `region1/2.v2.argotunnel.com` and
-`<team>.cloudflareaccess.com` are reachable from perov; only the free quick tunnel's
-`trycloudflare.com` is blocked by the college's DNS).
+Cloudflare only carries the traffic: no Cloudflare Access, no Google, no invite links. perov needs
+no open port, since the tunnel connects out (checked 2026-09-28: `region1/2.v2.argotunnel.com` is
+reachable from perov; only the free quick tunnel's `trycloudflare.com` is blocked by the college's
+DNS). The domain's owner does one thing in his Cloudflare dashboard:
 
-1. **The tunnel.** Zero Trust → Networks → Tunnels → Create a tunnel → Cloudflared, named
-   `papercast`. Public hostname: subdomain `papercast`, domain `virtualatoms.org`, service
-   `HTTP` → `127.0.0.1:8480` (the hub, next to cloudflared on perov). Cloudflare adds the DNS
-   record itself (`papercast CNAME <tunnel id>.cfargotunnel.com`, proxied); a record alone would
-   not work, as the tunnel must be in the same account as the domain. He sends the **tunnel token**.
-2. **The login.** Zero Trust → Access → Applications → Add → Self-hosted: name `Papercast`,
-   domain `papercast.virtualatoms.org`, policy **Allow** with the group's emails (or an email
-   domain), login method One-time PIN (and Google if wanted). A second self-hosted application
-   for the path `papercast.virtualatoms.org/api/cli/*`, policy **Bypass**, Everyone: the CLI
-   talks to the hub with its own device token there (the voice worker talks to the hub on
-   127.0.0.1, not through the tunnel, so it needs no bypass). He sends the **team name**
-   (`<team>.cloudflareaccess.com`) and the first application's **AUD tag** (its Overview page).
+**The tunnel.** Zero Trust → Networks → Tunnels → Create a tunnel → Cloudflared, named
+`papercast`. Public hostname: subdomain `papercast`, domain `virtualatoms.org`, service `HTTP` →
+`127.0.0.1:8480` (the hub, next to cloudflared on perov). Cloudflare adds the DNS record itself
+(`papercast CNAME <tunnel id>.cfargotunnel.com`, proxied); a record alone would not work, as the
+tunnel must be in the same account as the domain. He sends the **tunnel token**. No Access
+application: if one was made for this hostname earlier, delete it, or Cloudflare would ask for its
+own login in front of the hub's.
 
 Then on perov:
 
     umask 077; cat > ~/papercast-group/tunnel.token      # paste the token, Enter, Ctrl-D
-    bash ~/papercast-group/app/papercast-group/deploy/cloudflare.sh tunnel
-    bash ~/papercast-group/app/papercast-group/deploy/cloudflare.sh login --team <team> --aud <AUD> \
-         --url https://papercast.virtualatoms.org --admin <the email Leo logs in with>
+    D=~/papercast-group/app/papercast-group/deploy
+    bash $D/cloudflare.sh tunnel
+    bash $D/cloudflare.sh url --url https://papercast.virtualatoms.org
+    bash $D/cloudflare.sh auth password                  # yl6719@ic.ac.uk and a.ganose@ic.ac.uk, admins
 
-From then on everyone signs in with Cloudflare's email code; a person seen for the first time is
-a viewer, and an admin makes them a contributor in Settings → Users. Contributors log the CLI in
-with `papercast login --server https://papercast.virtualatoms.org` (approve in the browser).
-`cloudflare.sh local` goes back to the hub's own invite links; `cloudflare.sh status` shows the mode.
+`auth password` puts the two admins on the list (`--admin EMAIL`, repeated, names others), prints
+each one's username, first password and a one-time 24-hour set-password link, restarts the hub
+and checks that a browser without a session gets the sign-in page. `auth local` goes back to the
+hub's own invite links; `cloudflare.sh status` shows the settings.
+
+### Who can sign in (PCG_AUTH=password; hub/accounts.py)
+
+- **The list** of allowed emails, Imperial only (`@ic.ac.uk`, `@imperial.ac.uk`). An admin adds
+  someone in Settings → Users by typing the short code (the box ends in `@ic.ac.uk`; a full
+  `@ic.ac.uk` address pasted works too). The account exists at once: username = the short code
+  (yl6719@ic.ac.uk is `yl6719`), role contributor (they can upload from the CLI straight away;
+  an admin can change the role), **first password = the short code**. Tell them. At the first
+  sign-in the hub asks for a new password before anything else: every other request answers 403
+  `must_change_password`, and approving a CLI device waits too. Users shows who still has the
+  first password and when each person last signed in.
+- **Removing** someone (⋯ → Remove…, then type `delete`) takes the email off the list and
+  disables the account at once: its sessions and CLI tokens end; the episodes and graph edits
+  they made stay, credited to them. Nobody can remove themselves or the last admin. Adding the
+  address again brings the account back, with the password it had.
+- **From the server** (with the hub's env, as for bootstrap above): `python3 -m hub.auth allow
+  list`, `allow add EMAIL... [--note TEXT]`, `allow remove EMAIL...`, `allow import FILE` (one
+  email per line, `#` comments; `-` reads stdin).
+- **Sign-in** with the username or the full email and the password. Passwords are scrypt
+  (n = 2^14, r = 8, p = 1, 16-byte salt, stored with their parameters: 44 ms on stibnite's Xeon;
+  raise `SCRYPT_N` in accounts.py if perov is faster, and each hash is redone at its owner's next
+  sign-in). At least 10 characters, no composition rules; common passwords and ones containing
+  the username are refused. Sessions last 30 days (cookie `Secure` over https); a new password, a
+  reset, Settings → Account → "Sign out everywhere", disabling or removal ends every session.
+- **Limits.** 10 failed sign-ins per account and 20 per address in 15 minutes, then each try
+  waits, doubling from 30 s up to 15 min; an unknown account costs the same scrypt and gets the
+  same answer. Reset links: 3 per email and 10 per address an hour. The address is
+  `CF-Connecting-IP`, trusted only on connections from 127.0.0.1 (cloudflared).
+- **Forgot password.** The sign-in page asks for the email; if it is on the list, the hub emails a
+  one-use link (1 hour; only its sha256 is stored). The page answers the same whoever is on the
+  list. Without email set up, it says to ask an admin, and Users shows "asked for a new
+  password"; an admin then makes a link (⋯ → Make a password link, 24 hours, copy it to them)
+  or resets them to the first password (⋯ → Reset to the first password: their sessions and
+  devices end).
+- **The log.** Users → "Sign-ins and changes": sign-ins, failures, links asked for, sent and
+  used, list changes (the newest 2,000 are kept).
+
+### Email, for "forgot password" only
+
+Everything works without it. A dedicated Gmail account with an app password works from perov
+(`smtp.gmail.com` 587 and 465 are reachable):
+
+1. Make the account (say `papercast.group@gmail.com`), turn on 2-Step Verification, then Google
+   Account → Security → App passwords → make one named "papercast hub" (16 letters).
+2. On perov:
+
+       umask 077; cat > ~/papercast-group/smtp.password     # paste the app password, Enter, Ctrl-D
+       bash $D/cloudflare.sh email --host smtp.gmail.com --port 587 --user papercast.group@gmail.com \
+            --from papercast.group@gmail.com --test yl6719@ic.ac.uk
+
+   That writes `PCG_SMTP_HOST`, `PCG_SMTP_PORT` (587 STARTTLS, or 465 TLS from the start; never
+   in the clear), `PCG_SMTP_USER`, `PCG_SMTP_PASSWORD_FILE` and `PCG_SMTP_FROM` into `hub.env`
+   (the password stays in its own 600 file), sends a test email and restarts the hub. The emails
+   say they come from "papercast". A later check: `python3 -m hub.auth email-test ADDRESS`.
+   The first link may land in Imperial's junk or quarantine folder: worth a look.
 
 ## Uninstall
 
@@ -258,7 +312,8 @@ an A7/A8 mismatch (`Api.upload() takes 2 positional arguments but 4 were given`)
 | `run_hub.py` | how the hub is started (one copy of `hub.app`) |
 | `watchdog.sh` | the no-systemd fallback (crontab) |
 | `tunnel.sh` | the quick tunnel |
-| `tests/` | the worker's tests: `fake_hub.py`, `fake_papercast_voice.py`, `test_voice_worker.py` |
+| `cloudflare.sh` | production: the named tunnel, the public address, the sign-in mode and its first admins, the SMTP account |
+| `tests/` | the worker's tests: `fake_hub.py`, `fake_papercast_voice.py`, `test_voice_worker.py`; `test_cloudflare.py` (cloudflare.sh with a fake systemctl and curl) |
 | `../tools/sync_to_perov.sh` | rsync of the repo to perov |
 | `../tools/voice_smoke.py` | one short episode through the worker and the real voice, a fake hub |
 | `../tests/e2e_test.py`, `../tests/fake_claude.py` | the end-to-end test |

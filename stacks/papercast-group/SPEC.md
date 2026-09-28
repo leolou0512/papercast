@@ -19,8 +19,10 @@ edits `stacks/papercast/`; code from it is copied, not imported.
   Claude credential. Uploads a finished bundle.
 - **Voice worker** (on perov's A4000): takes finished scripts from the hub in a fair order and
   voices them with Breeze (the existing `papercast-voice`, installed on perov). No Claude.
-- **Access**: over the internet through a Cloudflare tunnel. Production: Cloudflare Access in
-  front (email login), the hub verifies Access's JWT. Tonight's test: a free quick tunnel
+- **Access**: over the internet through a Cloudflare tunnel (papercast.virtualatoms.org →
+  127.0.0.1:8480), which only carries the traffic. Production sign-in is the hub's own
+  **password** auth (Leo, 2026-09-28): a ledger of allowed Imperial emails, email only for
+  "forgot password", no Google, no Cloudflare Access. Tonight's test: a free quick tunnel
   (`cloudflared tunnel --url`, `*.trycloudflare.com`) with the hub's own **local** auth
   (invite links), fake data only, taken down after the test.
 
@@ -40,6 +42,8 @@ stacks/papercast-group/
   hub/events.py                 in-process pub/sub for SSE              (coordinator)
   hub/db.py                     SQLite schema, migrations, data helpers (A1)
   hub/auth.py                   identity, roles, sessions, CLI login, tokens (A2)
+  hub/accounts.py               PCG_AUTH=password: the ledger, passwords, reset links, limits, email
+  hub/static/signin.* setpw.*   the sign-in and set-password pages
   hub/contrib.py                CLI API: lookup, claims, bundle upload, server-side checks (A3)
   hub/voiceq.py                 voice queue API + fairness              (A3)
   hub/web.py                    browser API: library, listened, positions, prefs, admin, audio, explainer, SSE (A4)
@@ -65,8 +69,18 @@ packages/papercast-cli/
 
 ## 2. Identity and auth (A2)
 
-- `PCG_AUTH`: `cf-access` (production), `local` (tonight's tunnel test), `header` (tests only:
-  trusts `X-Test-User: <email>` and only from 127.0.0.1).
+- `PCG_AUTH`: `password` (production), `cf-access`, `local` (tonight's tunnel test), `header`
+  (tests only: trusts `X-Test-User: <email>` and only from 127.0.0.1).
+  - `password` (`hub/accounts.py`): only emails on the ledger (`allowed_emails`, `@ic.ac.uk` or
+    `@imperial.ac.uk`) have accounts; adding one makes it (username = the local part, fixed; role
+    contributor; first password = the username, which must be replaced before any other request
+    works: 403 `must_change_password`). Sign-in by username or email; scrypt; cookie `pcg_s` v2
+    carries `users.session_v`, so a new password, a reset, "sign out everywhere", disabling or
+    removal ends every session; removal also revokes the device tokens. Reset links (one use, 1 h
+    by email, 24 h from an admin; sha256 only) by `POST /api/auth/forgot`, which answers the same
+    for anyone. Rate limits per account and per client address (`CF-Connecting-IP` from
+    127.0.0.1). A signed-out browser opening the page gets `/signin`. Commands:
+    `python3 -m hub.auth bootstrap EMAIL`, `allow list|add|remove|import`, `email-test`.
   - `cf-access`: verify header `Cf-Access-Jwt-Assertion` (RS256; keys from
     `https://<PCG_CF_TEAM>.cloudflareaccess.com/cdn-cgi/access/certs`, cached 1 h; `aud` must
     contain `PCG_CF_AUD`; `exp` checked). Identity = the `email` claim (lowercased). Stdlib RSA

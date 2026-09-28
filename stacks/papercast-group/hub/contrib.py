@@ -106,6 +106,28 @@ def norm_sha(v):
     return s if re.fullmatch(r"[0-9a-f]{64}", s) else None
 
 
+def _lenient(m):
+    """Strict on what the episode says, lenient on how it describes itself: a DOI or arXiv id in
+    another common spelling is normalised, and preferences a newer or older client wrote in a
+    form this hub does not know are kept only where valid (they describe the episode, they do not
+    change it). Everything else goes to bundle.validate as sent."""
+    if not isinstance(m, dict):
+        return m
+    paper = m.get("paper")
+    if isinstance(paper, dict):
+        if paper.get("doi"):
+            paper["doi"] = norm_doi(paper["doi"]) or paper["doi"]
+        if paper.get("arxiv_id"):
+            paper["arxiv_id"] = norm_arxiv(paper["arxiv_id"]) or paper["arxiv_id"]
+    pr = m.get("prefs")
+    if isinstance(pr, dict):
+        s = pr.get("settings") if isinstance(pr.get("settings"), dict) else {}
+        pr["settings"] = {k: v for k, v in s.items() if v in P.SCHEMA.get(k, ())}
+        if not isinstance(pr.get("note"), str):
+            pr["note"] = ""
+    return m
+
+
 def identity(arxiv_id=None, doi=None, sha=None, title=None) -> dict:
     k = {"arxiv_id": norm_arxiv(arxiv_id), "doi": norm_doi(doi), "source_sha256": norm_sha(sha),
          "title_norm": db.norm_title(title) if isinstance(title, str) else None}
@@ -544,6 +566,12 @@ def _begin(req) -> None:
     voiceq.start_sweeper()
 
 
+def start(cfg) -> None:
+    """At the hub's start (app.serve): recheck episodes left in checking, start the sweeper."""
+    _recover_once(cfg)
+    voiceq.start_sweeper()
+
+
 # ---- routes: who, prompt, prefs, library
 
 def me(req):
@@ -827,7 +855,7 @@ def upload(req):
             manifest = _read_manifest(stage, names)
         except BadBundle as e:
             raise HTTPError(400, "bad_bundle", e.problems[0], problems=e.problems)
-        problems = bundle.validate(manifest, names)
+        problems = bundle.validate(_lenient(manifest), names)
         if problems:
             raise HTTPError(400, "bad_manifest", problems[0], problems=problems)
         out = _land(req, manifest, stage, names)

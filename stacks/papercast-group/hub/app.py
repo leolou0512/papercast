@@ -16,6 +16,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+if __name__ == "__main__":             # `python -m hub.app`: one module object, one HTTPError
+    sys.modules.setdefault("hub.app", sys.modules[__name__])
+
 from . import config as C
 from . import db
 
@@ -194,6 +197,8 @@ def make_handler(cfg: C.Config):
                         return
                 raise HTTPError(404, "not_found", "no such page")
             except HTTPError as e:
+                if req._body is None and int(self.headers.get("Content-Length") or 0):
+                    self.close_connection = True
                 if not req.sent:
                     req.send_json(e.code, {"error": e.err, "message": e.msg, **e.extra})
             except (BrokenPipeError, ConnectionResetError):
@@ -229,6 +234,13 @@ def serve(cfg: C.Config) -> ThreadingHTTPServer:
     srv = ThreadingHTTPServer((cfg.bind, cfg.port), make_handler(cfg))
     srv.daemon_threads = True
     srv.cfg = cfg
+    # A module may define start(cfg): background work that must run from the hub's start
+    # (recovering episodes stuck in checking, the stale-claim sweeper, layouts), not from the
+    # first request that happens to reach it.
+    for name in ROUTE_MODULES + ["layout"]:
+        mod = importlib.import_module(f"{__package__}.{name}")
+        if callable(getattr(mod, "start", None)):
+            mod.start(cfg)
     return srv
 
 

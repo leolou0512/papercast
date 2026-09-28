@@ -383,13 +383,14 @@ class ContribTest(unittest.TestCase):
         self.assertTrue(any("words is about" in p for p in report), report)
         self.assertTrue(any("delve" in p.lower() for p in report), report)
         self.assertTrue(any("<!doctype html>" in p for p in report), report)
-        self.assertTrue(any(p.startswith("explainer.json: points") for p in report), report)
+        self.assertTrue(any(p.startswith("explainer.json") and "points" in p for p in report), report)
         # not UTF-8
         m = H.manifest(paper_id=pid, paper_over={"arxiv_id": None})
         data = H.tar_gz([("manifest.json", json.dumps(m).encode()), ("script.md", b"\xff\xfe bad bytes"),
                          ("explainer.json", json.dumps(H.EXPLAINER_JSON).encode()),
-                         ("explainer.html", H.EXPLAINER_HTML.encode())])
+                         ("explainer.html", H.EXPLAINER_HTML.encode()), ("claims.md", b"- a claim\n")])
         code, out = self.h.upload(a, data)
+        self.assertEqual(code, 201, out)
         ep = self.h.wait_checked(a, out["episode_id"])
         self.assertEqual((ep["state"], ep["check_report"]), ("rejected", ["script.md is not UTF-8 text"]))
         # a rejected episode is not shown to others in lookup

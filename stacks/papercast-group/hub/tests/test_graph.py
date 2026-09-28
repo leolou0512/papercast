@@ -636,5 +636,157 @@ class TestRevisions(Base):
         self.assertEqual((v["graph"]["changed"]["by"]["name"], v["graph"]["changed"]["actor"]), ("Bob", "human"))
 
 
+class TestSuggestions(Base):
+    """Links from uploads: automatic (as always) or suggest only; accept, dismiss, accept all."""
+
+    def setUp(self):
+        super().setUp()
+        h = self.h
+        self.a, self.b, self.c = h.paper("Alpha paper", 2017, ["sg"]), h.paper("Beta paper", 2019, ["sg"]), h.paper("Gamma paper", 2020, ["sg"])
+        self.gid = self.graph_with(["sg"])
+
+    def upload(self, paper, links, who=None):
+        """The agent's links of an upload (contrib calls this after the checks)."""
+        return graph.apply_agent_links("e_x", paper, who or self.h.bob,
+                                       [{"other": {"paper_id": o}, "direction": d, "grade": g} for o, d, g in links])
+
+    def mode(self, v, who="root"):
+        return self.h.req("PUT", "/api/graph-settings", {"agent_links": v}, who=who)
+
+    def test_the_setting_is_an_admins_and_automatic_by_default(self):
+        h = self.h
+        self.assertEqual(h.ok("GET", "/api/graph-settings", who="bob")["agent_links"], "auto")
+        out = self.upload(self.b, [(self.a, "builds_on", "s")])
+        self.assertEqual((out["added"], out["suggested"]), (1, 0))
+        self.assertEqual(h.link_row(self.a, self.b)["origin"], "agent")
+        for who in ("alice", "bob"):
+            st, js = self.mode("suggest", who)
+            self.assertEqual((st, js["error"]), (403, "forbidden"))
+        self.assertEqual(self.mode("sometimes")[0], 400)
+        st, js = self.mode("suggest")
+        self.assertEqual((st, js["agent_links"], js["changed"]["by"]["name"]), (200, "suggest", "Root"))
+        self.assertEqual(h.ok("GET", "/api/graph-settings", who="alice")["agent_links"], "suggest")
+
+    def test_suggest_only_keeps_them_aside_until_someone_accepts(self):
+        h, a, b, c, gid = self.h, self.a, self.b, self.c, self.gid
+        self.mode("suggest")
+        n = h.log_count()
+        rev = self.view(gid)["rev"]
+        out = self.upload(c, [(a, "builds_on", "e"), (b, "builds_on", "w")])
+        self.assertEqual((out["added"], out["suggested"], out["log_ids"]), (0, 2, []))
+        self.assertEqual(h.log_count(), n, "a suggestion went into the edit log")
+        self.assertIsNone(h.link_row(a, c))
+        v = self.view(gid)
+        self.assertEqual(v["links"], [])
+        self.assertEqual(v["rev"], rev, "a suggestion is not a change to the graph")
+        self.assertEqual([(x["src"], x["dst"], x["grade"], x["by"]["name"]) for x in v["suggestions"]], [(a, c, "e", "Bob"), (b, c, "w", "Bob")])
+        self.assertEqual(v["graph"]["suggestions"], 2)
+        self.assertEqual(h.ok("GET", "/api/graph-settings")["suggestions"], 2)
+        # the same links again: nothing new
+        self.assertEqual(self.upload(c, [(a, "builds_on", "e")])["skipped"][0]["reason"], "suggested already")
+        # accept: Alice's link.add (undo and redo work), the revision up one
+        sa, sb = v["suggestions"]
+        js = h.ok("POST", f"/api/link-suggestions/{sa['id']}/accept", {"base_rev": rev, "graph_id": gid})
+        self.assertEqual((js["suggestion"]["state"], js["link"]["grade"], js["log"]["op"], js["log"]["user"]["name"], js["revs"]),
+                         ("accepted", "e", "link.add", "Alice", {gid: rev + 1}))
+        r = h.link_row(a, c)
+        self.assertEqual((r["state"], r["origin"], r["created_by"]), ("active", "human", h.alice))
+        v = self.view(gid)
+        self.assertEqual(([l["src"] for l in v["links"]], [x["id"] for x in v["suggestions"]]), ([a], [sb["id"]]))
+        st, js = h.undo()
+        self.assertEqual((st, h.link_row(a, c)["state"]), (200, "removed"))
+        self.assertNotIn(sa["id"], [x["id"] for x in self.view(gid)["suggestions"]], "an undone accept came back as a suggestion")
+        st, js = h.undo(redo=True)
+        self.assertEqual((st, h.link_row(a, c)["state"]), (200, "active"))
+        # a stale accept is refused like any edit
+        st, js = h.req("POST", f"/api/link-suggestions/{sb['id']}/accept", {"base_rev": rev, "graph_id": gid}, who="bob")
+        self.assertEqual((st, js["error"]), (409, "stale"))
+        self.assertIsNone(h.link_row(b, c))
+        # dismiss: dropped for good, never suggested again for that pair
+        js = h.ok("POST", f"/api/link-suggestions/{sb['id']}/dismiss", who="bob")
+        self.assertEqual(js["suggestion"]["state"], "dismissed")
+        self.assertEqual(self.view(gid)["suggestions"], [])
+        self.assertEqual(self.upload(c, [(b, "builds_on", "s")])["skipped"][0]["reason"], "dismissed")
+        self.assertEqual(h.req("POST", f"/api/link-suggestions/{sb['id']}/accept", {})[1]["error"], "dismissed")
+        self.assertTrue(h.ok("POST", f"/api/link-suggestions/{sb['id']}/dismiss")["already"])
+        self.assertEqual(h.req("POST", "/api/link-suggestions/999/accept", {})[0], 404)
+
+    def test_the_rules_as_for_links(self):
+        h, a, b, c = self.h, self.a, self.b, self.c
+        lk = self.link(a, b)
+        h.ok("DELETE", f"/api/links/{lk['id']}")                    # a person removed a -> b
+        self.link(b, c)
+        self.mode("suggest")
+        out = self.upload(a, [(b, "built_on_by", "s"),               # a -> b: removed by a person
+                              (c, "builds_on", "s"),                 # c -> a: the later paper built on by an earlier one
+                              (c, "built_on_by", "w")])              # a -> c: fine
+        self.assertEqual(sorted(x["reason"] for x in out["skipped"]), ["order", "removed"])
+        self.assertEqual(out["suggested"], 1)
+        # loops: not suggested (same-year papers, so the order check lets them through), and an
+        # accept that would make one since is refused
+        p, q, r = h.paper("Pi paper", 2022, ["sg"]), h.paper("Qu paper", 2022, ["sg"]), h.paper("Rho paper", 2022, ["sg"])
+        self.link(p, q)
+        self.assertEqual(self.upload(p, [(q, "builds_on", "s")])["skipped"][0]["reason"], "cycle")     # q -> p
+        self.assertEqual(self.upload(q, [(r, "built_on_by", "s")])["suggested"], 1)                   # q -> r
+        sug = {(x["src"], x["dst"]): x["id"] for x in self.view(self.gid)["suggestions"]}
+        self.link(r, p)                                              # r -> p: now q -> r would close a loop
+        st, js = h.req("POST", f"/api/link-suggestions/{sug[(q, r)]}/accept", {})
+        self.assertEqual((st, js["error"]), (409, "cycle"))
+        self.assertIsNone(h.link_row(q, r))
+        # the pair got linked by hand meanwhile: accepting is done already, no second row
+        self.link(a, c, "w")
+        js = h.ok("POST", f"/api/link-suggestions/{sug[(a, c)]}/accept", {})
+        self.assertTrue(js["already"])
+        self.assertEqual(db.conn().execute("SELECT count(*) FROM links WHERE src = ? AND dst = ?", (a, c)).fetchone()[0], 1)
+        self.assertEqual(h.link_row(a, c)["grade"], "w")
+
+    def test_pending_links_become_suggestions_and_accept_all(self):
+        h, a, b, c, gid = self.h, self.a, self.b, self.c, self.gid
+        self.mode("suggest")
+        # an upload names a paper not here yet; it arrives later: a suggestion, not a link
+        out = graph.apply_agent_links("e_y", c, h.bob, [{"other": {"arxiv_id": "2101.00001", "title": "A paper still to come"},
+                                                         "direction": "builds_on", "grade": "s"}])
+        self.assertEqual(out["pending"], 1)
+        late = h.paper("A paper still to come", 2018, ["sg"], arxiv_id="2101.00001")
+        self.assertEqual(graph.resolve_pending(late), 1)
+        self.assertIsNone(h.link_row(late, c))
+        self.upload(c, [(a, "builds_on", "e"), (b, "builds_on", "w")])
+        self.assertEqual(len(self.view(gid)["suggestions"]), 3)
+        # back to automatic: nothing added by itself; Accept all is an admin's
+        self.mode("auto")
+        self.assertEqual(len(self.view(gid)["suggestions"]), 3)
+        self.assertEqual(h.req("POST", "/api/link-suggestions/accept-all", {}, who="alice")[0], 403)
+        n = h.log_count()
+        js = h.ok("POST", "/api/link-suggestions/accept-all", {"graph_id": gid}, who="root")
+        self.assertEqual((js["accepted"], js["skipped"]), (3, []))
+        self.assertEqual(h.log_count(), n + 3)
+        self.assertEqual({(l["src"], l["dst"]) for l in self.view(gid)["links"]}, {(late, c), (a, c), (b, c)})
+        self.assertEqual(self.view(gid)["suggestions"], [])
+        self.assertEqual([e["user"]["name"] for e in h.ok("GET", "/api/graph-log")["log"][:3]], ["Root"] * 3)
+        # automatic again: an upload adds links as before
+        d = h.paper("Delta paper", 2021, ["sg"])
+        self.assertEqual(self.upload(d, [(c, "builds_on", "s")])["added"], 1)
+
+    def test_suggestions_and_accepts_reach_every_page(self):
+        h, a, c, gid = self.h, self.a, self.c, self.gid
+        self.mode("suggest")
+        sub = events.subscribe(None)
+        try:
+            self.upload(c, [(a, "builds_on", "e")])
+            sid = self.view(gid)["suggestions"][0]["id"]
+            h.ok("POST", f"/api/link-suggestions/{sid}/accept", {})
+            self.mode("auto")
+            got = []
+            while not sub.q.empty():
+                got.append(sub.q.get_nowait())
+        finally:
+            events.unsubscribe(sub)
+        kinds = [(k, d.get("change"), d.get("id")) for _, k, d in got if k == "graph"]
+        self.assertIn(("graph", "suggestions", gid), kinds)
+        self.assertIn(("graph", "edit", gid), kinds)                  # the accept, a link.add
+        self.assertIn(("graph", "settings", None), kinds)
+        self.assertIn("log", [k for _, k, _ in got])
+
+
 if __name__ == "__main__":
     unittest.main()

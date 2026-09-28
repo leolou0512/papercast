@@ -121,7 +121,7 @@ class Voices(unittest.TestCase):
         self.assertRegex(url, r"^/api/voices/warm-male/sample\.mp3\?v=\d+$")
         code, body = self.web("GET", url, v)
         self.assertEqual((code, body), (200, MP3))
-        self.assertEqual(self.web("GET", "/api/voices/calm-male/sample.mp3", v)[0], 404)
+        self.assertEqual(self.web("GET", "/api/voices/british-female/sample.mp3", v)[0], 404)
         self.assertEqual(self.web("GET", "/api/voices/nope/sample.mp3", v)[0], 404)
         self.assertEqual(self.h.request("GET", "/api/voices")[0], 401)
 
@@ -213,7 +213,7 @@ class Voices(unittest.TestCase):
         self.assertTrue(e["has_audio"], "the old audio plays on")
         self.assertEqual(e["voice"]["pending"]["id"], "warm-male")
         # an admin may change anyone's; an episode without audio yet cannot be changed
-        self.assertEqual(self.web("PUT", f"/api/episodes/{eid2}/voice", admin, {"voice": "calm-male"})[0], 200)
+        self.assertEqual(self.web("PUT", f"/api/episodes/{eid2}/voice", admin, {"voice": "warm-male"})[0], 200)
         self.assertEqual(self.ep_view(eid2, maker)["pending"]["by"], admin["id"])
         eid3 = self.episode(maker)
         code, out = self.web("PUT", f"/api/episodes/{eid3}/voice", maker, {"voice": "warm-male"})
@@ -248,7 +248,7 @@ class Voices(unittest.TestCase):
         self.assertEqual(self.worker("PUT", f"/api/voice/{eid}/timings", new)[1]["stored"], "next")
         self.assertEqual(self.files(eid)["timings.json"]["segments"], old["segments"])
         # a change is refused while it is being made
-        code, out = self.web("PUT", f"/api/episodes/{eid}/voice", maker, {"voice": "calm-male"})
+        code, out = self.web("PUT", f"/api/episodes/{eid}/voice", maker, {"voice": "warm-male"})
         self.assertEqual((code, out["error"]), (409, "busy"))
         # the new MP3 lands
         sub = events.subscribe(listener["id"])
@@ -310,8 +310,8 @@ class Voices(unittest.TestCase):
         for eid in (e1, e2):
             self.assertEqual(self.web("PUT", f"/api/episodes/{eid}/voice", maker, {"voice": "warm-male"})[0], 200)
         # another voice for one already waiting is not a third
-        self.assertEqual(self.web("PUT", f"/api/episodes/{e2}/voice", maker, {"voice": "calm-male"})[0], 200)
-        self.assertEqual(self.ep_view(e2, maker)["pending"]["id"], "calm-male")
+        self.assertEqual(self.web("PUT", f"/api/episodes/{e2}/voice", maker, {"voice": "warm-male"})[0], 200)
+        self.assertEqual(self.ep_view(e2, maker)["pending"]["id"], "warm-male")
         code, out = self.web("PUT", f"/api/episodes/{e3}/voice", maker, {"voice": "warm-male"})
         self.assertEqual((code, out["error"]), (429, "too_many"))
         # someone else's count is their own
@@ -405,9 +405,9 @@ class Voices(unittest.TestCase):
             c.execute("DELETE FROM episode_voice WHERE episode_id = ?", (eid,))
         vdir = self.h.cfg.episodes / eid / "voice"
         vdir.mkdir()
-        (vdir / "status.json").write_text(json.dumps({"phase": "done", "output": {"voice": "preset-calm-male-s42"}}))
+        (vdir / "status.json").write_text(json.dumps({"phase": "done", "output": {"voice": "preset-warm-male-s42"}}))
         voices.start(self.h.cfg)
-        self.assertEqual(self.ep_view(eid, a)["id"], "calm-male")
+        self.assertEqual(self.ep_view(eid, a)["id"], "warm-male")
 
     def test_remap(self):
         o = timings(3, per=4.0, texts=["a.", "b.", "c."])

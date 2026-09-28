@@ -86,19 +86,14 @@ PRESETS = [
      "instruction": ("Adult male, mid-30s, neutral American accent. Warm, clear, resonant voice, "
                      "medium-low pitch. Relaxed and engaged, natural conversational delivery, steady "
                      "moderate pace, clear articulation. " + _PODCAST)},
-    {"id": "calm-male", "name": "Calm male, British", "engine": "breeze", "seed": 42,
-     "key": "preset-calm-male-s42",
-     "about": "An older British man, unhurried and precise.",
-     "instruction": ("Adult male, mid-40s, standard British RP accent. Calm, clear, smooth voice, "
-                     "low-mid pitch. Composed and thoughtful, unhurried steady pace, precise "
-                     "articulation. " + _PODCAST)},
     {"id": "anime-female", "name": "Anime heroine (for fun)", "engine": "breeze", "seed": 42,
-     "key": "preset-anime-female-s42",
-     "about": "An over-the-top anime heroine, far too excited about every equation. A joke voice (Leo, 2026-09-29).",
-     "instruction": ("Young adult female, late teens, Japanese anime heroine speaking English with a light "
-                     "Japanese accent. High-pitched, bright, sweet and very cute voice. Bubbly and wildly "
-                     "enthusiastic, dramatic and expressive delivery, excited rising intonation, lively fast "
-                     "pace, as if every result is the most amazing thing ever. " + _PODCAST)},
+     "key": "preset-anime-female-v2-s42",
+     "about": "An over-the-top anime heroine with a slight Japanese accent, far too excited about every equation. A joke voice (Leo, 2026-09-29).",
+     "instruction": ("Young adult female, late teens, a native Japanese speaker with a slight but clearly "
+                     "audible Japanese accent in English: Japanese vowels and rhythm, softened r and l. "
+                     "Japanese anime heroine: high-pitched, bright, sweet and very cute voice. Bubbly and "
+                     "wildly enthusiastic, dramatic and expressive delivery, excited rising intonation, "
+                     "lively fast pace, as if every result is the most amazing thing ever. " + _PODCAST)},
     {"id": "basic-female", "name": "Basic female (CPU)", "engine": "kokoro", "cpu": True,
      "key": "af_heart",
      "about": "Kokoro on the CPU: plainer, but made in minutes without waiting for the GPU."},

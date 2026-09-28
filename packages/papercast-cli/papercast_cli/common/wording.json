@@ -1,0 +1,67 @@
+{
+  "about": "Wording that is never wanted. The runner refuses it in script.md, and in the explainer's points and captions where 'in' says so: one repair turn naming each sentence, then script_invalid or explainer_invalid (INTERFACE 1.8.1). Only what is never wanted belongs here; what is sometimes right (a caveat, a comparison, a strong word) is left to the cut-only pass, not to a list. To grow a class, add a phrase. A phrase matches as whole words, ignoring case unless case_sensitive; ' matches both apostrophes; a trailing * is any word ending; ... is a gap of up to two words.",
+  "classes": [
+    {
+      "id": "listener_name",
+      "in": ["script", "explainer"],
+      "case_sensitive": true,
+      "wrong": "names the listener",
+      "fix": "Delete the name: the text is about the paper and is addressed to no one.",
+      "phrases": ["Leo"]
+    },
+    {
+      "id": "listener_knowledge",
+      "in": ["script"],
+      "wrong": "narrates what the listener knows, has done or keeps in notes",
+      "fix": "Delete that part. A concept the listener knows is used by name with no explanation and no word about who knows it; a concept the listener does not know is explained without saying so.",
+      "phrases": ["you know", "you knew", "you already know", "as you know", "you have run",
+                  "you've run", "you ran", "you have used", "you've used", "you used",
+                  "you have seen", "you've seen", "you saw", "you have met", "you've met",
+                  "you met", "you have read", "you've read", "you have done", "you've done",
+                  "you have worked", "you've worked", "you worked", "you have written",
+                  "you've written", "you wrote", "you remember", "you will recognise",
+                  "you'll recognise", "you will recognize", "you'll recognize", "you are familiar",
+                  "you're familiar", "familiar to you", "new to you", "your note*",
+                  "your ... note*", "your vault", "your work", "your paper*", "your experiment*",
+                  "the vault", "vault note*"]
+    },
+    {
+      "id": "episode_talk",
+      "in": ["script"],
+      "wrong": "talks about the episode or the narrator's plan",
+      "fix": "Delete it and let the content itself come next; for \"today\" say \"current\" or \"now\".",
+      "phrases": ["this episode", "earlier episode*", "previous episode*", "next episode*",
+                  "last episode", "today", "I will", "I'll", "I am going to", "I'm going to",
+                  "I want to", "I'd like to", "I would like to", "let me", "let's", "we will",
+                  "we'll", "we are going to", "we're going to", "stay tuned",
+                  "thanks for listening", "in the next few minutes"]
+    },
+    {
+      "id": "publication_status",
+      "in": ["script", "explainer"],
+      "wrong": "states the paper's publication status",
+      "fix": "Delete it: no venue, review status, anonymity or preprint status. Say what the paper does.",
+      "phrases": ["under review", "anonymous submission", "submitted to", "accepted at",
+                  "preprint*"]
+    },
+    {
+      "id": "slop",
+      "in": ["script", "explainer"],
+      "wrong": "uses stock AI wording",
+      "fix": "Delete the phrase, or say the thing in the plain words a colleague would use at a whiteboard.",
+      "phrases": ["delv*", "tapestr*", "testament", "realm*", "game-changer*", "game changer*",
+                  "groundbreaking", "the beauty of", "here's the thing", "deep dive",
+                  "the real kicker", "stay curious", "quietly"]
+    },
+    {
+      "id": "announcing",
+      "in": ["script"],
+      "wrong": "announces the idea or the conclusion instead of stating it",
+      "fix": "Delete the announcement and state the idea itself as a claim about the method.",
+      "phrases": ["fits in one sentence", "fits in a single sentence", "fits in a sentence",
+                  "rests on one idea", "rests on a single idea", "one idea to hold on to",
+                  "the one idea underneath", "what the paper shows, in the end",
+                  "in the end, what the paper shows"]
+    }
+  ]
+}

@@ -4,8 +4,13 @@ The schema below is the contract. A1 owns this file: migrations, indexes, and th
 in SPEC.md section 3. Columns may be added, never renamed. JSON columns hold text."""
 from __future__ import annotations
 
+import json
+import re
+import secrets
 import sqlite3
 import threading
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 SCHEMA_VERSION = 1
@@ -200,6 +205,49 @@ CREATE TABLE IF NOT EXISTS voice_jobs (
   error TEXT
 );
 """
+
+# ---- small helpers every module uses (A1 may extend, never change their meaning)
+
+def now() -> str:
+    """UTC, ISO 8601 with seconds and Z: 2026-09-28T04:12:09Z."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def new_id(prefix: str, n: int = 12) -> str:
+    """"p_" + n lowercase base32 characters (papers 12, episodes 12, graphs 10, claims 12)."""
+    return prefix + "".join(secrets.choice("abcdefghijklmnopqrstuvwxyz234567") for _ in range(n))
+
+
+def norm_title(t: str) -> str:
+    """Lowercase, every run of non-alphanumerics to one space, trimmed (paper identity)."""
+    return re.sub(r"[^0-9a-z]+", " ", (t or "").lower()).strip()
+
+
+def dumps(v) -> str:
+    return json.dumps(v, ensure_ascii=False, separators=(",", ":"))
+
+
+def loads(s, default=None):
+    if s is None or s == "":
+        return default
+    try:
+        return json.loads(s)
+    except ValueError:
+        return default
+
+
+@contextmanager
+def transaction():
+    """BEGIN IMMEDIATE ... COMMIT on this thread's connection (ROLLBACK on an exception)."""
+    c = conn()
+    c.execute("BEGIN IMMEDIATE")
+    try:
+        yield c
+    except BaseException:
+        c.execute("ROLLBACK")
+        raise
+    c.execute("COMMIT")
+
 
 _local = threading.local()
 _path: Path | None = None

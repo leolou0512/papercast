@@ -3,14 +3,19 @@
    2D otherwise, hover lighting a paper's links, labels that fade in as you zoom, Start here and
    the listening order) with its graphs from the hub (SPEC.md section 8). One tab per graph.
    Anyone links two papers, regrades or removes a link, adds a paper to a graph or takes one
-   out, makes, renames or retags a graph; a locked graph only an admin changes. Undo says what it
-   will undo before it does, for "my last edit" or "the last edit"; History lists the last 100
-   changes. Every edit shows at once and is set right by the hub's answer; a failure rolls back
-   with a short message. The hub works the positions out (layout.py runs these same equations
-   to rest), so the map opens at rest: the browser never warms the layout up, it only eases a
-   node to where the hub puts it. An arrow goes from a paper to a paper built on it. Grey: not
+   out, makes, renames or retags a graph; a locked graph only an admin changes, and its maker or an
+   admin deletes it (after a dialog; Undo brings it back). Undo and Redo say what they will do
+   before they do, for "my last edit" or "the last edit" (Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z, Ctrl+Y);
+   History lists the last 100 changes. A new link is aimed: an arrow from the first paper to the
+   pointer, snapping to the paper under it. Every edit shows at once and is set right by the hub's
+   answer; a failure rolls back with a short message. Every edit names the revision of the graph
+   it was made on: when someone else changed the graph since, the hub refuses it and the map
+   brings itself up to date at once. The hub's live events (map.event(kind, data) from the page,
+   or opts.subscribe) keep every open map current. The hub works the positions out (layout.py
+   runs these same equations to rest), so the map opens at rest: the browser never warms the
+   layout up, it only eases a node to where the hub puts it. An arrow goes from a paper to a paper built on it. Grey: not
    listened; green: listened (by whoever is looking); accent: a place to start. Mounted by app.js:
-   window.PaperMap.mount(host, opts) -> {changed, show, hide, refresh, select}. */
+   window.PaperMap.mount(host, opts) -> {changed, show, hide, refresh, select, event}. */
 (function () {
   "use strict";
   var DEFAULTS = { arrows: true, fade: 0.5, node: 1, line: 1, center: 0.4, repel: 10, link: 0.7, dist: 70 };
@@ -54,6 +59,7 @@
     gear: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/></svg>',
     close: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>',
     undo: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>',
+    redo: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 14 5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg>',
     clock: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>',
     lock: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>'
   };
@@ -70,8 +76,10 @@
     var hl = 0, hlSet = null, hlFocus = null, hlLink = null, hlKey = null, running = false, anim = null, moves = null, userMoved = false, visible = true;
     // settled counts the edits the hub has answered: an answer to a GET sent before one of them is
     // out of date (it may still show a paper just taken out), so it is dropped and asked again
-    var pending = [], settled = 0, tmpSeq = 0, editLabel = null, delAsk = false, deleting = {};
-    var LOG = { entries: [], hint: null, papers: null, users: null, loaded: false, stale: true, busy: null, again: false, err: null, undoing: false };
+    var pending = [], settled = 0, tmpSeq = 0, editLabel = null, deleting = {};
+    var LOG = { entries: [], hint: null, redoHint: null, papers: null, users: null, loaded: false, stale: true, busy: null, again: false, err: null, undoing: false };
+    // aim: a link being aimed (from a paper to the pointer; `over` the paper it snaps to)
+    var aim = null, shiftHeld = false;
 
     /* ---------- the hub ---------- */
     function call(method, path, body) {
@@ -106,36 +114,45 @@
     tabsEl.setAttribute("role", "tablist");
     var qEl = h("input", "pm-q"); qEl.type = "search"; qEl.placeholder = "Search papers"; qEl.autocomplete = "off"; qEl.spellcheck = false;
     qEl.setAttribute("aria-label", "Search papers on the map");
-    var icons = h("div", "pm-icons"), closeBox = h("div", "pm-closebox");
+    var icons = h("div", "pm-icons"), undoBox = h("div", "pm-undobox"), closeBox = h("div", "pm-closebox");
     function ib(icon, title, into) { var b = h("button", "pm-ib"); b.type = "button"; b.title = title; b.setAttribute("aria-label", title); b.appendChild(svg(ICONS[icon])); (into || icons).appendChild(b); return b; }
-    var bStart = ib("list", "Start here"), bUndo = ib("undo", "Undo"), bHist = ib("clock", "History"), bFit = ib("fit", "Fit to screen"), bSet = ib("gear", "Graph settings");
+    var bUndo = ib("undo", "Undo", undoBox), bRedo = ib("redo", "Redo", undoBox);
+    var bStart = ib("list", "Start here"), bHist = ib("clock", "History"), bFit = ib("fit", "Fit to screen"), bSet = ib("gear", "Graph settings");
     var bClose = opts.onClose ? ib("close", "Close the map", closeBox) : null;
-    if (!EDIT) bUndo.hidden = true;
+    if (!EDIT) undoBox.hidden = true;
     if (opts.title) head.appendChild(h("span", "pm-title", opts.title));
     if (opts.graphs !== false) head.appendChild(tabsEl);
-    [head, qEl, icons, closeBox].forEach(function (e) { top.appendChild(e); });
-    var PANELS = {}, PBTN = { start: bStart, undo: bUndo, hist: bHist, set: bSet };
+    // who else changed this graph in the last minute
+    var live = h("div", "pm-live"); live.hidden = true; live.setAttribute("aria-live", "polite");
+    [head, undoBox, icons, closeBox, qEl, live].forEach(function (e) { top.appendChild(e); });
+    var PANELS = {}, PBTN = { start: bStart, undo: bUndo, redo: bRedo, hist: bHist, set: bSet };
     function panel(key, label) { var e = h("div", "pm-panel"); e.hidden = true; e.setAttribute("data-panel", key); e.setAttribute("role", "region"); e.setAttribute("aria-label", label); PANELS[key] = e; return e; }
-    var startEl = panel("start", "Start here"), undoEl = panel("undo", "Undo"), histEl = panel("hist", "History"), setEl = panel("set", "Graph settings"), newEl = panel("newg", "New graph");
+    var startEl = panel("start", "Start here"), undoEl = panel("undo", "Undo"), redoEl = panel("redo", "Redo"), histEl = panel("hist", "History"), setEl = panel("set", "Graph settings"), newEl = panel("newg", "New graph");
     var setDyn = h("div", "pm-setdyn"), setFix = h("div");
     setEl.appendChild(setDyn); setEl.appendChild(setFix);
     Object.keys(PBTN).forEach(function (k) { PBTN[k].setAttribute("aria-pressed", "false"); });
     var card = h("div", "pm-card"); card.hidden = true;
     var tip = h("div", "pm-tip"); tip.hidden = true;
+    var aimTip = h("div", "pm-aim"); aimTip.hidden = true;           // what the link being aimed would say
     var legend = h("div", "pm-legend");
     function dot(cls, text) { var s = h("span"); s.appendChild(h("i", cls)); s.appendChild(document.createTextNode(text)); legend.appendChild(s); }
     dot("pm-d-done", "listened");
     dot("pm-d-start", "start here");
-    legend.appendChild(h("span", null, "arrow: paper → paper built on it"));
     var banner = h("div", "pm-banner"); banner.hidden = true;
     var empty = h("div", "pm-empty"); empty.hidden = true;
     var msg = h("div", "pm-msg"); msg.hidden = true; msg.setAttribute("role", "status"); msg.setAttribute("aria-live", "polite");
-    [gv, cv, top, startEl, undoEl, histEl, setEl, newEl, card, tip, legend, banner, empty, msg].forEach(function (e) { root.appendChild(e); });
+    // the dialog that asks before a graph is deleted (a real one: modal, Escape and a click outside cancel)
+    var dlg = h("dialog", "pm-dialog"), dlgIn = h("div", "pm-dlg-in"), dlgH = h("h2", "pm-dlg-h"), dlgP = h("p", "pm-dlg-p");
+    var dlgAct = h("div", "pm-act pm-dlg-act");
+    dlgH.id = "pm-dlg-h-" + Math.random().toString(36).slice(2, 8); dlgP.id = dlgH.id.replace("-h-", "-p-");
+    dlg.setAttribute("aria-labelledby", dlgH.id); dlg.setAttribute("aria-describedby", dlgP.id);
+    [dlgH, dlgP, dlgAct].forEach(function (e) { dlgIn.appendChild(e); }); dlg.appendChild(dlgIn);
+    [gv, cv, top, startEl, undoEl, redoEl, histEl, setEl, newEl, card, tip, aimTip, legend, banner, empty, msg, dlg].forEach(function (e) { root.appendChild(e); });
     function btn(text, cls, fn) { var b = h("button", cls || "pm-btn", text); b.type = "button"; if (fn) b.addEventListener("click", fn); return b; }
 
     function readColors() {
       var cs = getComputedStyle(root);
-      ["bg", "text", "muted", "node", "line", "hi", "start", "done"].forEach(function (k) { C[k] = cs.getPropertyValue("--pm-" + k).trim(); });
+      ["bg", "text", "muted", "node", "line", "hi", "start", "done", "warn"].forEach(function (k) { C[k] = cs.getPropertyValue("--pm-" + k).trim(); });
       FONT = cs.fontFamily || "sans-serif";
       colorCache = {};
     }
@@ -199,7 +216,8 @@
       tags = Array.isArray(tags) ? tags : obj(tags) || (typeof tags === "string" ? tagList(tags) : []);
       var n = m.n != null ? m.n : m.count != null ? m.count : m.size != null ? m.size : Array.isArray(m.papers) ? m.papers.length : null;
       var o = { id: m.id, name: m.name, tags: Array.isArray(tags) ? tags : [], locked: m.locked == null ? null : !!m.locked, n: n,
-        created_by: m.created_by && typeof m.created_by === "object" ? m.created_by.id : m.created_by };
+        created_by: m.created_by && typeof m.created_by === "object" ? m.created_by.id : m.created_by,
+        can_delete: m.can_delete == null ? null : !!m.can_delete, rev: m.rev, changed: m.changed };
       Object.keys(o).forEach(function (k) { if (o[k] == null) delete o[k]; });
       if (m.tags == null && m.rule_tags == null) delete o.tags;
       return o;
@@ -453,8 +471,13 @@
           edge(B, N[list[j].s], N[list[j].t], col, al, w, arrow, awd);
         }
       }
-      // the link being made: in the accent, with its arrow whatever the settings say
-      if (draft && s.idx[draft.src] != null && s.idx[draft.dst] != null) edge(B, N[s.idx[draft.src]], N[s.idx[draft.dst]], C.start, 1, Math.max(lwd * 2, 1.5 * DPR), true, Math.max(awd, 3 * DPR));
+      // the link being made: in the accent (a muted warning colour when it points back in time),
+      // with its arrow whatever the settings say
+      var bw = Math.max(lwd * 2, 1.5 * DPR), baw = Math.max(awd, 3 * DPR);
+      if (draft && s.idx[draft.src] != null && s.idx[draft.dst] != null) edge(B, N[s.idx[draft.src]], N[s.idx[draft.dst]], backwards(draft.src, draft.dst) ? C.warn : C.start, 1, bw, true, baw);
+      // the link being aimed: from its first paper to the pointer, or to the paper it snaps to
+      var AT = aim && aim.p && s.idx[aim.from] != null ? tipNow() : null, acol = aim && aimBad() ? C.warn : C.start;
+      if (AT) edge(B, N[s.idx[aim.from]], { sx: AT.x * DPR, sy: AT.y * DPR, sr: AT.r * DPR }, acol, 1, bw, true, baw);
       var groups = {}, order = [];
       for (i = 0; i < N.length; i++) {
         n = N[i];
@@ -471,6 +494,13 @@
       }
       if (selId != null && s.idx[selId] != null) { n = N[s.idx[selId]]; B.ring(n.sx, n.sy, n.sr + 3 * DPR, 0.8 * DPR, C.hi, 1); }
       if (linkFrom != null && s.idx[linkFrom] != null) { n = N[s.idx[linkFrom]]; B.ring(n.sx, n.sy, n.sr + 3 * DPR, 1.2 * DPR, C.start, 1); }
+      else if (AT) { n = N[s.idx[aim.from]]; B.ring(n.sx, n.sy, n.sr + 3 * DPR, 1.2 * DPR, C.start, 1); }
+      if (AT) {
+        // the paper snapped to comes in with a ring; the one left goes out with it
+        var q = aimQ();
+        if (aim.over != null && s.idx[aim.over] != null) { n = N[s.idx[aim.over]]; B.ring(n.sx, n.sy, n.sr + 3 * DPR, 1.2 * DPR, acol, q); }
+        if (aim.prev != null && aim.prev !== aim.over && q < 1 && s.idx[aim.prev] != null) { n = N[s.idx[aim.prev]]; B.ring(n.sx, n.sy, n.sr + 3 * DPR, 1.2 * DPR, C.start, 1 - q); }
+      }
       B.end();
     }
     function draw() {
@@ -489,6 +519,7 @@
         var ke = k * (0.8 + 0.09 * Math.sqrt(n.deg)), la = Math.max(0, Math.min(1, (ke - thr * 0.6) / (thr * 0.4)));
         if (n.start) la = Math.max(la, 0.85);
         if (set) la = set[i] ? Math.max(la, hl) : la * dim;
+        if (aim && aim.p) { if (n.id === aim.from) la = 1; else if (n.id === aim.over) la = Math.max(la, aimQ()); }
         if (la < 0.03) continue;
         var px = n.x * k + v.x, py = (n.y + n.r) * k + v.y + 4;
         if (px < -200 || px > W + 200 || py < -40 || py > H + 40) continue;
@@ -508,10 +539,11 @@
         var da = s.idx[draft.src], db = s.idx[draft.dst];
         if (da != null && db != null) return { key: "d" + da + ":" + db, set: function () { return pairSet(da, db); }, node: null, link: null };
       }
+      if ((aim && aim.p) || linkFrom != null) return null;         // every paper stays a clear target
       var i = dragN ? dragN.i : hoverI;
       var L = i == null ? (hoverL || (selLink != null ? s.lid[String(selLink)] : null)) : null;
       if (L) return { key: "l" + L.s + ":" + L.t, set: function () { return pairSet(L.s, L.t); }, node: null, link: L };
-      if (i == null) { var id = linkFrom != null ? linkFrom : selId; if (id != null && s.idx[id] != null) i = s.idx[id]; }
+      if (i == null && selId != null && s.idx[selId] != null) i = s.idx[selId];
       return i != null ? { key: "n" + i, set: function () { return neighbours(s, i); }, node: i, link: null } : null;
     }
     function frame(t) {
@@ -523,6 +555,7 @@
         moves.list.forEach(function (m) { if (m.n === dragN) return; m.n.x = m.x0 + (m.x1 - m.x0) * me; m.n.y = m.y0 + (m.y1 - m.y0) * me; });
         if (mp >= 1) moves = null; else busy = true;
       }
+      if (aim && aim.p && aimQ() < 1) busy = true;
       var f = focusNow(s), wantHl = f || qset ? 1 : 0;
       if (f) { if (f.key !== hlKey) { hlKey = f.key; hlSet = f.set(); hlFocus = f.node; hlLink = f.link; } }
       else if (qset) { hlKey = "q"; hlSet = qset; hlFocus = null; hlLink = null; }
@@ -612,6 +645,63 @@
     }
     function linkWords(l) { var N = cur._s.nodes; return N[l.t].label + " builds on " + N[l.s].label; }
 
+    /* ---------- aiming a new link: an arrow from its first paper to the pointer ---------- */
+    // From "Link to…" (or a picked paper while Shift is held) the arrow follows the mouse, or the
+    // finger while it drags; over a paper it snaps to that paper's edge, rings it and shows its
+    // label, and a line by the pointer says what the link would mean. The arrow is the link:
+    // first → second means the second builds on the first; pointing back in time (the hub
+    // refuses those) it turns the warning colour. Each pointer event asks for one frame; the tip
+    // eases on and off a paper in AIM_MS.
+    var AIM_MS = 140, lastP = null, aimKey = null, aw = 0, ah = 0;
+    function aimFrom() {
+      if (!cur || !cur._s || draft || !canEdit()) return null;
+      if (linkFrom != null) return cur._s.idx[linkFrom] != null ? linkFrom : null;
+      if (shiftHeld && selId != null && cur._s.idx[selId] != null) return selId;
+      return null;
+    }
+    function aimAt(p, touch) {
+      var from = aimFrom();
+      if (from == null) { clearAim(); return; }
+      lastP = p;
+      if (!aim || aim.from !== from) aim = { from: from, p: null, over: null, prev: null, e0: null, t0: 0, touch: false };
+      var n = p ? hit(p) : null, over = n && n.id !== from ? n.id : null;
+      if (p && aim.p && over !== aim.over) { aim.e0 = tipNow(); aim.t0 = performance.now(); aim.prev = aim.over; }
+      else if (!aim.p) { aim.e0 = null; aim.prev = null; }
+      aim.over = over; aim.p = p; aim.touch = !!touch;
+      if (hoverI != null || hoverL) { hoverI = null; hoverL = null; }
+      tip.hidden = true;
+      renderAim(); kick();
+    }
+    function aimHere() { if (aimFrom() != null) aimAt(lastP, aim && aim.touch); else clearAim(); }
+    function clearAim() { if (aim) { aim = null; aimTip.hidden = true; aimKey = null; kick(); } }
+    function aimQ() { return !aim || !aim.e0 ? 1 : ease(Math.min(1, (performance.now() - aim.t0) / AIM_MS)); }
+    // where the tip is going: the snapped paper (its disc; the arrow stops at its edge), else the pointer
+    function aimTarget() {
+      var s = cur._s, v = s.view, n = aim.over != null && s.idx[aim.over] != null ? s.nodes[s.idx[aim.over]] : null;
+      return n ? { x: n.x * v.k + v.x, y: n.y * v.k + v.y, r: radius(n) * v.k } : { x: aim.p.x, y: aim.p.y, r: 0 };
+    }
+    function tipNow() {
+      var T = aimTarget(), q = aimQ(), E = aim.e0;
+      return E && q < 1 ? { x: E.x + (T.x - E.x) * q, y: E.y + (T.y - E.y) * q, r: E.r + (T.r - E.r) * q } : T;
+    }
+    function backwards(src, dst) { var ya = yearOf(src), yb = yearOf(dst); return ya != null && yb != null && ya > yb; }
+    function aimBad() { return !!aim && aim.over != null && backwards(aim.from, aim.over); }
+    function renderAim() {
+      if (!aim || !aim.p || aim.over == null) { aimTip.hidden = true; aimKey = null; return; }
+      var o = aim.over, f = aim.from, old = linkBetween(f, o), bad = !old && aimBad();
+      var text = old ? "Linked already: " + label(cur._s.nodes[old.t].id) + " builds on " + label(cur._s.nodes[old.s].id)
+        : bad ? label(o) + " is older: the arrow would go the other way" : label(o) + " builds on " + label(f);
+      var key = text + (bad ? "!" : "");
+      if (key !== aimKey || aimTip.hidden) {
+        aimTip.textContent = text; aimTip.classList.toggle("warn", bad);
+        aimTip.hidden = false; aimKey = key; aw = aimTip.offsetWidth; ah = aimTip.offsetHeight;
+      }
+      var p = aim.p, x, y;
+      if (aim.touch) { x = p.x - aw / 2; y = p.y - ah - 44; }       // above the finger
+      else { x = p.x + 16; y = p.y + 18; if (x + aw > W - 8) x = p.x - aw - 12; if (y + ah > H - 8) y = p.y - ah - 12; }
+      aimTip.style.transform = "translate(" + Math.round(Math.max(8, Math.min(W - aw - 8, x))) + "px," + Math.round(Math.max(8, y)) + "px)";
+    }
+
     /* ---------- pointer: drag nodes, pan, pinch, wheel; a click picks ---------- */
     var ptrs = {}, mode = null, down = null, moved = false, pinch = null;
     function pcount() { return Object.keys(ptrs).length; }
@@ -622,9 +712,13 @@
       var p = local(e); ptrs[e.pointerId] = p; tip.hidden = true;
       if (pcount() === 1) {
         down = { x: p.x, y: p.y, lx: p.x, ly: p.y, shift: e.shiftKey }; moved = false;
-        var n = hit(p); mode = n ? "node" : "pan"; dragN = n;
+        var n = hit(p);
+        // linking: a finger anywhere, or the mouse on a paper, aims (a drag to the paper, or a tap on it)
+        if (linkFrom != null && aimFrom() != null && (e.pointerType !== "mouse" || n)) { mode = "aim"; dragN = null; aimAt(p, e.pointerType !== "mouse"); }
+        else { mode = n ? "node" : "pan"; dragN = n; }
       } else if (pcount() === 2) {
         release();
+        if (aim && aim.touch) { aim.p = null; lastP = null; aimTip.hidden = true; }
         var ids = Object.keys(ptrs), a = ptrs[ids[0]], b = ptrs[ids[1]], v = cur._s.view;
         pinch = { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2, k: v.k, x: v.x, y: v.y };
         mode = "pinch"; moved = true;
@@ -636,6 +730,10 @@
       var p = local(e);
       if (!ptrs[e.pointerId]) {
         if (e.pointerType === "mouse") {
+          lastP = p;
+          if (e.shiftKey !== shiftHeld && !typing(document.activeElement)) shiftHeld = e.shiftKey;
+          if (aimFrom() != null) { cv.classList.toggle("over", !!hit(p)); aimAt(p, false); return; }
+          if (aim) clearAim();
           var n = hit(p), i = n ? n.i : null, l = n ? null : hitLink(p);
           cv.classList.toggle("over", !!(n || l));
           if (i !== hoverI || l !== hoverL) { hoverI = i; hoverL = l; kick(); }
@@ -654,6 +752,11 @@
         return;
       }
       if (!down) return;
+      if (mode === "aim") {
+        if (!moved && Math.hypot(p.x - down.x, p.y - down.y) > 4) moved = true;
+        aimAt(p, e.pointerType !== "mouse");
+        return;
+      }
       if (!moved && Math.hypot(p.x - down.x, p.y - down.y) > 4) {
         moved = true; userMoved = true;
         if (mode === "node") { cur._s.target = 0.3; reheat(0.3); }
@@ -669,15 +772,21 @@
       delete ptrs[e.pointerId];
       cv.classList.remove("grabbing");
       var shift = !!(down && down.shift), at = down ? { x: down.x, y: down.y } : local(e);
-      if (mode === "node" && dragN) {
+      if (mode === "aim") {
+        var over = aim && aim.over;
+        if (over != null) pick(over, false);                         // the grade choice
+        else if (!moved && !hit(at)) cancelDraft();                 // a tap on nothing: no link
+        else if (aim && aim.touch) { aim.p = null; lastP = null; aimTip.hidden = true; kick(); }   // let go on nothing: still linking
+      } else if (mode === "node" && dragN) {
         var n = dragN;
         release();
         if (!moved) pick(n.id, shift);
         if (e.pointerType !== "mouse") hoverI = null;
       } else if (mode === "pan" && !moved && cur && cur._s) {
         var l = hitLink(at);
-        if (l && linkFrom == null) selectLink(l.id, false);
-        else if (linkFrom == null) select(null);
+        if (linkFrom != null) cancelDraft();                        // a click on nothing while linking: no link
+        else if (l) selectLink(l.id, false);
+        else select(null);
       }
       if (pcount() === 1) { var q = ptrs[Object.keys(ptrs)[0]]; down = { x: q.x, y: q.y, lx: q.x, ly: q.y }; mode = "pan"; moved = true; }
       else if (!pcount()) { mode = null; down = null; }
@@ -685,7 +794,13 @@
     }
     cv.addEventListener("pointerup", up);
     cv.addEventListener("pointercancel", up);
-    cv.addEventListener("pointerleave", function (e) { if (e.pointerType === "mouse" && !ptrs[e.pointerId]) { tip.hidden = true; if (hoverI != null || hoverL) { hoverI = null; hoverL = null; kick(); } } });
+    cv.addEventListener("pointerleave", function (e) {
+      if (e.pointerType === "mouse" && !ptrs[e.pointerId]) {
+        tip.hidden = true; lastP = null;
+        if (aim) aimAt(null, false);
+        if (hoverI != null || hoverL) { hoverI = null; hoverL = null; kick(); }
+      }
+    });
     cv.addEventListener("wheel", function (e) { e.preventDefault(); if (!cur || !cur._s) return; tip.hidden = true; zoomAt(Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015)), local(e).x, local(e).y); }, { passive: false });
 
     /* ---------- picking: a paper, a link, or the second paper of a new link ---------- */
@@ -729,10 +844,11 @@
     }
     function startDraft(a, b) {
       var old = linkBetween(a, b);
+      clearAim();
       if (old) { selectLink(old.id, false); say("These two are linked already: change its grade here."); return; }
-      // the earlier paper is the one built on; the first picked when the years do not say
-      var ya = yearOf(a), yb = yearOf(b), swap = ya != null && yb != null && yb < ya;
-      draft = { src: swap ? b : a, dst: swap ? a : b, anchor: a };
+      // the link as it was aimed: from the first paper to the second, which builds on it (pointing
+      // back in time, the card says so and offers the swap)
+      draft = { src: a, dst: b, anchor: a };
       selId = null; selLink = null; linkFrom = null; editLabel = null;
       renderBanner(); renderCard(true); closePanelsOnPhone();
       // on the phone the card covers the lower half: the arrow being made goes above it
@@ -742,9 +858,10 @@
       }
       kick();
     }
-    function cancelDraft() { var a = draft ? draft.anchor : linkFrom; draft = null; linkFrom = null; if (a != null && cur && cur._s && cur._s.idx[a] != null) select(a); else select(null); }
+    function cancelDraft() { var a = draft ? draft.anchor : linkFrom; draft = null; linkFrom = null; clearAim(); if (a != null && cur && cur._s && cur._s.idx[a] != null) select(a); else select(null); }
     function renderBanner() {
       banner.textContent = "";
+      aimHere();                   // the state changed: an arrow being aimed follows it
       if (linkFrom == null || !cur || !cur._s || cur._s.idx[linkFrom] == null) { banner.hidden = true; return; }
       banner.appendChild(h("span", null, (phone() ? "Tap" : "Click") + " the paper to link with " + label(linkFrom)));
       banner.appendChild(btn("Cancel", "pm-btn", cancelDraft));
@@ -754,6 +871,62 @@
     /* ---------- the edits: shown at once, set right by the hub's answer ---------- */
     function edit(op) { pending.push(op); rebuildAll(); }
     function settle(op) { var i = pending.indexOf(op); if (i >= 0) pending.splice(i, 1); settled++; }
+    // An edit goes to the hub with the revision of the graph it was made on (base_rev), one edit
+    // at a time, so a second quick edit carries the revision the first one made. `seen` is taken
+    // when the person acts: if the graph was brought up to date from the hub before the edit
+    // leaves, it goes with the revision the person saw (and the hub says whether that is stale).
+    var EQ = Promise.resolve();
+    function seen(g) { return g && !g.tmp && g.rev != null ? { g: g, rev: g.rev, ep: g.revEp || 0 } : null; }
+    function send(sn, method, path, body) {
+      var p = EQ.then(function () {
+        var b = body, q = "";
+        if (sn && sn.g.rev != null) {
+          var base = (sn.g.revEp || 0) === sn.ep ? sn.g.rev : sn.rev;
+          if (method === "DELETE") q = (path.indexOf("?") < 0 ? "?" : "&") + "base_rev=" + base + "&graph_id=" + encodeURIComponent(sn.g.id);
+          else b = Object.assign({}, body || {}, { base_rev: base, graph_id: sn.g.id });
+        }
+        return call(method, path + q, b);
+      });
+      EQ = p.then(function () {}, function () {});
+      return p.then(function (r) { took(r); return r; });
+    }
+    // an edit's answer: the graphs it changed are at these revisions now (one up from what is
+    // drawn: it is what is drawn; more: someone else's change is in between, so ask again)
+    function took(r) {
+      var revs = r && r.revs;
+      if (!revs || typeof revs !== "object") return;
+      Object.keys(revs).forEach(function (id) {
+        var g = byId[id], nr = revs[id];
+        if (!g || !g.data || g.rev == null || nr == null || nr === g.rev) return;
+        if (nr === g.rev + 1) g.rev = nr; else { g.stale = true; if (g === cur) soon({ graph: true }); }
+      });
+    }
+    // The hub refused an edit made on an older revision (someone changed the graph meanwhile):
+    // the edit is already rolled back; the graph comes up to date at once, and the message says so.
+    function refused(err, g) {
+      var b = (err && err.body) || {};
+      if (!err || err.status !== 409 || b.error !== "stale") return false;
+      g = g || cur;
+      if (!g) return true;
+      if (b.deleted) { soon({ list: true, log: true }); say(quote(g.meta.name) + " was deleted meanwhile."); return true; }
+      if (b.by && b.actor === "human") editedBy(g, b.by, b.at);
+      reload(g).then(function () {
+        loadList(); loadLog(true);
+        var who = b.actor !== "human" ? (b.actor === "agent" ? "An upload just changed" : "This graph just changed") :
+          isMe(b.by) ? "You changed this graph in another window" : (nameOf(b.by) || "Someone") + " just changed";
+        say(who + (/changed$/.test(who) ? " this graph" : "") + "; it’s up to date now. Try again.");
+      });
+      return true;
+    }
+    // the graph from the hub again, from a request sent from now on (not one already on its way)
+    function reload(g) {
+      return new Promise(function (res) {
+        g.stale = true;
+        (g.waiters = g.waiters || []).push({ after: LOADS.n, res: res });
+        loadGraph(g);
+      });
+    }
+    var LOADS = { n: 0 };
     var refetchT = null;
     function refetchSoon() { clearTimeout(refetchT); refetchT = setTimeout(function () { if (cur && visible) loadGraph(cur); loadLog(); }, 300); }
     function addLink(src, dst, grade) {
@@ -761,9 +934,10 @@
       var op = { apply: function (g, nodes, links) {
         if (has(nodes, src) && has(nodes, dst)) links.push({ id: tmp, src: src, dst: dst, grade: grade, origin: "human", by: { id: ME.id, name: ME.name }, created_at: made, pending: true });
       } };
-      draft = null; selLink = tmp; selId = null;
+      draft = null; selLink = tmp; selId = null; clearAim();
+      var sn = seen(cur);
       edit(op);
-      call("POST", "/api/links", { src: src, dst: dst, grade: grade }).then(function (r) {
+      send(sn, "POST", "/api/links", { src: src, dst: dst, grade: grade }).then(function (r) {
         var l = (r && (r.link || r)) || {};
         settle(op);
         if (l.id != null) {
@@ -776,26 +950,27 @@
           if (selLink === tmp) selLink = e.id;
         } else if (selLink === tmp) selLink = null;
         rebuildAll(); refetchSoon();
-        say("Linked: " + label(dst) + " builds on " + label(src) + ".");
+        say((r && r.already ? "Linked already: " : "Linked: ") + label(dst) + " builds on " + label(src) + ".");
       }, function (err) {
         settle(op); if (selLink === tmp) selLink = null;
         rebuildAll();
-        say("Could not add the link: " + errText(err) + ".");
+        if (!refused(err, sn && sn.g)) say("Could not add the link: " + errText(err) + ".");
       });
     }
     function setGrade(id, grade) {
       var l = cur._s.lid[String(id)];
       if (!l || l.grade === grade || l.e.pending) return;
       var op = { apply: function (g, nodes, links) { for (var i = 0; i < links.length; i++) if (same(links[i].id, id)) links[i] = Object.assign({}, links[i], { grade: grade }); } };
+      var sn = seen(cur);
       edit(op);
-      call("PUT", "/api/links/" + encodeURIComponent(id), { grade: grade }).then(function (r) {
+      send(sn, "PUT", "/api/links/" + encodeURIComponent(id), { grade: grade }).then(function (r) {
         var got = (r && ((r.link && r.link.grade) || r.grade)) || grade;
         settle(op);
         forData(function (g, d) { d.links = d.links.map(function (x) { return same(x.id, id) ? Object.assign({}, x, { grade: got }) : x; }); });
         rebuildAll(); refetchSoon();
       }, function (err) {
         settle(op); rebuildAll();
-        say("Could not change the grade: " + errText(err) + ".");
+        if (!refused(err, sn && sn.g)) say("Could not change the grade: " + errText(err) + ".");
       });
     }
     function removeLink(id) {
@@ -804,15 +979,17 @@
       var words = label(l.e.src) + " → " + label(l.e.dst);
       var op = { apply: function (g, nodes, links) { for (var i = links.length - 1; i >= 0; i--) if (same(links[i].id, id)) links.splice(i, 1); } };
       selLink = null; card.hidden = true;
+      var sn = seen(cur);
       edit(op);
-      call("DELETE", "/api/links/" + encodeURIComponent(id)).then(function () {
+      send(sn, "DELETE", "/api/links/" + encodeURIComponent(id)).then(function (r) {
         settle(op);
         forData(function (g, d) { d.links = d.links.filter(function (x) { return !same(x.id, id); }); });
         rebuildAll(); refetchSoon();
-        say("Removed " + words + ".", EDIT ? undoMine("link.remove", id) : null);
+        if (r && r.already) say("Removed already: " + words + ".");
+        else say("Removed " + words + ".", EDIT ? undoMine("link.remove", id) : null);
       }, function (err) {
         settle(op); rebuildAll();
-        say("Could not remove the link: " + errText(err) + ".");
+        if (!refused(err, sn && sn.g)) say("Could not remove the link: " + errText(err) + ".");
       });
     }
     function stub(pid) {
@@ -821,31 +998,34 @@
     }
     function addPaper(g, pid) {
       var op = { apply: function (x, nodes) { if (x === g && !has(nodes, pid)) nodes.push(stub(pid)); } };
+      var sn = seen(g);
       edit(op);
       if (g === cur) select(pid, true);
-      call("POST", "/api/graphs/" + encodeURIComponent(g.id) + "/papers", { paper_id: pid }).then(function (r) {
+      send(sn, "POST", "/api/graphs/" + encodeURIComponent(g.id) + "/papers", { paper_id: pid }).then(function (r) {
         settle(op);
         if (g.data && !has(g.data.nodes, pid)) g.data.nodes = g.data.nodes.concat([(r && r.node) || stub(pid)]);
         rebuildAll(); loadGraph(g); loadLog(); soon({ list: true });
-        say("Added " + label(pid) + " to " + quote(g.meta.name) + ".");
+        say((r && r.already ? "Already in " : "Added " + label(pid) + " to ") + quote(g.meta.name) + ".");
       }, function (err) {
         settle(op); rebuildAll();
-        say("Could not add the paper: " + errText(err) + ".");
+        if (!refused(err, g)) say("Could not add the paper: " + errText(err) + ".");
       });
     }
     function removePaper(g, pid) {
       var words = label(pid);
       var op = { apply: function (x, nodes) { if (x !== g) return; for (var i = nodes.length - 1; i >= 0; i--) if (nodes[i].id === pid) nodes.splice(i, 1); } };
       if (selId === pid) { selId = null; card.hidden = true; }
+      var sn = seen(g);
       edit(op);
-      call("DELETE", "/api/graphs/" + encodeURIComponent(g.id) + "/papers/" + encodeURIComponent(pid)).then(function () {
+      send(sn, "DELETE", "/api/graphs/" + encodeURIComponent(g.id) + "/papers/" + encodeURIComponent(pid)).then(function (r) {
         settle(op);
         if (g.data) g.data.nodes = g.data.nodes.filter(function (n) { return n.id !== pid; });
         rebuildAll(); refetchSoon(); soon({ list: true });
-        say("Took " + words + " out of " + quote(g.meta.name) + ".", EDIT ? undoMine("graph.remove_paper", pid) : null);
+        if (r && r.already) say(words + " was out of " + quote(g.meta.name) + " already.");
+        else say("Took " + words + " out of " + quote(g.meta.name) + ".", EDIT ? undoMine("graph.remove_paper", pid) : null);
       }, function (err) {
         settle(op); rebuildAll();
-        say("Could not take the paper out: " + errText(err) + ".");
+        if (!refused(err, g)) say("Could not take the paper out: " + errText(err) + ".");
       });
     }
     function setLabel(pid, text) {
@@ -855,8 +1035,9 @@
       renderCard(true);                                   // the field goes (it has the focus: a refresh would skip it)
       if (!text || text === was) return;
       var op = { apply: function (g, nodes) { for (var i = 0; i < nodes.length; i++) if (nodes[i].id === pid) nodes[i] = Object.assign({}, nodes[i], { label: text }); } };
+      var sn = seen(cur);
       edit(op);
-      call("PUT", "/api/papers/" + encodeURIComponent(pid) + "/label", { label: text }).then(function (r) {
+      send(sn, "PUT", "/api/papers/" + encodeURIComponent(pid) + "/label", { label: text }).then(function (r) {
         var got = (r && (r.label || (r.paper && r.paper.label))) || text;
         settle(op);
         forData(function (g, d) { d.nodes = d.nodes.map(function (n) { return n.id === pid ? Object.assign({}, n, { label: got }) : n; }); });
@@ -864,7 +1045,7 @@
         say("The label is now " + quote(got) + ".");
       }, function (err) {
         settle(op); rebuildAll();
-        say("Could not change the label: " + (err.status === 404 || err.status === 405 ? "this hub does not take labels yet" : errText(err)) + ".");
+        if (!refused(err, sn && sn.g)) say("Could not change the label: " + (err.status === 404 || err.status === 405 ? "this hub does not take labels yet" : errText(err)) + ".");
       });
     }
     // A graph's name, tags or lock on their way to the hub stay over what a list says meanwhile.
@@ -873,14 +1054,14 @@
       g.mp = g.mp || {}; g.mpTok = g.mpTok || {}; g.mp[k] = body[k]; g.mpTok[k] = tok;
       var over = function () { settled++; if (g.mpTok[k] === tok) { delete g.mp[k]; delete g.mpTok[k]; } };
       renderTabs(); renderSettings(true); refreshCard();
-      call("PUT", "/api/graphs/" + encodeURIComponent(g.id), body).then(function () {
+      send(seen(g), "PUT", "/api/graphs/" + encodeURIComponent(g.id), body).then(function () {
         over();
         if (done) done();
         soon({ list: true, log: true });
       }, function (err) {
         over();
         undoLocal(); renderTabs(); renderSettings(true); refreshCard();
-        say("Could not change the graph: " + errText(err) + ".");
+        if (!refused(err, g)) say("Could not change the graph: " + errText(err) + ".");
       });
     }
     function renameGraph(g, name) {
@@ -921,17 +1102,19 @@
     }
     function drop(g) { var i = graphs.indexOf(g); if (i >= 0) graphs.splice(i, 1); if (byId[g.id] === g) delete byId[g.id]; return i; }
     function deleteGraph(g) {
-      var name = g.meta.name, i = drop(g);
-      delAsk = false; deleting[g.id] = true;          // a list answered meanwhile does not bring it back
+      var name = g.meta.name, sn = seen(g), i = drop(g);
+      deleting[g.id] = true;          // a list answered meanwhile does not bring it back
       if (cur === g) { cur = null; showGraph(graphs[Math.max(0, i - 1)] || null); }
       openPanel(null); renderTabs();
-      call("DELETE", "/api/graphs/" + encodeURIComponent(g.id)).then(function () {
+      send(sn, "DELETE", "/api/graphs/" + encodeURIComponent(g.id)).then(function () {
         settled++; delete deleting[g.id];
         loadLog(); soon({ list: true });
         say("Deleted " + quote(name) + ".", undoMine("graph.delete", g.id));
       }, function (err) {
         settled++; delete deleting[g.id];
+        if (err.status === 404) { loadLog(); soon({ list: true }); say(quote(name) + " was deleted already."); return; }
         graphs.splice(Math.min(i, graphs.length), 0, g); byId[g.id] = g; renderTabs();
+        if (refused(err, g)) { showGraph(g); return; }
         say("Could not delete the graph: " + errText(err) + ".");
       });
     }
@@ -939,14 +1122,16 @@
     /* ---------- the edit log: Undo and History ---------- */
     function entryById(id) { for (var i = 0; i < LOG.entries.length; i++) if (same(LOG.entries[i].id, id)) return LOG.entries[i]; return null; }
     function isMine(e) { return isMe(e.user_id != null ? e.user_id : e.user && e.user.id); }
-    function candidate(scope) {
-      // the hub may say which op it would revert; else the newest not yet reverted, in scope
-      var hint = LOG.hint;
+    function candidate(scope, redo) {
+      // the hub says which op it would undo (or redo); without its word: for an undo the newest
+      // not yet reverted in scope, and nothing to redo
+      var hint = redo ? LOG.redoHint : LOG.hint;
       if (hint && Object.prototype.hasOwnProperty.call(hint, scope)) {
         var hv = hint[scope];
         if (hv == null) return null;
         return entryById(typeof hv === "object" ? hv.id : hv) || (typeof hv === "object" ? hv : null);
       }
+      if (redo) return null;
       for (var i = 0; i < LOG.entries.length; i++) {
         var e = LOG.entries[i];
         if (e.reverted_by != null) continue;
@@ -954,6 +1139,19 @@
         return e;
       }
       return null;
+    }
+    // change, undo (of a change) or redo (of an undo): the hub's word, else counted back along revert_of
+    function kindOf(e) {
+      if (e.kind === "change" || e.kind === "undo" || e.kind === "redo") return e.kind;
+      var d = 0, x = e;
+      while (x && x.revert_of != null && d < 200) { d++; x = entryById(x.revert_of); }
+      return d === 0 ? "change" : d % 2 ? "undo" : "redo";
+    }
+    // the change an undo or a redo goes back to (null when it is older than the entries here)
+    function original(e) {
+      var x = e, k = 0;
+      while (x && x.revert_of != null && k++ < 200) x = entryById(x.revert_of);
+      return x && x !== e ? x : null;
     }
     function userName(e) {
       var u = LOG.users && e.user_id != null ? LOG.users[e.user_id] : null;
@@ -984,7 +1182,7 @@
     }
     function graphName(t) { var g = t.gid && byId[t.gid]; return (g && g.meta.name) || t.a.name || t.b.name || "a graph"; }
     function what(e, inner) {
-      if (e.revert_of != null && !inner) { var r = entryById(e.revert_of); return "undid: " + (r ? sentence(r, true) : "an edit"); }
+      if (e.revert_of != null && !inner) { var r = original(e); return (kindOf(e) === "redo" ? "redid: " : "undid: ") + (r ? sentence(r, true) : "an edit"); }
       var t = targets(e), a = t.a, b = t.b;
       var pair = t.src != null && t.dst != null ? label(t.src) + " → " + label(t.dst) : "a link";
       switch (e.op) {
@@ -1016,38 +1214,58 @@
         var list = Array.isArray(r) ? r : (r && (r.entries || r.log || r.items)) || [];
         LOG.entries = list.slice().sort(function (x, y) { return y.id - x.id; });
         LOG.hint = r && !Array.isArray(r) ? (r.undo || r.next || null) : null;
+        LOG.redoHint = r && !Array.isArray(r) && r.redo ? r.redo : null;
         LOG.papers = (r && r.papers) || null; LOG.users = (r && r.users) || null;
         LOG.loaded = true; LOG.stale = false; LOG.err = null;
       }, function (err) { if (seq === LOG.seq) LOG.err = errText(err); }).then(function () {
         if (LOG.busy === p) LOG.busy = null;
-        renderUndo(); renderHist();
+        renderUndo(); renderRedo(); renderHist();
         if (LOG.again && !LOG.busy) { LOG.again = false; loadLog(); }
       });
       LOG.busy = p;
       return p;
     }
-    function undo(scope) {
-      var e = candidate(scope);
-      if (!e) { say("Nothing to undo."); return; }
+    // Undo, or redo (the undo the hub named): what it does is said first, and after
+    function undo(scope, redo) {
+      var e = candidate(scope, redo);
+      if (!e) { say(redo ? "Nothing to redo." : "Nothing to undo."); return; }
       if (LOG.undoing) return;
-      var text = sentence(e);
-      LOG.undoing = true; renderUndo();
-      call("POST", "/api/graph-log/revert", { scope: scope, expect: e.id }).then(function () {
-        say("Undone: " + text + ".");
+      var text = redo ? redoWords(e) : sentence(e);
+      LOG.undoing = true; renderUndo(); renderRedo();
+      var body = { scope: scope, expect: e.id };
+      if (redo) body.redo = true;
+      var g0 = cur;
+      send(seen(cur), "POST", "/api/graph-log/revert", body).then(function () {
+        say((redo ? "Redone: " : "Undone: ") + text + ".");
       }, function (err) {
-        var b = err.body || {};
-        if (err.status === 409 && b.error === "moved") say("Not undone: someone edited since. The Undo now shows the newest edit.");
-        else if (err.status === 409) say("Not undone: " + thing(e) + " was changed after that edit" + (b.message && b.message !== b.error ? " (" + String(b.message).replace(/\.$/, "") + ")" : "") + ".");
-        else say("Could not undo: " + errText(err) + ".");
+        var b = err.body || {}, no = redo ? "Not redone: " : "Not undone: ";
+        if (refused(err, g0)) return;
+        if (err.status === 409 && b.error === "moved") say(no + "someone edited since. The " + (redo ? "Redo" : "Undo") + " now shows the newest edit.");
+        else if (err.status === 409) say(no + thing(e) + " was changed after that edit" + (b.message && b.message !== b.error ? " (" + String(b.message).replace(/\.$/, "") + ")" : "") + ".");
+        else say("Could not " + (redo ? "redo" : "undo") + ": " + errText(err) + ".");
       }).then(function () {
         LOG.undoing = false; settled++;
         graphs.forEach(function (g) { g.stale = true; });
         loadList(); if (cur && !cur.tmp) loadGraph(cur); loadLog(true);
       });
     }
+    function redo(scope) { undo(scope, true); }
+    // "Bob removed PPO → DPO": the change a redo brings back
+    function redoWords(e) {
+      var o = original(e);
+      if (o) return sentence(o, true);
+      return "what " + (isMine(e) ? "you" : userName(e) || "someone") + " undid";
+    }
+    // Undo and Redo are greyed out when there is nothing to undo or redo (known once the log is in)
+    function renderUndoButtons() {
+      [[bUndo, false, "undo"], [bRedo, true, "redo"]].forEach(function (x) {
+        var c = candidate("any", x[1]) || candidate("mine", x[1]);
+        x[0].title = c ? (x[1] ? "Redo: " + redoWords(c) + " · undone " + ago(c.at) : "Undo: " + sentence(c) + " · " + ago(c.at)) : x[1] ? "Redo" : "Undo";
+        x[0].disabled = PANELS[x[2]].hidden && !LOG.err && (!LOG.loaded || !c);
+      });
+    }
     function renderUndo() {
-      var c = candidate("any");
-      bUndo.title = c ? "Undo: " + sentence(c) + " · " + ago(c.at) : "Undo";
+      renderUndoButtons();
       if (undoEl.hidden) return;
       undoEl.textContent = "";
       undoEl.appendChild(h("h2", null, "Undo"));
@@ -1064,7 +1282,27 @@
         } else box.appendChild(h("div", "pm-undo-t pm-muted", "Nothing to undo."));
         undoEl.appendChild(box);
       });
-      undoEl.appendChild(h("p", "pm-note", "An undo is an edit too: it shows in the History and can be undone."));
+      undoEl.appendChild(h("p", "pm-note", "An undo is an edit too: it shows in the History, and Redo takes it back."));
+    }
+    function renderRedo() {
+      renderUndoButtons();
+      if (redoEl.hidden) return;
+      redoEl.textContent = "";
+      redoEl.appendChild(h("h2", null, "Redo"));
+      if (!LOG.loaded) { redoEl.appendChild(h("p", "pm-note", LOG.err ? "Could not load the changes: " + LOG.err + "." : "Loading…")); return; }
+      [["mine", "My last undo"], ["any", "The last undo, by anyone"]].forEach(function (sc) {
+        var e = candidate(sc[0], true), box = h("div", "pm-undo");
+        box.setAttribute("data-scope", sc[0]);
+        box.appendChild(h("div", "pm-undo-h", sc[1]));
+        if (e) {
+          box.appendChild(h("div", "pm-undo-t", "Redo: " + redoWords(e) + " · undone " + ago(e.at)));
+          var b = btn("Redo", "pm-btn", function () { redo(sc[0]); });
+          b.disabled = LOG.undoing || !EDIT;
+          box.appendChild(b);
+        } else box.appendChild(h("div", "pm-undo-t pm-muted", "Nothing to redo."));
+        redoEl.appendChild(box);
+      });
+      redoEl.appendChild(h("p", "pm-note", "A new edit after an undo leaves nothing to redo."));
     }
     function renderHist() {
       if (histEl.hidden) return;
@@ -1222,17 +1460,19 @@
       var ul = h("ul", "pm-list"); ul.appendChild(item(A, null, "earlier")); ul.appendChild(item(B, null, "builds on it")); card.appendChild(ul);
     }
     function draftCard() {
-      var A = draft.src, B = draft.dst, ya = yearOf(A), yb = yearOf(B);
+      var A = draft.src, B = draft.dst, ya = yearOf(A), yb = yearOf(B), bad = backwards(A, B);
       card.setAttribute("data-kind", "draft");
       closeX(cancelDraft);
       card.appendChild(h("h3", null, "New link"));
       var p = h("p", "pm-dir"); p.appendChild(h("b", null, label(B))); p.appendChild(document.createTextNode(" builds on ")); p.appendChild(h("b", null, label(A)));
       card.appendChild(p);
+      // the hub takes a link only from the earlier paper to the later one
+      if (bad) card.appendChild(h("p", "pm-warn", label(B) + " is older: the arrow would go the other way."));
       card.appendChild(h("p", "pm-sub", "The arrow goes from " + label(A) + (ya != null ? " (" + ya + ")" : "") + " to " + label(B) + (yb != null ? " (" + yb + ")" : "") + ", the paper built on it."));
-      card.appendChild(btn("Swap: " + label(A) + " builds on " + label(B), "pm-btn pm-swap", function () { draft = { src: B, dst: A, anchor: draft.anchor }; renderCard(true); kick(); }));
+      card.appendChild(btn("Swap: " + label(A) + " builds on " + label(B), bad ? "pm-open pm-swap" : "pm-btn pm-swap", function () { draft = { src: B, dst: A, anchor: draft.anchor }; renderCard(true); kick(); }));
       card.appendChild(h("h2", null, "How much does " + label(B) + " build on it?"));
       var seg = h("div", "pm-seg pm-seg-add"); seg.setAttribute("role", "group"); seg.setAttribute("aria-label", "Add the link as");
-      GRADES.forEach(function (g) { var b = btn(g[1], "pm-segb", function () { addLink(A, B, g[0]); }); b.title = g[2]; b.setAttribute("data-grade", g[0]); seg.appendChild(b); });
+      GRADES.forEach(function (g) { var b = btn(g[1], "pm-segb", function () { addLink(A, B, g[0]); }); b.title = g[2]; b.setAttribute("data-grade", g[0]); b.disabled = bad; seg.appendChild(b); });
       card.appendChild(seg);
       card.appendChild(gradeHints(h("ul", "pm-hints")));
       var act = h("div", "pm-act"); act.appendChild(btn("Cancel", "pm-btn", cancelDraft)); card.appendChild(act);
@@ -1245,16 +1485,15 @@
         var o = open && k === key; PANELS[k].hidden = !o;
         if (PBTN[k]) PBTN[k].setAttribute("aria-pressed", String(o));
       });
-      delAsk = false;
       if (open) {
         // on the phone a panel and the card do not share the screen
-        if (phone() && (selId != null || selLink != null || draft || linkFrom != null)) { selId = null; selLink = null; draft = null; linkFrom = null; card.hidden = true; renderBanner(); kick(); }
+        if (phone() && (selId != null || selLink != null || draft || linkFrom != null)) { selId = null; selLink = null; draft = null; linkFrom = null; clearAim(); card.hidden = true; renderBanner(); kick(); }
         if (key === "start") renderStart();
-        if (key === "undo" || key === "hist") { renderUndo(); renderHist(); loadLog(); }
+        if (key === "undo" || key === "redo" || key === "hist") { renderUndo(); renderRedo(); renderHist(); loadLog(); }
         if (key === "set") renderSettings(true);
         if (key === "newg") renderNew();
       }
-      renderTabs();
+      renderTabs(); renderUndoButtons(); renderLive();
     }
     var FIRST = 12, allPath = false;
     function renderStart() {
@@ -1322,17 +1561,39 @@
       aq.addEventListener("input", function () { addResults(aq.value, res); });
       onEnter(aq, function () { var b = res.querySelector("button"); if (b) b.click(); });
       setDyn.appendChild(aq); setDyn.appendChild(res);
-      if (ADMIN || same(m.created_by, ME.id)) {
+      if (canDelete(g)) {
         var dz = h("div", "pm-act pm-delrow");
-        if (!delAsk) dz.appendChild(btn("Delete this graph", "pm-btn pm-danger", function () { delAsk = true; renderSettings(true); }));
-        else {
-          dz.appendChild(h("span", "pm-note", "Delete " + quote(m.name) + " for everyone? The links stay."));
-          dz.appendChild(btn("Delete", "pm-btn pm-danger", function () { deleteGraph(g); }));
-          dz.appendChild(btn("Keep", "pm-btn", function () { delAsk = false; renderSettings(true); }));
-        }
+        dz.appendChild(btn("Delete this graph", "pm-btn pm-danger pm-delg", function () { askDelete(g); }));
         setDyn.appendChild(dz);
       }
     }
+    // its maker or an admin (the hub says; a hub that does not: the same rule here)
+    function canDelete(g) { return canEdit(g) && (g.meta.can_delete != null ? g.meta.can_delete : ADMIN || same(g.meta.created_by, ME.id)); }
+
+    /* ---------- the delete dialog ---------- */
+    var dlgFor = null;
+    function askDelete(g) {
+      if (!canDelete(g) || dlg.open) return;
+      dlgFor = g;
+      dlgH.textContent = "Delete the graph " + "“" + g.meta.name + "”?";
+      dlgP.textContent = "Its papers and links stay; only this graph goes. You can undo it.";
+      dlgAct.textContent = "";
+      var no = btn("Cancel", "pm-btn pm-dlg-no", function () { closeDialog(); });
+      var yes = btn("Delete", "pm-btn pm-danger-fill pm-dlg-yes", function () { var x = dlgFor; closeDialog(true); if (x && byId[x.id] === x) deleteGraph(x); });
+      dlgAct.appendChild(no); dlgAct.appendChild(yes);
+      tip.hidden = true;
+      try { dlg.showModal(); } catch (e) { dlg.setAttribute("open", ""); }
+      no.focus();
+    }
+    function closeDialog(gone) {
+      if (!dlg.open) return;
+      dlg.close();
+      var g = dlgFor; dlgFor = null;
+      if (!gone && g) { var b = setEl.querySelector(".pm-delg"); if (b) b.focus(); }
+    }
+    dlg.addEventListener("cancel", function (e) { e.preventDefault(); closeDialog(); });      // Escape
+    dlg.addEventListener("click", function (e) { if (e.target === dlg) closeDialog(); });      // outside the box: its backdrop
+    dlg.addEventListener("close", function () { if (!dlg.open) dlgFor = null; });   // late: it may be open again for another ask
     function addResults(q, res) {
       res.textContent = "";
       q = String(q || "").trim().toLowerCase();
@@ -1366,6 +1627,7 @@
     }
     bStart.addEventListener("click", function () { openPanel("start"); });
     bUndo.addEventListener("click", function () { openPanel("undo"); });
+    bRedo.addEventListener("click", function () { openPanel("redo"); });
     bHist.addEventListener("click", function () { openPanel("hist"); });
     bSet.addEventListener("click", function () { openPanel("set"); });
     bFit.addEventListener("click", function () { userMoved = false; fit(true); });
@@ -1405,8 +1667,20 @@
       if (e.key === "Enter" && qset && cur && cur._s) { var i = Object.keys(qset)[0]; if (i != null) { var id = cur._s.nodes[+i].id; if (linkFrom != null) pick(id, false); else select(id, true); } qEl.blur(); }
       if (e.key === "Escape") { e.stopPropagation(); qEl.value = ""; runQuery(); qEl.blur(); }
     });
+    function typing(t) { return !!t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)); }
     function onKey(e) {
-      if (!visible || e.key !== "Escape" || e.target === qEl) return;
+      if (!visible) return;
+      if (dlg.open) return;                           // the dialog's own: Escape closes it, nothing else here
+      if (e.key === "Shift" && !typing(e.target)) { shiftHeld = true; aimHere(); }
+      // Ctrl/Cmd+Z: undo my last edit; Ctrl/Cmd+Shift+Z or Ctrl+Y: redo my last undo (not while typing)
+      var k = String(e.key || "").toLowerCase();
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && (k === "z" || k === "y") && EDIT && !typing(e.target)) {
+        e.preventDefault(); e.stopPropagation();
+        var again = k === "y" || e.shiftKey;
+        if (LOG.loaded && !LOG.stale) undo("mine", again); else loadLog(true).then(function () { undo("mine", again); });
+        return;
+      }
+      if (e.key !== "Escape" || e.target === qEl) return;
       if (e.target && e.target.tagName === "INPUT" && root.contains(e.target)) {
         if (editLabel != null && card.contains(e.target)) { editLabel = null; renderCard(true); } else e.target.blur();
         e.stopPropagation(); return;
@@ -1416,6 +1690,8 @@
       else if (opts.onClose) { opts.onClose(); e.stopPropagation(); }
     }
     document.addEventListener("keydown", onKey, true);
+    document.addEventListener("keyup", function (e) { if (e.key === "Shift") { shiftHeld = false; aimHere(); } }, true);
+    window.addEventListener("blur", function () { if (shiftHeld) { shiftHeld = false; aimHere(); } });
 
     /* ---------- tabs: one per graph, then + New graph ---------- */
     function renderTabs() {
@@ -1450,14 +1726,14 @@
     function showGraph(g) {
       if (!g) {
         cur = null; selId = null; selLink = null; draft = null; linkFrom = null; editLabel = null; qset = null;
-        renderTabs(); renderBanner(); renderEmpty(); card.hidden = true; tip.hidden = true; ctxClear(); return;
+        renderTabs(); renderBanner(); renderEmpty(); renderLive(); card.hidden = true; tip.hidden = true; ctxClear(); return;
       }
       if (cur === g) { applyWant(); return; }
       cur = g;
       if (!g.tmp) save(TKEY, g.id);
-      hoverI = null; hoverL = null; selId = null; selLink = null; draft = null; linkFrom = null; editLabel = null; delAsk = false;
+      hoverI = null; hoverL = null; selId = null; selLink = null; draft = null; linkFrom = null; editLabel = null; clearAim();
       card.hidden = true; tip.hidden = true; hl = 0; hlSet = null; hlFocus = null; hlLink = null; hlKey = null; anim = null; moves = null; allPath = false;
-      renderBanner();
+      renderBanner(); renderLive();
       if (g.data && (!g._s || g.dirty)) rebuild(g);
       userMoved = !!(g._s && g._s.fitted);
       if (!newEl.hidden) openPanel(null);
@@ -1503,10 +1779,13 @@
         var gone = cur && !cur.tmp && !seen[cur.id] ? cur : null;
         graphs = next; byId = {}; graphs.forEach(function (g) { byId[g.id] = g; });
         listLoaded = true; listErr = null;
+        if (dlgFor && !seen[dlgFor.id]) closeDialog(true);
+        // a graph whose revision moved on without our hearing of it: asked again when shown
+        graphs.forEach(function (g) { if (g.data && g.rev != null && g.meta.rev != null && g.meta.rev > g.rev) g.stale = true; });
         if (gone) { cur = null; say(quote(gone.meta.name) + " was deleted."); }
         renderTabs();
         if (!cur) showGraph(byId[want && want.gid] || byId[opts.graph] || byId[load(TKEY)] || graphs[0] || null);
-        else { renderSettings(); refreshCard(); }
+        else { renderSettings(); refreshCard(); if (cur.stale && !cur.busy) loadGraph(cur); }
         renderEmpty();
       }, function (err) { listErr = errText(err); renderEmpty(); }).then(function () {
         listBusy = false;
@@ -1518,18 +1797,25 @@
       if (g.busy) { g.again = true; return g.busy; }
       g.loadErr = null;
       var seq = (g.seq || 0) + 1; g.seq = seq;
-      var s0 = settled;
+      var s0 = settled, n0 = ++LOADS.n;
+      var done = function () { g.waiters = (g.waiters || []).filter(function (w) { if (n0 > w.after) { w.res(); return false; } return true; }); };
       g.busy = call("GET", "/api/graphs/" + encodeURIComponent(g.id)).then(function (r) {
         if (settled !== s0) { g.again = true; return; }
         g.data = normGraph(r); g.stale = false;
         if (r && r.graph) Object.assign(g.meta, normMeta(r.graph), g.mp || {});
+        // the revision of what is drawn now (a new one from here, not from an edit of ours: note it)
+        var rv = r && (r.rev != null ? r.rev : r.graph && r.graph.rev);
+        if (rv != null) { if (g.rev != null && rv !== g.rev) g.revEp = (g.revEp || 0) + 1; g.rev = rv; }
+        if (r && r.graph && r.graph.changed) editedBy(g, r.graph.changed.by, r.graph.changed.at, r.graph.changed.actor);
         rebuild(g);
         if (g === cur) { afterChange(); applyWant(true); }
         else renderTabs();
+        done();
       }, function (err) {
         g.loadErr = errText(err);
         if (err.status === 404) { g.stale = true; soon({ list: true }); }
         if (g === cur) renderEmpty();
+        done();
       }).then(function () {
         g.busy = null;
         if (g.again) { g.again = false; loadGraph(g); }
@@ -1566,16 +1852,57 @@
       // one graph (graph_id), several (graphs: a link is in every graph that has both papers), or not said
       var gid = d.graph_id || (d.graph && d.graph.id) || (typeof d.id === "string" && /^g_/.test(d.id) ? d.id : null);
       var ids = Array.isArray(d.graphs) ? d.graphs.map(function (x) { return x && typeof x === "object" ? x.id : x; }) : gid ? [gid] : null;
-      if (ids) ids.forEach(function (id) { if (byId[id]) byId[id].stale = true; }); else graphs.forEach(function (g) { g.stale = true; });
-      soon({ list: true, graph: !ids || (cur && ids.indexOf(cur.id) >= 0), log: true });
+      var mine = false;
+      if (ids) ids.forEach(function (id) {
+        var g = byId[id];
+        if (!g) return;
+        if (d.change === "edit" && d.by && d.actor === "human") editedBy(g, d.by, null);
+        // our own edit, whose revision is drawn already: nothing to fetch for this graph
+        if (d.change === "edit" && d.graph_rev != null && g.rev === d.graph_rev && !d.deleted) { if (g === cur) mine = true; return; }
+        g.stale = true;
+      }); else graphs.forEach(function (g) { g.stale = true; });
+      soon({ list: true, graph: !mine && (!ids || (cur && ids.indexOf(cur.id) >= 0)), log: true });
     }
-    // a new row in the edit log means a graph changed: the one shown is asked again, the others when shown
-    function onLogEvent() { LOG.stale = true; graphs.forEach(function (g) { g.stale = true; }); soon({ log: true, graph: true }); }
-    function onPaperEvent(d) { if (d && d.label != null) { graphs.forEach(function (g) { g.stale = true; }); soon({ graph: true }); } }
+    // a new row in the edit log: the history and the Undo; the graphs it touched come with their own event
+    function onLogEvent() { LOG.stale = true; soon({ log: true }); }
+    function onPaperEvent(d) {
+      d = d || {};
+      // a new paper may join graphs by its tags; a label or title shows on the map
+      if (d.label != null || d.new || d.title != null) { graphs.forEach(function (g) { g.stale = true; }); soon({ list: true, graph: true }); }
+    }
+    function onEpisodeEvent(d) {
+      d = d || {};
+      // a paper whose every episode is deleted (or back) leaves the map (or comes back)
+      if (d.deleted != null || d.state === "rejected" || d.state === "ready") { graphs.forEach(function (g) { g.stale = true; }); soon({ list: true, graph: true }); }
+    }
+    function onResync() { graphs.forEach(function (g) { g.stale = true; }); LOG.stale = true; soon({ list: true, graph: true, log: true }); }
+    var ON = { graph: onGraphEvent, log: onLogEvent, paper: onPaperEvent, episode: onEpisodeEvent, resync: onResync };
     if (typeof opts.subscribe === "function") {
       opts.subscribe("graph", onGraphEvent);
       opts.subscribe("log", onLogEvent);
       opts.subscribe("paper", onPaperEvent);
+    }
+
+    /* ---------- who else is editing this graph ---------- */
+    // "Bob is editing this graph" for a minute after someone else changed it
+    var LIVE_MS = 60000, liveT = null;
+    function editedBy(g, by, at, actor) {
+      if (!g || !by || (actor && actor !== "human")) return;
+      var t = at ? Date.parse(at) : Date.now();
+      if (isNaN(t)) t = Date.now();
+      t = Math.min(t, Date.now());
+      if (!g.editor || t >= g.editor.t) g.editor = { by: by, t: t };
+      if (g === cur) renderLive();
+    }
+    function renderLive() {
+      clearTimeout(liveT);
+      var e = cur && cur.editor, left = e ? e.t + LIVE_MS - Date.now() : 0;
+      if (!e || isMe(e.by) || !nameOf(e.by) || left <= 0) { live.hidden = true; return; }
+      if (phone() && panelOpen()) { live.hidden = true; return; }        // under the panel there
+      live.textContent = nameOf(e.by) + " is editing this graph";
+      live.title = "Changed it " + ago(new Date(e.t).toISOString());
+      live.hidden = false;
+      liveT = setTimeout(renderLive, Math.min(left + 50, LIVE_MS));
     }
 
     if (!initGL()) g2 = gv.getContext("2d");
@@ -1601,14 +1928,21 @@
         lastSig = sig; relabel(); renderStart(); refreshCard(); kick();
       },
       show: function () { visible = true; resize(); readColors(); api.refresh(); kick(); },
-      hide: function () { visible = false; tip.hidden = true; hoverI = null; hoverL = null; release(); },
+      // the page's live events: graph, log, paper, episode, resync
+      event: function (kind, data) { var fn = ON[kind]; if (fn) fn(data || {}); },
+      hide: function () { visible = false; tip.hidden = true; hoverI = null; hoverL = null; shiftHeld = false; clearAim(); release(); closeDialog(true); },
       // everything again from the hub (what show() does)
       refresh: function () { loadList(); if (cur && !cur.tmp) loadGraph(cur); graphs.forEach(function (g) { if (g !== cur) g.stale = true; }); loadLog(); },
       // show a paper (and the graph it is in, when given)
       select: function (paperId, graphId) { want = { pid: paperId, gid: graphId }; if (graphId && byId[graphId] && byId[graphId] !== cur) showGraph(byId[graphId]); else applyWant(); },
       debug: { S: S, cur: function () { return cur; }, graphs: function () { return graphs; }, show: function (id) { showGraph(byId[id]); }, select: select, selectLink: selectLink,
         hover: function (i) { hoverI = i; kick(); }, draw: function () { draw(); }, tick: function () { tick(cur._s); }, webgl: function () { return !!gl; },
-        state: function () { return { sel: selId, link: selLink, from: linkFrom, draft: draft && { src: draft.src, dst: draft.dst }, pending: pending.length, moving: !!moves, running: running }; },
+        state: function () {
+          var t = aim && aim.p && cur && cur._s ? tipNow() : null;
+          return { sel: selId, link: selLink, from: linkFrom, draft: draft && { src: draft.src, dst: draft.dst }, pending: pending.length, moving: !!moves, running: running,
+            aim: t ? { from: aim.from, over: aim.over, tip: [t.x, t.y], r: t.r, warn: aimBad(), easing: aimQ() < 1, text: aimTip.hidden ? null : aimTip.textContent } : null,
+            rev: cur ? cur.rev : null, dialog: dlg.open ? dlgH.textContent : null, live: live.hidden ? null : live.textContent };
+        },
         // a paper's place on the page, and a link's middle (CSS px)
         pos: function (id) { var n = nodeOf(cur, id), v = cur._s.view; return n ? [n.x * v.k + v.x, n.y * v.k + v.y] : null; },
         mid: function (lid) { var l = cur._s.lid[String(lid)], N = cur._s.nodes, v = cur._s.view; if (!l) return null; return [(N[l.s].x + N[l.t].x) / 2 * v.k + v.x, (N[l.s].y + N[l.t].y) / 2 * v.k + v.y]; },

@@ -1387,7 +1387,7 @@
       if (t !== "hello" && t !== "resync" && t !== "graph" && t !== "log") toMap(t, d);
     });
     on("hello", (d) => checkBuild(d.build));
-    on("resync", () => loadList());
+    on("resync", () => { loadList(); toMap("resync", {}); });      // the map missed events too: it reads its graphs again
     on("paper", (d) => touched(d.paper_id || d.id || (d.paper && d.paper.id)));
     on("episode", (d) => touched(d.paper_id || (d.paper && d.paper.id) || S.epPaper.get(d.episode_id || d.id)));
     on("graph", (d) => toMap("graph", d));

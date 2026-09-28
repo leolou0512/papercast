@@ -1,7 +1,7 @@
 /* The page's tokens the map reads (Leo's app.css, light and dark), for the test page only. */
 :root {
   --bg: #FFFFFF; --surface: #F4F4F4; --text: #111111; --text-2: #5C5C5C; --hairline: #E8E8E8; --input-line: #D6D6D6;
-  --accent: #C8431A; --on-accent: #FFFFFF; --alive: #1E9E4A; --danger: #B3261E;
+  --accent: #C8431A; --on-accent: #FFFFFF; --alive: #1E9E4A; --danger: #B3261E; --warn: #8F5400; --scrim: rgba(0,0,0,.32);
   --toast-bg: #1C1C1C; --toast-fg: #F2F2F2; --toast-link: #FF8A5C;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   color-scheme: light;
@@ -9,7 +9,7 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #0E0E0E; --surface: #1A1A1A; --text: #F2F2F2; --text-2: #9E9E9E; --hairline: #262626; --input-line: #333333;
-    --accent: #FF7A45; --on-accent: #0E0E0E; --alive: #4CC273; --danger: #FF8A80;
+    --accent: #FF7A45; --on-accent: #0E0E0E; --alive: #4CC273; --danger: #FF8A80; --warn: #F0B458; --scrim: rgba(0,0,0,.6);
     --toast-bg: #2A2A2A; --toast-fg: #F2F2F2; --toast-link: #FF9A6A;
     color-scheme: dark;
   }

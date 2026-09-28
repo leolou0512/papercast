@@ -1,8 +1,10 @@
 """A stand-in for the hub's graph API (SPEC.md section 8), for test_map.py. The real one (graph.py,
 A5) is built at the same time; this one follows the contract as written: fixtures in memory, every
 edit recorded (method, path, body, the X-PCG header), the edit log and its revert (409 `moved`
-when `expect` is not the newest op in scope, 409 `conflict` when the thing changed since), locked
-graphs for admins only. Knobs: `fail` and `delay` for the next request matching a method and a
+when `expect` is not the newest op in scope, 409 `conflict` when the thing changed since) and
+redo (`"redo": true`, the log's `undo` and `redo` hints per scope, as graph.py), locked graphs
+for admins only, and each graph's revision: one up with every change touching it, and an edit
+sent with an older `base_rev` refused with 409 `stale` (an edit someone already made is done). Knobs: `fail` and `delay` for the next request matching a method and a
 path pattern. It also serves the map (hub/static/map.js, map.css) and a page that mounts it
 (map_harness/), with the hub's page CSP, so a CSP violation shows as a console error."""
 from __future__ import annotations
@@ -62,11 +64,11 @@ def fixtures() -> dict:
         p["tags"] = []
     graphs = {
         RL: {"id": RL, "name": "Reinforcement learning", "tags": ["reinforcement learning"], "locked": False, "created_by": None,
-             "members": [TRPO, PPO, RLHF, INSTRUCT, DPO], "deleted": False},
+             "members": [TRPO, PPO, RLHF, INSTRUCT, DPO], "deleted": False, "rev": 7, "changed": None},
         GEN: {"id": GEN, "name": "Diffusion and generative models", "tags": ["diffusion"], "locked": False, "created_by": None,
-              "members": [DDPM, SDE, FLOW], "deleted": False},
+              "members": [DDPM, SDE, FLOW], "deleted": False, "rev": 3, "changed": None},
         LOCKED: {"id": LOCKED, "name": "Locked picks", "tags": [], "locked": True, "created_by": ALICE,
-                 "members": [PPO, DDPM, DPO], "deleted": False},
+                 "members": [PPO, DDPM, DPO], "deleted": False, "rev": 2, "changed": None},
     }
     # the settled positions (layout.py's job in the hub)
     layout = {
@@ -177,12 +179,52 @@ class FakeHub:
             self.s["log"].append(e)
             return e
 
+    def bump(self, gids, user_id=None, actor="human") -> dict:
+        """The graphs a change touched go up one revision. -> {graph id: revision}"""
+        with self.lock:
+            out = {}
+            for gid in dict.fromkeys(gids):
+                g = self.s["graphs"].get(gid)
+                if g is None:
+                    continue
+                g["rev"] += 1
+                u = USERS.get(user_id)
+                g["changed"] = {"by": {"id": u["id"], "name": u["name"]} if u else None, "actor": actor,
+                                "at": iso(datetime.now(timezone.utc))}
+                out[gid] = g["rev"]
+            return out
+
+    def link_graphs(self, src, dst):
+        return [gid for gid, g in self.s["graphs"].items() if not g["deleted"] and src in g["members"] and dst in g["members"]]
+
+    def change_as(self, user_id, what, *args):
+        """Someone else's edit, straight into the state (no event: as if it were missed). what:
+        'link' (src, dst, grade) or 'rename' (graph id, name). -> the new link id or None"""
+        with self.lock:
+            if what == "link":
+                src, dst, grade = args
+                lid = self.s["next_link"]
+                self.s["next_link"] += 1
+                self.s["links"][lid] = {"id": lid, "src": src, "dst": dst, "grade": grade, "origin": "human", "state": "active",
+                                        "created_by": user_id, "created_at": iso(datetime.now(timezone.utc))}
+                self.add_log(user_id, "link.add", lid, None, {"id": lid, "src": src, "dst": dst, "grade": grade, "state": "active"})
+                self.bump(self.link_graphs(src, dst), user_id)
+                return lid
+            if what == "rename":
+                gid, name = args
+                g = self.s["graphs"][gid]
+                self.add_log(user_id, "graph.rename", gid, {"id": gid, "name": g["name"]}, {"id": gid, "name": name})
+                g["name"] = name
+                self.bump([gid], user_id)
+                return None
+            raise ValueError(what)
+
     # ---------------------------------------------------------------- the API
     def handle(self, method, path, q, body, headers):
         if method == "GET" and not path.startswith("/api/"):
             return self.static(path)
         with self.lock:
-            self.requests.append((method, path, body, headers.get("X-PCG")))
+            self.requests.append((method, path, body, headers.get("X-PCG"), q))
             wait = self._knob(self.delay, method, path)
             late = self._knob(self.lag, method, path)
             failing = self._knob(self.fail, method, path)
@@ -227,7 +269,23 @@ class FakeHub:
 
     def meta(self, g):
         return {"id": g["id"], "name": g["name"], "tags": list(g["tags"]), "locked": g["locked"], "n": len(g["members"]),
-                "created_by": g["created_by"]}
+                "created_by": g["created_by"], "rev": g["rev"], "changed": g["changed"]}
+
+    def stale(self, body, q, gid=None):
+        """409 stale when the edit names a revision of its graph that is not the one now (None: fine)."""
+        base = body.get("base_rev", q.get("base_rev"))
+        gid = gid or body.get("graph_id") or q.get("graph_id")
+        if base is None or base == "":
+            return None
+        base = int(base)
+        g = self.s["graphs"].get(gid)
+        if g is None or g["deleted"]:
+            return 409, {"error": "stale", "message": "this graph was deleted", "graph_id": gid, "rev": None, "deleted": True}
+        if g["rev"] == base:
+            return None
+        ch = g["changed"] or {}
+        return 409, {"error": "stale", "message": "someone changed this graph since the page loaded it", "graph_id": gid,
+                     "rev": g["rev"], "base_rev": base, "by": ch.get("by"), "actor": ch.get("actor"), "at": ch.get("at")}
 
     def graph(self, gid):
         g = self.s["graphs"][gid]
@@ -272,14 +330,54 @@ class FakeHub:
         path = sorted(mem, key=lambda pid: (self.s["papers"][pid]["year"] or 0, pid))
         for n in nodes:
             n["deg"] = sum(1 for l in links if n["id"] in (l["src"], l["dst"]))
-        return {"graph": self.meta(g), "nodes": nodes, "links": links, "roots": roots, "start": roots, "path": path,
+        return {"graph": self.meta(g), "rev": g["rev"], "nodes": nodes, "links": links, "roots": roots, "start": roots, "path": path,
                 "descendants": {k: v for k, v in desc.items() if v}}
+
+    def depth(self, e):
+        """0 a change, odd an undo, even (> 0) a redo (graph.py's _depths)."""
+        byid, d, x = {y["id"]: y for y in self.s["log"]}, 0, e
+        while x is not None and x.get("revert_of") is not None:
+            d += 1
+            x = byid.get(x["revert_of"])
+        return d
 
     def log_out(self, e):
         u = USERS.get(e["user_id"])
         out = dict(e)
         out["user"] = {"id": u["id"], "name": u["name"]} if u else None
+        d = self.depth(e)
+        out["kind"] = "change" if d == 0 else ("undo" if d % 2 else "redo")
         return out
+
+    def candidates(self, me):
+        """graph.py's _candidates: per scope, the change (or redo) to undo and the undo to redo among
+        the newest 100; `mine` is the person's own edits; a new change leaves nothing to redo."""
+        newest = sorted(self.s["log"], key=lambda e: -e["id"])[:100]
+        res = {s: {"undo": None, "redo": None, "changed": False} for s in ("mine", "any")}
+        for e in newest:
+            if e["reverted_by"] is not None:
+                continue
+            d = self.depth(e)
+            for scope in ("mine", "any"):
+                if scope == "mine" and not (e["user_id"] == me["id"] and e.get("actor", "human") == "human"):
+                    continue
+                slot = res[scope]
+                if d % 2:
+                    if slot["redo"] is None and not slot["changed"]:
+                        slot["redo"] = e
+                else:
+                    if slot["undo"] is None:
+                        slot["undo"] = e
+                    if d == 0:
+                        slot["changed"] = True
+        return res
+
+    def affected(self, e):
+        op, t = e["op"], e["target"]
+        if op.startswith("link."):
+            l = self.s["links"][int(t)]
+            return self.link_graphs(l["src"], l["dst"])
+        return [t.split("/")[0]]
 
     def route(self, method, path, q, body):
         me = self.user()
@@ -298,10 +396,12 @@ class FakeHub:
                 self.s["next_graph"] += 1
                 tags = [t for t in body.get("tags") or [] if isinstance(t, str)]
                 mem = [pid for pid, p in self.s["papers"].items() if set(p["tags"]) & set(tags)]
-                g = {"id": gid, "name": name, "tags": tags, "locked": False, "created_by": me["id"], "members": mem, "deleted": False}
+                g = {"id": gid, "name": name, "tags": tags, "locked": False, "created_by": me["id"], "members": mem, "deleted": False,
+                     "rev": 0, "changed": None}
                 self.s["graphs"][gid] = g
                 self.add_log(me["id"], "graph.create", gid, None, {"id": gid, "name": name, "tags": tags})
-                return 201, {"graph": self.meta(g)}
+                revs = self.bump([gid], me["id"])
+                return 201, {"graph": self.meta(g), "revs": revs}
         m = re.match(r"^/api/graphs/([^/]+)$", path)
         if m:
             gid = m.group(1)
@@ -314,19 +414,29 @@ class FakeHub:
                 bad = self.guard(g) if "locked" not in body else None
                 if bad:
                     return bad
-                for k, op in (("name", "graph.rename"), ("tags", "graph.set_tags"), ("locked", "graph.lock")):
-                    if k in body:
-                        before, after = {k: g[k]}, {k: body[k]}
-                        g[k] = body[k]
-                        before["id"] = after["id"] = gid
-                        self.add_log(me["id"], op, gid, before, after)
-                return 200, {"graph": self.meta(g)}
+                todo = [(k, op) for k, op in (("name", "graph.rename"), ("tags", "graph.set_tags"), ("locked", "graph.lock"))
+                        if k in body and body[k] != g[k]]
+                if not todo:
+                    return 200, {"graph": self.meta(g), "revs": {}, "already": True}
+                bad = self.stale(body, q, gid)
+                if bad:
+                    return bad
+                for k, op in todo:
+                    before, after = {k: g[k]}, {k: body[k]}
+                    g[k] = body[k]
+                    before["id"] = after["id"] = gid
+                    self.add_log(me["id"], op, gid, before, after)
+                revs = self.bump([gid], me["id"])
+                return 200, {"graph": self.meta(g), "revs": revs}
             if method == "DELETE":
                 if me["role"] != "admin" and g["created_by"] != me["id"]:
                     return 403, {"error": "forbidden", "message": "only its maker or an admin deletes a graph"}
+                bad = self.stale(body, q, gid)
+                if bad:
+                    return bad
                 g["deleted"] = True
                 self.add_log(me["id"], "graph.delete", gid, {"id": gid, "name": g["name"]}, None)
-                return 204, None
+                return 200, {"revs": self.bump([gid], me["id"])}
         m = re.match(r"^/api/graphs/([^/]+)/papers(?:/([^/]+))?$", path)
         if m:
             g = self.graph(m.group(1))
@@ -337,22 +447,36 @@ class FakeHub:
                 pid = body.get("paper_id")
                 if pid not in self.s["papers"]:
                     return 404, {"error": "no_paper", "message": "no such paper"}
-                if pid not in g["members"]:
-                    g["members"].append(pid)
-                    self.add_log(me["id"], "graph.add_paper", f"{g['id']}/{pid}", None, {"graph_id": g["id"], "paper_id": pid})
                 p = self.s["papers"][pid]
-                return 201, {"node": {"id": pid, "label": p["label"], "title": p["title"], "year": p["year"], "made_by": p["made_by"], "x": None, "y": None}}
+                node = {"id": pid, "label": p["label"], "title": p["title"], "year": p["year"], "made_by": p["made_by"], "x": None, "y": None}
+                if pid in g["members"]:
+                    return 200, {"node": node, "revs": {}, "already": True}
+                bad = self.stale(body, q, g["id"])
+                if bad:
+                    return bad
+                g["members"].append(pid)
+                self.add_log(me["id"], "graph.add_paper", f"{g['id']}/{pid}", None, {"graph_id": g["id"], "paper_id": pid})
+                return 201, {"node": node, "revs": self.bump([g["id"]], me["id"])}
             if method == "DELETE":
                 pid = m.group(2)
-                if pid in g["members"]:
-                    g["members"].remove(pid)
-                    self.add_log(me["id"], "graph.remove_paper", f"{g['id']}/{pid}", {"graph_id": g["id"], "paper_id": pid}, None)
-                return 204, None
+                if pid not in g["members"]:
+                    return 200, {"revs": {}, "already": True}
+                bad = self.stale(body, q, g["id"])
+                if bad:
+                    return bad
+                g["members"].remove(pid)
+                self.add_log(me["id"], "graph.remove_paper", f"{g['id']}/{pid}", {"graph_id": g["id"], "paper_id": pid}, None)
+                return 200, {"revs": self.bump([g["id"]], me["id"])}
         if method == "POST" and path == "/api/links":
             src, dst, grade = body.get("src"), body.get("dst"), body.get("grade")
             if src not in self.s["papers"] or dst not in self.s["papers"] or grade not in ("e", "s", "w") or src == dst:
                 return 400, {"error": "bad_link", "message": "a link needs two papers and a grade"}
             old = next((l for l in self.s["links"].values() if l["src"] == src and l["dst"] == dst), None)
+            if old and old["state"] == "active" and old["grade"] == grade and body.get("base_rev") is not None:
+                return 200, {"link": self.link_out(old), "revs": {}, "already": True}
+            bad = self.stale(body, q)
+            if bad:
+                return bad
             if old and old["state"] == "active":
                 return 409, {"error": "exists", "message": "these two are linked already"}
             if old:
@@ -367,10 +491,17 @@ class FakeHub:
                      "created_at": iso(datetime.now(timezone.utc))}
                 self.s["links"][lid] = l
             self.add_log(me["id"], "link.add", l["id"], before, {"id": l["id"], "src": src, "dst": dst, "grade": grade, "state": "active"})
-            return 201, {"link": self.link_out(l)}
+            return 201, {"link": self.link_out(l), "revs": self.bump(self.link_graphs(src, dst), me["id"])}
         m = re.match(r"^/api/links/(\d+)$", path)
         if m:
             l = self.s["links"][int(m.group(1))]
+            if method == "DELETE" and l["state"] != "active":
+                return 200, {"link": self.link_out(l), "revs": {}, "already": True}
+            if method == "PUT" and l["grade"] == body.get("grade") and l["state"] == "active":
+                return 200, {"link": self.link_out(l), "revs": {}, "already": True}
+            bad = self.stale(body, q)
+            if bad:
+                return bad
             if l["state"] != "active":
                 return 404, {"error": "not_found", "message": "that link was removed"}
             if method == "PUT":
@@ -380,44 +511,54 @@ class FakeHub:
                 before = {"id": l["id"], "src": l["src"], "dst": l["dst"], "grade": l["grade"]}
                 l["grade"] = grade
                 self.add_log(me["id"], "link.grade", l["id"], before, dict(before, grade=grade))
-                return 200, {"link": self.link_out(l)}
+                return 200, {"link": self.link_out(l), "revs": self.bump(self.link_graphs(l["src"], l["dst"]), me["id"])}
             if method == "DELETE":
                 l["state"] = "removed"
                 self.add_log(me["id"], "link.remove", l["id"], {"id": l["id"], "src": l["src"], "dst": l["dst"], "grade": l["grade"], "state": "active"},
                              {"id": l["id"], "src": l["src"], "dst": l["dst"], "grade": l["grade"], "state": "removed"})
-                return 204, None
+                return 200, {"revs": self.bump(self.link_graphs(l["src"], l["dst"]), me["id"])}
         m = re.match(r"^/api/papers/([^/]+)/label$", path)
         if m and method == "PUT":
             p = self.s["papers"][m.group(1)]
             text = str(body.get("label") or "").strip()
             if not text or len(text) > 40:
                 return 400, {"error": "bad_label", "message": "a label is 1 to 40 characters"}
+            if p["label"] == text:
+                return 200, {"label": text, "revs": {}, "already": True}
+            bad = self.stale(body, q)
+            if bad:
+                return bad
             p["label"] = text
-            return 200, {"label": text}
+            return 200, {"label": text, "revs": self.bump([gid for gid, g in self.s["graphs"].items() if m.group(1) in g["members"]], me["id"])}
         if method == "GET" and path == "/api/graph-log":
             n = int(q.get("limit") or 100)
             newest = sorted(self.s["log"], key=lambda e: -e["id"])[:n]
-            return 200, {"entries": [self.log_out(e) for e in newest]}
+            c = self.candidates(me)
+            hint = lambda k: {s: (self.log_out(c[s][k]) if c[s][k] else None) for s in ("mine", "any")}
+            return 200, {"entries": [self.log_out(e) for e in newest], "undo": hint("undo"), "redo": hint("redo")}
         if method == "POST" and path == "/api/graph-log/revert":
-            return self.revert(me, body.get("scope"), body.get("expect"))
+            return self.revert(me, body.get("scope"), body.get("expect"), body.get("redo") is True, body, q)
         return 404, {"error": "not_found", "message": "not_found"}
 
     # ---------------------------------------------------------------- revert (SPEC.md section 8)
-    def revert(self, me, scope, expect):
+    def revert(self, me, scope, expect, redo=False, body=None, q=None):
         if scope not in ("mine", "any"):
             return 400, {"error": "bad_scope", "message": "scope is mine or any"}
-        newest = sorted(self.s["log"], key=lambda e: -e["id"])[:100]
-        cand = next((e for e in newest if e["reverted_by"] is None and (scope == "any" or e["user_id"] == me["id"])), None)
-        if cand is None:
-            return 404, {"error": "nothing", "message": "nothing to undo"}
-        if cand["id"] != expect:
-            return 409, {"error": "moved", "message": "moved", "current": self.log_out(cand)}
+        cand = self.candidates(me)[scope]["redo" if redo else "undo"]
+        if cand is None or cand["id"] != expect:
+            return 409, {"error": "moved", "message": "the history moved on: look again", "next": self.log_out(cand) if cand else None}
+        touched = self.affected(cand)
+        gid = (body or {}).get("graph_id") or (q or {}).get("graph_id")
+        if gid in touched:
+            bad = self.stale(body or {}, q or {}, gid)
+            if bad:
+                return bad
         done = self.inverse(cand, me)
         if isinstance(done, str):
             return 409, {"error": "conflict", "message": done}
         cand["reverted_by"] = done["id"]
         done["revert_of"] = cand["id"]
-        return 200, {"entry": self.log_out(done)}
+        return 200, {"reverted": self.log_out(cand), "log": self.log_out(done), "revs": self.bump(touched, me["id"])}
 
     def inverse(self, e, me):
         """Apply the inverse of e against the current state; a string says why it cannot."""

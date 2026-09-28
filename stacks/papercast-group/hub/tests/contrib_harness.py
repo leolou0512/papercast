@@ -125,6 +125,8 @@ class Hub:
         self.tokens: dict = {}
         self._orig_auth = auth.authenticate
         auth.authenticate = self._authenticate
+        from hub import layout              # no background layouts here: they outlive this hub
+        layout.AUTO = False                 # and would write into the next test's database
         self.srv = app.serve(self.cfg)
         self.port = self.srv.server_address[1]
         self.thread = threading.Thread(target=self.srv.serve_forever, daemon=True)

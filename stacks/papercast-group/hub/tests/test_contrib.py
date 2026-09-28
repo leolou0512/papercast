@@ -184,12 +184,17 @@ class ContribTest(unittest.TestCase):
         self.assertGreater(ep["words"], 2250)
         self.assertEqual((ep["voice"]["state"], ep["voice"]["queue_position"] is not None), ("queued", True))
         epdir = self.h.cfg.episodes / out["episode_id"]
-        self.assertEqual(sorted(os.listdir(epdir)), ["bundle-manifest.json", "claims.md", "explainer.html",
-                                                     "explainer.json", "links-pending.json", "meta.json", "script.md"])
+        # links-pending.json only while the hub has no graph module to take the links
+        self.assertEqual(sorted(set(os.listdir(epdir)) - {"links-pending.json"}),
+                         ["bundle-manifest.json", "claims.md", "explainer.html", "explainer.json", "meta.json", "script.md"])
         meta = json.loads((epdir / "meta.json").read_text())
         self.assertEqual((meta["paper_id"], meta["made_by"]["name"]), (out["paper_id"], "Eve"))
-        pending = json.loads((epdir / "links-pending.json").read_text())
-        self.assertEqual(pending["links"][0]["other"], {"arxiv_id": "1907.05600"})
+        pf = epdir / "links-pending.json"
+        if pf.exists():                     # no graph module: the links wait in the episode dir
+            self.assertEqual(json.loads(pf.read_text())["links"][0]["other"], {"arxiv_id": "1907.05600"})
+        else:                               # the graph keeps a link to a paper it has not got yet
+            rows = [dict(r) for r in db.conn().execute("SELECT * FROM pending_links").fetchall()]
+            self.assertTrue(any("1907.05600" in json.dumps(r) for r in rows), rows)
         c = db.conn()
         p = c.execute("SELECT * FROM papers WHERE id = ?", (out["paper_id"],)).fetchone()
         self.assertEqual((p["arxiv_id"], p["title_norm"], json.loads(p["authors"])[0], json.loads(p["tags"])),
@@ -429,6 +434,7 @@ class ContribTest(unittest.TestCase):
     def test_links_go_to_the_graph(self):
         a = self.h.user("Pam")
         calls = []
+        had = getattr(graph, "apply_agent_links", None)
         try:
             graph.apply_agent_links = lambda episode_id, paper_id, user_id, links: calls.append(
                 (episode_id, paper_id, user_id, links))
@@ -446,7 +452,10 @@ class ContribTest(unittest.TestCase):
             self.assertEqual(ep3["state"], "waiting-for-gpu")
             self.assertTrue((self.h.cfg.episodes / ep3["id"] / "links-pending.json").exists())
         finally:
-            del graph.apply_agent_links
+            if had is not None:             # the real one, once the graph module has it
+                graph.apply_agent_links = had
+            else:
+                del graph.apply_agent_links
 
     def test_left_over_checking_is_checked_again(self):
         """A hub that stopped mid-check: the episode is checked on the next start's first request."""

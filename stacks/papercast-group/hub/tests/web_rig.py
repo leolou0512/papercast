@@ -120,6 +120,8 @@ class Rig:
         auth.authenticate = fake_authenticate
         auth.ROUTES = FAKE_AUTH_ROUTES
         self.cfg = C.Config(data=self.data, auth=auth_mode, port=0, static=Path(static or STATIC))
+        from hub import layout              # no background layouts here: they outlive this hub
+        layout.AUTO = False                 # and would write into the next test's database
         self.srv = app.serve(self.cfg)
         self.port = self.srv.server_address[1]
         self.base = f"http://127.0.0.1:{self.port}"

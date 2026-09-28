@@ -683,15 +683,13 @@ class Page(PageBase):
             if new:
                 r.q("UPDATE episodes SET deleted_at = '2026-09-01T00:00:00Z' WHERE paper_id = ?", new)
 
-    def test_9_map_button_without_the_map(self):
-        """map.js is another part's (A6); until it is there the button says so, quietly."""
+    def test_9_map_button_opens_the_map(self):
+        """The Map button loads map.js (A6's) on first use and mounts it over the page."""
         b = self.b
         self.home(A)
-        self.allow = [r"/map\.(js|css)", r"404"]
         b.js("document.getElementById('map-btn').click()")
-        b.wait_js("!document.getElementById('toast').hidden", 5, "toast")
-        self.assertEqual(self.text("#toast-msg"), "The map is not available yet.")
-        self.assertTrue(b.js("document.getElementById('map').hidden"))
+        b.wait_js("!document.getElementById('map').hidden && !!(window.PaperMap && document.querySelector('#map canvas'))",
+                  10, "map mounted")
 
     def test_z_phone_tap_targets(self):
         """On a phone every control, in every state, takes a 44 x 44 px tap that reaches it."""

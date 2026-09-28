@@ -493,8 +493,10 @@ svg { display: block; }
 
 @media (max-width: 720px) {
   .tr { padding: 0 16px 32px; }
-  .tr-find { margin-left: 0; width: 100%; }
+  .tr-head { flex-wrap: wrap; }
+  .tr-find { margin-left: 0; flex: 1 1 100%; width: 100%; max-width: 100%; min-width: 0; }
   .tr-find .field { flex: 1; width: auto; min-width: 0; }
+  .tr-count { min-width: 0; }
   .tr-find .icon-btn, .q-row .icon-btn, .q-h .icon-btn { margin: 0; }
   .tr-now-wrap { bottom: calc(16px + env(safe-area-inset-bottom)); }
   .q-grip { display: none; }

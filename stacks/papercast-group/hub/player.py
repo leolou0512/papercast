@@ -389,10 +389,20 @@ def _episode(eid: str):
 
 
 def get_timings(req, eid):
+    """The one timings answer (the voice module's was folded in here): timings.json when it fits
+    the audio, else an estimate, with `rev`, the revision of the audio they belong to (the page's
+    /audio/<id>.mp3?v=<rev>; 1 until the voice was changed)."""
     t, _script, _sig = _timings(req.cfg, _episode(eid))
     if t is None:
         raise HTTPError(404, "no_script", "this episode has no script")
-    req.send_json(200, t)
+    rev = 1
+    try:
+        from . import voices
+        r = voices._row(db.conn(), eid)
+        rev = r["rev"] if r is not None and r["rev"] else 1
+    except Exception:                   # no voice module, or its table not made yet
+        pass
+    req.send_json(200, {**t, "rev": rev})
 
 
 _made: dict = {}            # episode id -> (signature, transcript): matching words is not free

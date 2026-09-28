@@ -653,5 +653,4 @@ ROUTES = [
     ("GET", rf"^/api/episodes/{EID}/voice$", get_episode_voice, "viewer"),
     ("PUT", rf"^/api/episodes/{EID}/voice$", put_episode_voice, "viewer"),
     ("DELETE", rf"^/api/episodes/{EID}/voice$", delete_episode_voice, "viewer"),
-    ("GET", rf"^/api/episodes/{EID}/timings$", get_timings, "viewer"),
 ]

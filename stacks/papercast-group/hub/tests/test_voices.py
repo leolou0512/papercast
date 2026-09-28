@@ -184,7 +184,7 @@ class Voices(unittest.TestCase):
         self.assertEqual(self.upload(eid, dur="60.0")[0], 200)
         self.assertEqual(self.files(eid), {})
         self.assertFalse(self.lib_voice(eid, a)["voice"]["timings"])
-        self.assertEqual(self.web("GET", f"/api/episodes/{eid}/timings", a)[1]["error"], "no_timings")
+        self.assertTrue(self.web("GET", f"/api/episodes/{eid}/timings", a)[1]["estimated"])     # the page estimates instead
 
     # -- changing the voice
     def test_change_by_the_maker_allowed_by_others_refused(self):

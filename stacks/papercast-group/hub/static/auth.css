@@ -78,3 +78,29 @@ a { color: var(--accent); }
 .hint { margin-top: 24px; }
 .link-btn { display: inline-flex; align-items: center; text-decoration: none; }
 .field[readonly] { background: var(--surface); box-shadow: none; color: var(--text-2); }
+
+/* the sign-in page: the Virtual Atoms logo (its dark letters turned light on a dark page) and "Remember me" */
+.brand { display: block; width: 180px; height: auto; margin: 0 0 24px; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .brand { filter: invert(1) hue-rotate(180deg); } }
+:root[data-theme="dark"] .brand { filter: invert(1) hue-rotate(180deg); }
+.check { display: flex; align-items: center; gap: 0; min-height: 44px; margin-top: 4px; font-size: 14px; cursor: pointer; user-select: none; }
+/* the box is drawn at 18 px inside a 44 px tap area; the negative margins line it up with the fields */
+.check input { -webkit-appearance: none; appearance: none; width: 44px; height: 44px; margin: 0 0 0 -13px; display: grid; place-items: center;
+  background: none; cursor: pointer; }
+.check input::before, .check input::after { content: ""; grid-area: 1 / 1; box-sizing: border-box; }
+.check input::before { width: 18px; height: 18px; border-radius: 4px; box-shadow: inset 0 0 0 1.5px var(--input-line); background: var(--bg); }
+.check input:checked::before { background: var(--accent); box-shadow: none; }
+.check input:checked::after { width: 6px; height: 11px; margin-top: -3px; border: solid var(--on-accent); border-width: 0 2px 2px 0; transform: rotate(45deg); }
+.check input:focus-visible { outline: none; }
+.check input:focus-visible::before { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* light or dark (theme.js): a sun on a dark page, a moon on a light one */
+.theme-btn { position: fixed; top: max(8px, env(safe-area-inset-top)); right: max(8px, env(safe-area-inset-right)); width: 44px; height: 44px;
+  display: grid; place-items: center; border-radius: 50%; color: var(--text-2); }
+.theme-btn:hover { background: var(--hover); color: var(--text); }
+.theme-btn .i-sun { display: none; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .theme-btn .i-sun { display: block; }
+  :root:not([data-theme="light"]) .theme-btn .i-moon { display: none; }
+}
+:root[data-theme="dark"] .theme-btn .i-sun { display: block; }
+:root[data-theme="dark"] .theme-btn .i-moon { display: none; }

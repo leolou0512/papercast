@@ -2128,6 +2128,7 @@
     readColors();
     var mq = window.matchMedia("(prefers-color-scheme: dark)");
     if (mq.addEventListener) mq.addEventListener("change", function () { readColors(); kick(); });
+    document.addEventListener("pcg-theme", function () { readColors(); kick(); });   // theme.js: chosen on the page
     if (window.ResizeObserver) new ResizeObserver(function () { resize(); }).observe(root); else window.addEventListener("resize", resize);
     resize();
     renderTabs(); renderEmpty();

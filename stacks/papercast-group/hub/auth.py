@@ -67,6 +67,7 @@ RANK = {r: i for i, r in enumerate(ROLES)}
 
 SESSION_COOKIE = "pcg_s"
 SESSION_S = 30 * 86400
+SESSION_SHORT_S = 12 * 3600                 # "Remember me" off: a browser-session cookie, and 12 h at most
 INVITE_S = 7 * 86400
 SIGNIN_S = 86400                # a sign-in link for someone who already exists (bootstrap)
 LOGIN_S = 600                   # a device code
@@ -354,39 +355,49 @@ def session_uid(cfg, v: str | None) -> int | None:
     return int(m[1])
 
 
-def make_session_v2(cfg, uid: int, sv: int, at: float | None = None) -> str:
+def make_session_v2(cfg, uid: int, sv: int, at: float | None = None, remember: bool = True) -> str:
     """Password mode: v2.<user id>.<session version>.<issued>.<HMAC>. Bumping users.session_v
-    ends every session of that person at once (new password, sign out everywhere, removal)."""
-    msg = f"v2.{int(uid)}.{int(sv)}.{int(_now() if at is None else at)}"
+    ends every session of that person at once (new password, sign out everywhere, removal).
+    Without "Remember me" the prefix is v2s (signed with the rest): it lasts SESSION_SHORT_S."""
+    msg = f"{'v2' if remember else 'v2s'}.{int(uid)}.{int(sv)}.{int(_now() if at is None else at)}"
     return msg + "." + _b64e(hmac.new(cfg.secret, b"pcg_s|" + msg.encode(), hashlib.sha256).digest())
 
 
 def session_v2(cfg, v: str | None):
     """(user id, session version) of a valid v2 cookie, else None."""
-    m = re.fullmatch(r"v2\.(\d{1,12})\.(\d{1,9})\.(\d{1,12})\.[A-Za-z0-9_-]{43}", v or "")
+    m = re.fullmatch(r"(v2s?)\.(\d{1,12})\.(\d{1,9})\.(\d{1,12})\.[A-Za-z0-9_-]{43}", v or "")
     if not m or len(cfg.secret) < 16:
         return None
-    if not _same(make_session_v2(cfg, int(m[1]), int(m[2]), int(m[3])), v):
+    remember = m[1] == "v2"
+    if not _same(make_session_v2(cfg, int(m[2]), int(m[3]), int(m[4]), remember=remember), v):
         return None
-    age = _now() - int(m[3])
-    if age >= SESSION_S or age < -300:
+    age = _now() - int(m[4])
+    if age >= (SESSION_S if remember else SESSION_SHORT_S) or age < -300:
         return None
-    return int(m[1]), int(m[2])
+    return int(m[2]), int(m[3])
+
+
+def remembered(req) -> bool:
+    """False while this browser's session was made without "Remember me" (kept when it is renewed)."""
+    return not (cookie(req, SESSION_COOKIE) or "").startswith("v2s.")
 
 
 def _secure(cfg) -> str:
     return "; Secure" if cfg.public_url.lower().startswith("https://") else ""
 
 
-def session_cookie(cfg, uid: int, sv: int | None = None) -> str:
-    """The Set-Cookie value: HttpOnly, SameSite=Lax, Secure when the hub is served over https."""
+def session_cookie(cfg, uid: int, sv: int | None = None, remember: bool = True) -> str:
+    """The Set-Cookie value: HttpOnly, SameSite=Lax, Secure when the hub is served over https.
+    Without "Remember me" (password mode) it has no Max-Age, so it ends with the browser."""
+    keep = f"; Max-Age={SESSION_S}"
     if cfg.auth == "password":
         if sv is None:
             sv = db.conn().execute("SELECT session_v FROM users WHERE id = ?", (uid,)).fetchone()[0]
-        val = make_session_v2(cfg, uid, sv)
+        val = make_session_v2(cfg, uid, sv, remember=remember)
+        keep = keep if remember else ""
     else:
         val = make_session(cfg, uid)
-    return f"{SESSION_COOKIE}={val}; Path=/; Max-Age={SESSION_S}; HttpOnly; SameSite=Lax{_secure(cfg)}"
+    return f"{SESSION_COOKIE}={val}; Path=/{keep}; HttpOnly; SameSite=Lax{_secure(cfg)}"
 
 
 def clear_cookie(cfg) -> str:

@@ -66,6 +66,15 @@
     $("show").setAttribute("aria-pressed", String(on));
     p.focus();
   });
+  // light or dark (theme.js): the button names the one it switches to
+  function themeLabel() {
+    const to = window.pcgTheme && window.pcgTheme.effective() === "dark" ? "Light mode" : "Dark mode";
+    $("theme").setAttribute("aria-label", to);
+    $("theme").title = to;
+  }
+  $("theme").addEventListener("click", () => { if (window.pcgTheme) window.pcgTheme.toggle(); });
+  document.addEventListener("pcg-theme", themeLabel);
+  themeLabel();
   $("forgot-open").addEventListener("click", () => show("forgot"));
   $("forgot-back").addEventListener("click", () => show("signin"));
   $("asked-back").addEventListener("click", () => show("signin"));
@@ -77,7 +86,7 @@
     if (!password) { say("Type your password.", "warn"); $("password").focus(); return; }
     $("go").disabled = true;
     try {
-      const r = await api("POST", "/api/auth/login", { login, password });
+      const r = await api("POST", "/api/auth/login", { login, password, remember: $("remember").checked });
       say("Signed in.", "ok");
       go(r.must_change);
     } catch (err) {

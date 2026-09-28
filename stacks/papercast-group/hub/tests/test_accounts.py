@@ -707,6 +707,30 @@ class PasswordTest(unittest.TestCase):
         self.assertEqual(self.smtp.parsed()["Subject"], "papercast: a test email")
 
     # ---------------------------------------------------------------- admin resets
+    # ---------------------------------------------------------------- "Remember me"
+    def test_remember_me(self):
+        uid, _ = self.person("rm701")
+        s, j, r = self.r("POST", "/api/auth/login", {"login": "rm701", "password": NEW_PW, "remember": False})
+        self.assertEqual(s, 200, j)
+        self.assertNotIn("Max-Age", r.getheader("Set-Cookie"))          # ends with the browser
+        short = cookie_of(r)
+        v = short.split("=", 1)[1]
+        self.assertTrue(v.startswith("v2s."), v)
+        self.assertEqual(self.r("GET", "/api/me", cookie=short)[0], 200)
+        s, j, r2 = self.r("POST", "/api/auth/login", {"login": "rm701", "password": NEW_PW})
+        self.assertIn(f"Max-Age={auth.SESSION_S}", r2.getheader("Set-Cookie"))   # remembered unless asked not to
+        self.assertTrue(cookie_of(r2).split("=", 1)[1].startswith("v2."))
+        sv = accounts.account(uid)["session_v"]
+        ago = time.time() - 13 * 3600
+        self.assertEqual(self.r("GET", "/api/me", cookie=f"pcg_s={auth.make_session_v2(self.hub.cfg, uid, sv, at=ago, remember=False)}")[0], 401)
+        self.assertEqual(self.r("GET", "/api/me", cookie=f"pcg_s={auth.make_session_v2(self.hub.cfg, uid, sv, at=ago)}")[0], 200)
+        self.assertEqual(self.r("GET", "/api/me", cookie="pcg_s=v2." + v[len("v2s."):])[0], 401)   # the prefix is signed too
+        # a new password renews the cookie, still not remembered
+        s, j, r3 = self.r("POST", "/api/auth/password", {"current": NEW_PW, "password": "another long pass phrase"}, cookie=short)
+        self.assertEqual(s, 200, j)
+        self.assertNotIn("Max-Age", r3.getheader("Set-Cookie"))
+        self.assertTrue(cookie_of(r3).split("=", 1)[1].startswith("v2s."))
+
     # ---------------------------------------------------------------- the welcome email
     def welcome_parts(self, i=-1):
         msg = self.smtp.parsed(i)
@@ -1178,6 +1202,53 @@ class PasswordPagesTest(unittest.TestCase):
         while accounts.account(uid2)["role"] != "viewer" and time.time() < deadline:
             time.sleep(0.05)
         self.assertEqual(accounts.account(uid2)["role"], "viewer")
+
+    def test_7_sign_in_page_logo_remember_me_and_theme(self):
+        self.new_person("pg701")
+        self.b.goto(self.base + "/signin")
+        self.wait("!document.getElementById('signin').hidden", "form")
+        self.addCleanup(lambda: self.js("localStorage.removeItem('pcg-theme')"))     # the browser is shared by the tests
+        self.wait("document.querySelector('.brand').complete && document.querySelector('.brand').naturalWidth > 0", "the logo loaded")
+        self.assertEqual(self.js("document.querySelector('.brand').alt"), "Virtual Atoms")
+        self.assertNotIn("New here", self.js("document.body.textContent"))
+        self.assertTrue(self.js("document.getElementById('remember').checked"))
+        # light or dark: the button switches, the choice stays after a reload and reaches the app
+        start = self.js("pcgTheme.effective()")
+        other = "light" if start == "dark" else "dark"
+        self.assertEqual(self.js("document.getElementById('theme').getAttribute('aria-label')"), "Light mode" if start == "dark" else "Dark mode")
+        self.click("#theme")
+        self.assertEqual(self.js("document.documentElement.dataset.theme"), other)
+        self.assertEqual(self.js("localStorage.getItem('pcg-theme')"), other)
+        self.b.goto(self.base + "/signin")
+        self.wait("!document.getElementById('signin').hidden", "form again")
+        self.assertEqual(self.js("document.documentElement.dataset.theme"), other)
+        self.assertEqual(self.js("getComputedStyle(document.body).backgroundColor"), "rgb(14, 14, 14)" if other == "dark" else "rgb(255, 255, 255)")
+        self.assertEqual("invert" in self.js("getComputedStyle(document.querySelector('.brand')).filter"), other == "dark")
+        # not remembered: a browser-session cookie
+        self.click("#remember")
+        self.assertFalse(self.js("document.getElementById('remember').checked"))
+        self.sign_in("pg701", "pg701")
+        self.wait("location.pathname === '/set-password' && !!document.getElementById('setpw') && !document.getElementById('setpw').hidden", "signed in")
+        self.assertEqual(self.js("document.documentElement.dataset.theme"), other)
+        c = next(c for c in self.b.call("Network.getCookies")["cookies"] if c["name"] == "pcg_s")
+        self.assertTrue(c["session"], c)
+        self.assertTrue(c["value"].startswith("v2s."))
+        self.js("pcgTheme.set('')")
+        self.assertIsNone(self.js("localStorage.getItem('pcg-theme')"))
+
+    def test_8_the_theme_in_account_settings(self):
+        self.signed_in_as_leo("/#settings=account")
+        self.addCleanup(lambda: self.js("localStorage.removeItem('pcg-theme')"))
+        self.wait("!!document.getElementById('acct-theme')", "the account tab")
+        self.assertEqual(self.js("document.querySelector('#acct-theme [aria-checked=true]').dataset.v"), "system")
+        self.js("document.querySelector('#acct-theme [data-v=dark]').click()")
+        self.assertEqual(self.js("document.documentElement.dataset.theme"), "dark")
+        self.assertEqual(self.js("document.querySelector('#acct-theme [aria-checked=true]').dataset.v"), "dark")
+        self.js("document.querySelector('#acct-theme [data-v=light]').click()")
+        self.assertEqual(self.js("document.documentElement.dataset.theme"), "light")
+        self.js("document.querySelector('#acct-theme [data-v=system]').click()")
+        self.assertIsNone(self.js("document.documentElement.getAttribute('data-theme')"))
+        self.assertIsNone(self.js("localStorage.getItem('pcg-theme')"))
 
     def test_6_phone_tap_targets(self):
         self.new_person("pg601")

@@ -2184,9 +2184,21 @@
       all.disabled = true;
       try { await api("POST", "/api/auth/signout-all"); location.replace("/signin"); } catch (e) { all.disabled = false; toast(e.message); }
     });
+    // light or dark in this browser (theme.js); System follows the computer's setting
+    const look = el("div", { class: "seg", id: "acct-theme", role: "radiogroup", "aria-label": "Appearance" });
+    const drawLook = () => {
+      const now = window.pcgTheme ? window.pcgTheme.saved() : "";
+      look.replaceChildren(...[["", "System"], ["light", "Light"], ["dark", "Dark"]].map(([v, t]) => el("button", {
+        type: "button", role: "radio", "aria-checked": String(now === v), "data-v": v || "system",
+        onclick: () => { if (window.pcgTheme) window.pcgTheme.set(v); drawLook(); },
+      }, t)));
+    };
+    drawLook();
     body.replaceChildren(
-      el("p", { class: "intro", text: "Your name as the group sees it, your password, and where you are signed in." }),
+      el("p", { class: "intro", text: "Your name as the group sees it, your password, how the site looks, and where you are signed in." }),
       el("p", { class: "pref-h", text: "Name" }), el("div", { class: "invite first" }, name, nameSave), nameMsg,
+      el("p", { class: "pref-h sec", text: "Appearance" }), look,
+      el("p", { class: "muted", text: "Light or dark in this browser. System follows your computer's setting." }),
       el("p", { class: "pref-h sec", text: "Change password" }), form,
       el("p", { class: "pref-h sec", text: "Sign out" }),
       el("p", { class: "muted", text: "Sign out everywhere ends every browser session of yours, this one too. papercast on your computers stays logged in: remove those under Devices." }),

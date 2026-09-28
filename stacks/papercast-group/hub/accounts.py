@@ -15,7 +15,8 @@ credited to them.
 Routes (the public ones check CSRF themselves, as /api/join does, since they set cookies):
   GET  /signin, /set-password                  the two pages (static signin.html, setpw.html)
   GET  /api/auth/state                         mode, who, must change?, email set up? (never a 401)
-  POST /api/auth/login {"login","password"}    username or email
+  POST /api/auth/login {"login","password","remember"?}  username or email; remember false: a
+                                               browser-session cookie, 12 h at most
   POST /api/auth/forgot {"email"}              always the same answer; a link (1 h) if on the list
   POST /api/auth/link {"token","peek"|"password"}  see a reset link / use it (signs this browser in)
   POST /api/auth/password {"current"?,"password"}  change it (no current while the first one stands)
@@ -742,8 +743,10 @@ def _find_login(ident: str):
     return account(username=s)
 
 
-def _cookie(req, row) -> dict:
-    return {"Set-Cookie": auth.session_cookie(req.cfg, row["id"], sv=row["session_v"])}
+def _cookie(req, row, remember: bool | None = None) -> dict:
+    """A new session cookie; a renewed one (new password) keeps this browser's "Remember me"."""
+    keep = auth.remembered(req) if remember is None else remember
+    return {"Set-Cookie": auth.session_cookie(req.cfg, row["id"], sv=row["session_v"], remember=keep)}
 
 
 def login(req):
@@ -789,7 +792,8 @@ def login(req):
         log_event("signin", user_id=row["id"], email=row["email"], ip=ip,
                   detail="with the first password" if row["pw_hash"] is None else None, c=c)
     row = account(row["id"])
-    req.send_json(200, {"ok": True, "must_change": row["pw_hash"] is None, "user": public_user(row)}, _cookie(req, row))
+    req.send_json(200, {"ok": True, "must_change": row["pw_hash"] is None, "user": public_user(row)},
+                  _cookie(req, row, remember=b.get("remember") is not False))
 
 
 def forgot(req):

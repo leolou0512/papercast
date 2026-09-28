@@ -8,10 +8,13 @@
 <title>Sign in · papercast</title>
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/auth.css">
+<script src="/theme.js"></script>
 <script src="/signin.js" defer></script>
 </head>
 <body>
+<button type="button" class="theme-btn" id="theme" aria-label="Dark mode" title="Dark mode"><svg class="i-sun" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M4.7 4.7l1.6 1.6M17.7 17.7l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.7 19.3l1.6-1.6M17.7 6.3l1.6-1.6"/></svg><svg class="i-moon" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M20 14.6A8.2 8.2 0 0 1 9.4 4a8.2 8.2 0 1 0 10.6 10.6z"/></svg></button>
 <main class="box">
+  <img class="brand" src="/va-logo.svg" width="180" height="69" alt="Virtual Atoms">
   <h1 id="title">Sign in to papercast</h1>
   <p class="msg" id="msg" aria-live="polite">Loading…</p>
 
@@ -25,11 +28,11 @@
              enterkeyhint="go">
       <button type="button" class="text-btn show" id="show" aria-controls="password" aria-pressed="false">Show</button>
     </div>
+    <label class="check" for="remember"><input type="checkbox" id="remember" checked> Remember me</label>
     <div class="row wrap">
       <button type="submit" class="btn-accent" id="go">Sign in</button>
       <button type="button" class="text-btn" id="forgot-open">Forgot your password?</button>
     </div>
-    <p class="sub hint">New here? Ask an admin to add you.</p>
   </form>
 
   <form id="forgot" hidden novalidate>

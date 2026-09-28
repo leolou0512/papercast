@@ -241,6 +241,20 @@ class MapTest(unittest.TestCase):
         self.assertEqual(self.texts(".pm-card .pm-also button"), ["Locked picks"])
         self.press(".pm-card", "Open (listened)")
         self.assertEqual(self.js("H.opened"), [DPO])
+        # a drag moves the paper here only (as in Leo's map); nothing goes to the hub
+        x, y = self.pos(RLHF)
+        self.b.call("Input.dispatchMouseEvent", type="mousePressed", x=x, y=y, button="left", clickCount=1)
+        for i in range(1, 8):
+            self.b.call("Input.dispatchMouseEvent", type="mouseMoved", x=x + 10 * i, y=y - 6 * i, button="left", buttons=1)
+            if i == 3:                           # the hub's news mid-drag: the graph is fetched again
+                self.js("H.emit('graph', {})")
+                self.wait(f"{M}.cur()._s.nodes.length === 5 && !!{M}.cur().busy === false && {M}.cur().stale === false", "refetched mid-drag")
+        self.b.call("Input.dispatchMouseEvent", type="mouseMoved", x=x + 70, y=y - 42, button="left", buttons=1)
+        self.assertGreater(self.js(f"{M}.cur()._s.target"), 0, "the forces stopped under the drag")
+        self.b.call("Input.dispatchMouseEvent", type="mouseReleased", x=x + 70, y=y - 42, button="left", clickCount=1)
+        nx, ny = self.pos(RLHF)
+        self.assertLess(abs(nx - (x + 70)) + abs(ny - (y - 42)), 12, "the paper did not follow the pointer")
+        self.assertEqual(self.hub.edits(), [])
         # another tab: its own nodes, where the hub put them
         self.js(f"document.querySelector('#map .pm-tab[data-id=\"{GEN}\"]').click()")
         self.wait(f"{M}.cur().id === {J(GEN)} && {M}.cur()._s.nodes.length === 3", "second tab")
@@ -294,6 +308,13 @@ class MapTest(unittest.TestCase):
         self.wait(f"{M}.state().link === 1", "the existing link")
         self.assertEqual(self.card(), "link")
         self.assertIn("linked already", self.msg())
+        # Link to…, then the search and Enter pick the second paper
+        self.js(f"{M}.select({J(RLHF)})")
+        self.press(".pm-card", "Link to…")
+        self.js("(q => { q.value = 'Direct Pref'; q.dispatchEvent(new Event('input')); q.focus(); })(document.querySelector('#map .pm-q'))")
+        self.b.call("Input.dispatchKeyEvent", type="keyDown", key="Enter", code="Enter", windowsVirtualKeyCode=13)
+        self.wait("document.querySelector('#map .pm-card').dataset.kind === 'draft' && !document.querySelector('#map .pm-card').hidden", "picked by search")
+        self.assertEqual(self.state()["draft"], {"src": RLHF, "dst": DPO})
         self.assert_csrf()
 
     # ------------------------------------------------------------------ 3. a link on the phone
@@ -328,6 +349,7 @@ class MapTest(unittest.TestCase):
         self.assertEqual(self.link_between(RLHF, DPO)["grade"], "e")
         self.assertTargets("the link's card")
         # Cancel in link mode goes back to the paper
+        self.wait(f"!{M}.state().running", "the view at rest after the pan to the new link")
         x, y = self.pos(PPO)
         self.tap(x, y)
         self.wait("document.querySelector('#map .pm-card').dataset.kind === 'paper' && !document.querySelector('#map .pm-card').hidden", "PPO card")
@@ -369,6 +391,24 @@ class MapTest(unittest.TestCase):
         self.assertEqual(self.texts(".pm-msg button"), ["Undo"])
         time.sleep(0.5)
         self.assertFalse(self.has_link(2), "the refetch brought it back")
+        # the message's Undo takes my last edit back (asking the hub which one it is first)
+        self.js("document.querySelector('#map .pm-msg button').click()")
+        self.wait(f"!!{M}.cur()._s.lid['2']", "the removal undone")
+        self.assertEqual(self.edits("POST", "revert"), [("/api/graph-log/revert", {"scope": "mine", "expect": 5})])
+        self.assertTrue(self.hub.active(2))
+        # ...but not another edit that became my last one meanwhile (an agent link from my upload)
+        self.js(f"{M}.selectLink(2)")
+        self.press(".pm-card", "Remove link")
+        self.wait("(m => !m.hidden && m.textContent.startsWith('Removed'))(document.querySelector('#map .pm-msg'))", "removed again")
+        with self.hub.lock:
+            self.hub.s["links"][11] = {"id": 11, "src": TRPO, "dst": RLHF, "grade": "w", "origin": "agent", "state": "active", "created_by": LEO, "created_at": "2026-09-28T00:00:00Z"}
+            self.hub.add_log(LEO, "link.add", 11, None, {"id": 11, "src": TRPO, "dst": RLHF, "grade": "w", "state": "active"}, actor="agent")
+        self.js("document.querySelector('#map .pm-msg button').click()")
+        self.wait("!document.querySelector('#map [data-panel=undo]').hidden", "the Undo panel instead")
+        self.assertEqual(self.msg(), "Your last edit is another one now: see Undo.")
+        self.wait("(t => t && t.textContent.startsWith('Undo: The agent for you added TRPO'))(document.querySelector('#map [data-panel=undo] .pm-undo[data-scope=mine] .pm-undo-t'))", "what it would undo")
+        self.assertEqual(len(self.edits("POST", "revert")), 1, "the message's Undo undid another edit")
+        self.assertFalse(self.hub.active(2))
         # the reach is measured on the screen: the same few pixels far out and close in
         for k, lid, off in ((0.35, 4, 4), (3.5, 1, 5), (1.0, 3, -5)):
             self.centre_on_link(lid, k)
@@ -670,6 +710,10 @@ class MapTest(unittest.TestCase):
             self.hub.s["links"][8]["state"] = "active"
         self.js("H.map.hide(); H.map.show()")
         self.wait(f"!!{M}.cur()._s.lid['8']", "refetched on show")
+        # the page can show a paper on the map, in a graph it names
+        self.js(f"H.map.select({J(FLOW)}, {J(GEN)})")
+        self.wait(f"{M}.cur().id === {J(GEN)} && {M}.state().sel === {J(FLOW)}", "select(paper, graph)")
+        self.assertEqual(self.text(".pm-card h3"), "Flow Matching for Generative Modeling")
 
     # ------------------------------------------------------------------ 13. colours
     def colours(self):
@@ -759,6 +803,51 @@ class MapTest(unittest.TestCase):
         self.wait("!document.querySelector('#map .pm-msg').hidden", "message")
         self.assertTargets("the message")
         self.assertLessEqual(self.js("document.documentElement.scrollWidth"), 390)
+
+    # ------------------------------------------------------------------ 16. delete a graph
+    def test_16_an_admin_deletes_a_graph_and_undoes_it(self):
+        self.open()
+        self.open_panel("Graph settings")
+        self.assertFalse(self.js(f"!!{self.button('[data-panel=set]', 'Delete this graph')}"), "a viewer may delete a seeded graph")
+        self.open(me=ALICE)
+        self.js(f"document.querySelector('#map .pm-tab[data-id=\"{GEN}\"]').click()")
+        self.wait(f"{M}.cur().id === {J(GEN)}", "the graph")
+        self.open_panel("Graph settings")
+        self.press("[data-panel=set]", "Delete this graph")
+        self.assertIn("for everyone", self.text(".pm-delrow"))
+        self.assertEqual(self.hub.edits(), [], "deleted without asking")
+        self.press("[data-panel=set] .pm-delrow", "Delete")
+        self.assertIsNone(self.js(f"document.querySelector('#map .pm-tab[data-id=\"{GEN}\"]')"), "the tab is still there")
+        self.assertEqual(self.js(f"{M}.cur().id"), RL)
+        self.wait("(m => !m.hidden && m.textContent.startsWith('Deleted'))(document.querySelector('#map .pm-msg'))", "said")
+        self.assertEqual(self.edits("DELETE", r"^/api/graphs/"), [(f"/api/graphs/{GEN}", None)])
+        time.sleep(0.5)
+        self.assertIsNone(self.js(f"document.querySelector('#map .pm-tab[data-id=\"{GEN}\"]')"), "a list answer brought it back")
+        self.js("document.querySelector('#map .pm-msg button').click()")
+        self.wait(f"!!document.querySelector('#map .pm-tab[data-id=\"{GEN}\"]')", "the graph back")
+        self.assertFalse(self.hub.s["graphs"][GEN]["deleted"])
+        self.assert_csrf()
+
+    # ------------------------------------------------------------------ 17. the last graph goes
+    def test_17_the_last_graph_deleted_while_linking(self):
+        with self.hub.lock:
+            for gid in (GEN, LOCKED):
+                self.hub.s["graphs"][gid]["deleted"] = True
+        self.open(me=ALICE, tabs=2)
+        self.js(f"{M}.select({J(PPO)})")
+        self.press(".pm-card", "Link to…")
+        self.wait("!document.querySelector('#map .pm-banner').hidden", "linking")
+        self.js("(q => { q.value = 'DPO'; q.dispatchEvent(new Event('input')); })(document.querySelector('#map .pm-q'))")
+        self.open_panel("Graph settings")
+        self.press("[data-panel=set]", "Delete this graph")
+        self.press("[data-panel=set] .pm-delrow", "Delete")
+        self.wait("document.querySelector('#map .pm-empty p').textContent === 'No graphs yet: make one with + New graph.'", "no graphs")
+        self.assertTrue(self.js("document.querySelector('#map .pm-banner').hidden"), "the banner outlived its graph")
+        self.assertTrue(self.js("document.querySelector('#map .pm-card').hidden"))
+        self.b.call("Input.dispatchKeyEvent", type="keyDown", key="Escape", code="Escape", windowsVirtualKeyCode=27)
+        self.js("document.querySelector('#map .pm-q').focus()")
+        self.b.call("Input.dispatchKeyEvent", type="keyDown", key="Enter", code="Enter", windowsVirtualKeyCode=13)
+        self.wait("H.closed === 1", "Escape with nothing open closes the map")
 
     # ------------------------------------------------------------------ 15. an old answer
     def test_15_an_answer_older_than_an_edit_does_not_undo_it(self):

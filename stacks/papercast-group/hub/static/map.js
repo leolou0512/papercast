@@ -149,7 +149,17 @@
       msg.hidden = false;
       clearTimeout(msgT); msgT = setTimeout(function () { msg.hidden = true; }, action ? 8000 : 5000);
     }
-    var UNDO_MINE = { label: "Undo", fn: function () { loadLog(true).then(function () { undo("mine"); }); } };
+    // The message's Undo: my last edit, if that is still the edit the message named (op and
+    // target); else the Undo panel opens and shows what "my last edit" is now.
+    function undoMine(op, key) {
+      return { label: "Undo", fn: function () {
+        loadLog(true).then(function () {
+          var e = candidate("mine"), t = e && targets(e);
+          var same = e && e.op === op && t && (op === "link.remove" ? String(t.lid) === String(key) : op === "graph.delete" ? t.gid === key : t.pid === key);
+          if (same) undo("mine"); else { if (undoEl.hidden) openPanel("undo"); say("Your last edit is another one now: see Undo."); }
+        });
+      } };
+    }
 
     /* ---------- paper facts ---------- */
     function paper(id) { return papers.get(id) || null; }
@@ -248,7 +258,7 @@
       // an ease still under way goes on to where it was going
       var moving = {}; mv.forEach(function (m) { moving[m.n.id] = true; });
       Object.keys(carry).forEach(function (id) { if (!moving[id] && idx[id] != null) mv.push({ n: nodes[idx[id]], x1: carry[id].x1, y1: carry[id].y1 }); });
-      g._s = { nodes: nodes, links: links, idx: idx, lid: lid, alpha: old ? old.alpha : 0, target: 0, view: view, fitted: old ? old.fitted : false };
+      g._s = { nodes: nodes, links: links, idx: idx, lid: lid, alpha: old ? old.alpha : 0, target: old ? old.target : 0, view: view, fitted: old ? old.fitted : false };
       g.dirty = false;
       if (g !== cur) { mv.forEach(function (m) { m.n.x = m.x1; m.n.y = m.y1; }); return; }
       moves = mv.length ? { t0: performance.now(), dur: 650, list: mv.map(function (m) { return { n: m.n, x0: m.n.x, y0: m.n.y, x1: m.x1, y1: m.y1 }; }) } : null;
@@ -724,9 +734,15 @@
       var ya = yearOf(a), yb = yearOf(b), swap = ya != null && yb != null && yb < ya;
       draft = { src: swap ? b : a, dst: swap ? a : b, anchor: a };
       selId = null; selLink = null; linkFrom = null; editLabel = null;
-      renderBanner(); renderCard(true); closePanelsOnPhone(); kick();
+      renderBanner(); renderCard(true); closePanelsOnPhone();
+      // on the phone the card covers the lower half: the arrow being made goes above it
+      if (phone()) {
+        var s = cur._s, na = s.nodes[s.idx[a]], nb = s.nodes[s.idx[b]], v = s.view;
+        userMoved = true; moveTo(v.k, W / 2 - (na.x + nb.x) / 2 * v.k, H * 0.26 - (na.y + nb.y) / 2 * v.k, true);
+      }
+      kick();
     }
-    function cancelDraft() { var a = draft ? draft.anchor : linkFrom; draft = null; linkFrom = null; if (a != null && cur._s.idx[a] != null) select(a); else select(null); }
+    function cancelDraft() { var a = draft ? draft.anchor : linkFrom; draft = null; linkFrom = null; if (a != null && cur && cur._s && cur._s.idx[a] != null) select(a); else select(null); }
     function renderBanner() {
       banner.textContent = "";
       if (linkFrom == null || !cur || !cur._s || cur._s.idx[linkFrom] == null) { banner.hidden = true; return; }
@@ -793,7 +809,7 @@
         settle(op);
         forData(function (g, d) { d.links = d.links.filter(function (x) { return !same(x.id, id); }); });
         rebuildAll(); refetchSoon();
-        say("Removed " + words + ".", EDIT ? UNDO_MINE : null);
+        say("Removed " + words + ".", EDIT ? undoMine("link.remove", id) : null);
       }, function (err) {
         settle(op); rebuildAll();
         say("Could not remove the link: " + errText(err) + ".");
@@ -826,7 +842,7 @@
         settle(op);
         if (g.data) g.data.nodes = g.data.nodes.filter(function (n) { return n.id !== pid; });
         rebuildAll(); refetchSoon(); soon({ list: true });
-        say("Took " + words + " out of " + quote(g.meta.name) + ".", EDIT ? UNDO_MINE : null);
+        say("Took " + words + " out of " + quote(g.meta.name) + ".", EDIT ? undoMine("graph.remove_paper", pid) : null);
       }, function (err) {
         settle(op); rebuildAll();
         say("Could not take the paper out: " + errText(err) + ".");
@@ -848,7 +864,7 @@
         say("The label is now " + quote(got) + ".");
       }, function (err) {
         settle(op); rebuildAll();
-        say("Could not change the label: " + errText(err) + ".");
+        say("Could not change the label: " + (err.status === 404 || err.status === 405 ? "this hub does not take labels yet" : errText(err)) + ".");
       });
     }
     // A graph's name, tags or lock on their way to the hub stay over what a list says meanwhile.
@@ -912,7 +928,7 @@
       call("DELETE", "/api/graphs/" + encodeURIComponent(g.id)).then(function () {
         settled++; delete deleting[g.id];
         loadLog(); soon({ list: true });
-        say("Deleted " + quote(name) + ".", UNDO_MINE);
+        say("Deleted " + quote(name) + ".", undoMine("graph.delete", g.id));
       }, function (err) {
         settled++; delete deleting[g.id];
         graphs.splice(Math.min(i, graphs.length), 0, g); byId[g.id] = g; renderTabs();
@@ -1024,7 +1040,7 @@
         else if (err.status === 409) say("Not undone: " + thing(e) + " was changed after that edit" + (b.message && b.message !== b.error ? " (" + String(b.message).replace(/\.$/, "") + ")" : "") + ".");
         else say("Could not undo: " + errText(err) + ".");
       }).then(function () {
-        LOG.undoing = false;
+        LOG.undoing = false; settled++;
         graphs.forEach(function (g) { g.stale = true; });
         loadList(); if (cur && !cur.tmp) loadGraph(cur); loadLog(true);
       });
@@ -1122,7 +1138,7 @@
     function refreshCard() { if (!card.hidden || draft || selLink != null || selId != null) renderCard(false); }
     function renderCard(force) {
       var a = document.activeElement;
-      if (!force && a && card.contains(a) && a.tagName === "INPUT") return;   // someone is typing in it
+      if (!force && a && card.contains(a) && (a.tagName === "INPUT" || editLabel != null)) return;   // someone is typing in it
       card.textContent = "";
       if (!cur || !cur._s) { card.hidden = true; return; }
       if (draft) draftCard(); else if (selLink != null && cur._s.lid[String(selLink)]) linkCard(); else if (selId != null && cur._s.idx[selId] != null) paperCard();
@@ -1386,7 +1402,7 @@
     }
     qEl.addEventListener("input", runQuery);
     qEl.addEventListener("keydown", function (e) {
-      if (e.key === "Enter" && qset) { var i = Object.keys(qset)[0]; if (i != null) { var id = cur._s.nodes[+i].id; if (linkFrom != null) pick(id, false); else select(id, true); } qEl.blur(); }
+      if (e.key === "Enter" && qset && cur && cur._s) { var i = Object.keys(qset)[0]; if (i != null) { var id = cur._s.nodes[+i].id; if (linkFrom != null) pick(id, false); else select(id, true); } qEl.blur(); }
       if (e.key === "Escape") { e.stopPropagation(); qEl.value = ""; runQuery(); qEl.blur(); }
     });
     function onKey(e) {
@@ -1425,13 +1441,17 @@
       tabsEl.scrollLeft = sl;
     }
     function scrollTab() {
-      var tb = cur && tabsEl.querySelector('[data-id="' + cur.id + '"]');
+      var tb = null;
+      Array.prototype.forEach.call(tabsEl.children, function (b) { if (cur && b.getAttribute("data-id") === String(cur.id)) tb = b; });
       if (!tb) return;
       var off = tb.offsetLeft - tabsEl.offsetLeft;
       if (off < tabsEl.scrollLeft || off + tb.offsetWidth > tabsEl.scrollLeft + tabsEl.clientWidth) tabsEl.scrollLeft = off - 4;
     }
     function showGraph(g) {
-      if (!g) { cur = null; renderTabs(); renderEmpty(); card.hidden = true; ctxClear(); return; }
+      if (!g) {
+        cur = null; selId = null; selLink = null; draft = null; linkFrom = null; editLabel = null; qset = null;
+        renderTabs(); renderBanner(); renderEmpty(); card.hidden = true; tip.hidden = true; ctxClear(); return;
+      }
       if (cur === g) { applyWant(); return; }
       cur = g;
       if (!g.tmp) save(TKEY, g.id);
@@ -1485,7 +1505,7 @@
         listLoaded = true; listErr = null;
         if (gone) { cur = null; say(quote(gone.meta.name) + " was deleted."); }
         renderTabs();
-        if (!cur) showGraph(byId[opts.graph] || byId[load(TKEY)] || graphs[0] || null);
+        if (!cur) showGraph(byId[want && want.gid] || byId[opts.graph] || byId[load(TKEY)] || graphs[0] || null);
         else { renderSettings(); refreshCard(); }
         renderEmpty();
       }, function (err) { listErr = errText(err); renderEmpty(); }).then(function () {
@@ -1543,9 +1563,11 @@
     }
     function onGraphEvent(d) {
       d = d || {};
+      // one graph (graph_id), several (graphs: a link is in every graph that has both papers), or not said
       var gid = d.graph_id || (d.graph && d.graph.id) || (typeof d.id === "string" && /^g_/.test(d.id) ? d.id : null);
-      if (gid && byId[gid]) byId[gid].stale = true; else graphs.forEach(function (g) { g.stale = true; });
-      soon({ list: true, graph: !gid || (cur && gid === cur.id), log: true });
+      var ids = Array.isArray(d.graphs) ? d.graphs.map(function (x) { return x && typeof x === "object" ? x.id : x; }) : gid ? [gid] : null;
+      if (ids) ids.forEach(function (id) { if (byId[id]) byId[id].stale = true; }); else graphs.forEach(function (g) { g.stale = true; });
+      soon({ list: true, graph: !ids || (cur && ids.indexOf(cur.id) >= 0), log: true });
     }
     // a new row in the edit log means a graph changed: the one shown is asked again, the others when shown
     function onLogEvent() { LOG.stale = true; graphs.forEach(function (g) { g.stale = true; }); soon({ log: true, graph: true }); }
@@ -1583,7 +1605,7 @@
       // everything again from the hub (what show() does)
       refresh: function () { loadList(); if (cur && !cur.tmp) loadGraph(cur); graphs.forEach(function (g) { if (g !== cur) g.stale = true; }); loadLog(); },
       // show a paper (and the graph it is in, when given)
-      select: function (paperId, graphId) { want = { pid: paperId }; if (graphId && byId[graphId] && byId[graphId] !== cur) showGraph(byId[graphId]); else applyWant(); },
+      select: function (paperId, graphId) { want = { pid: paperId, gid: graphId }; if (graphId && byId[graphId] && byId[graphId] !== cur) showGraph(byId[graphId]); else applyWant(); },
       debug: { S: S, cur: function () { return cur; }, graphs: function () { return graphs; }, show: function (id) { showGraph(byId[id]); }, select: select, selectLink: selectLink,
         hover: function (i) { hoverI = i; kick(); }, draw: function () { draw(); }, tick: function () { tick(cur._s); }, webgl: function () { return !!gl; },
         state: function () { return { sel: selId, link: selLink, from: linkFrom, draft: draft && { src: draft.src, dst: draft.dst }, pending: pending.length, moving: !!moves, running: running }; },

@@ -394,6 +394,7 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; padding: 0 1
 .addr { flex: 1; min-width: 200px; display: flex; align-items: center; gap: 6px; }
 .addr .field { flex: 1; min-width: 0; margin: -4px 0; }
 .addr .suffix { font-size: 14px; color: var(--text-2); }
+.addr .field.dom { flex: 0 1 150px; min-width: 96px; }
 .it-s .warn { color: var(--warn); }
 .it-more { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 4px 0 2px; }
 .it-more .muted { flex-basis: 100%; margin: 0; }

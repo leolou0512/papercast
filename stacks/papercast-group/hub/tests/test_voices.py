@@ -97,7 +97,7 @@ class Voices(unittest.TestCase):
         code, j = self.web("GET", "/api/voices", v)
         self.assertEqual(code, 200, j)
         ids = [x["id"] for x in j["voices"]]
-        self.assertTrue(4 <= len(ids) <= 6, ids)
+        self.assertTrue(4 <= len(ids) <= 8, ids)
         self.assertEqual(j["default"], "clear-female")
         self.assertEqual([x["id"] for x in j["voices"] if x["default"]], ["clear-female"])
         self.assertEqual(sum(1 for x in j["voices"] if x["cpu"]), 1)

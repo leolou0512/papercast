@@ -2218,13 +2218,15 @@
     role: "role changed", disabled: "disabled changed", welcome_sent: "welcome email sent", welcome_failed: "welcome email failed",
   };
   const CODE_RX = /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/;
-  function codeOf(v) {
-    const s = v.trim().toLowerCase();
+  const DOMAIN_RX = /^(?=.{3,190}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/;
+  // the short code and the domain after the @ (ic.ac.uk unless the admin changes it)
+  function codeOf(v, d) {
+    const s = v.trim().toLowerCase(), dom = d.trim().toLowerCase().replace(/^@/, "");
     if (!s) return { err: "" };
-    const m = /^(.*)@ic\.ac\.uk$/.exec(s);
-    if (s.includes("@") && !m) return { err: "Only @ic.ac.uk here: type the short code, like yl6719." };
-    const c = m ? m[1] : s;
-    return CODE_RX.test(c) && c.length <= 64 ? { code: c } : { err: "A short code is letters and digits, maybe with dots or hyphens, like yl6719." };
+    if (s.includes("@")) return { err: "Type only the part before the @ here; the part after it goes in the second box." };
+    if (!CODE_RX.test(s) || s.length > 64) return { err: "A short code is letters and digits, maybe with dots or hyphens, like yl6719." };
+    if (!DOMAIN_RX.test(dom)) return { err: dom ? `“${dom.slice(0, 40)}” is not an email domain, like ic.ac.uk.` : "Type the part after the @, like ic.ac.uk." };
+    return { code: s, email: `${s}@${dom}` };
   }
   async function peopleTab(body) {
     let j, lg;
@@ -2235,25 +2237,36 @@
     const again = () => { if (stillOn("users")) peopleTab(body); };
     const ROLES = ["viewer", "contributor", "admin"];
 
-    // add: the short code, with @ic.ac.uk fixed after it
+    // add: the short code @ the domain (ic.ac.uk, which the admin can change); a whole address
+    // pasted into the first box is split into the two
     const code = el("input", { class: "field", id: "add-code", autocomplete: "off", autocapitalize: "off", spellcheck: "false",
-      maxlength: "80", placeholder: "short code, like yl6719", "aria-label": "Short code", enterkeyhint: "done" });
+      maxlength: "80", placeholder: "short code, like yl6719", "aria-label": "Short code", enterkeyhint: "next" });
+    const dom = el("input", { class: "field dom", id: "add-domain", autocomplete: "off", autocapitalize: "off", spellcheck: "false",
+      maxlength: "190", "aria-label": "Email domain", enterkeyhint: "done" });
+    dom.value = "ic.ac.uk";
     const add = el("button", { type: "submit", class: "btn-accent", id: "add-go", text: "Add", disabled: true });
     const addMsg = el("p", { class: "muted", id: "add-msg", role: "status" });
-    code.addEventListener("input", () => {
-      const c = codeOf(code.value);
+    const check = () => {
+      const at = code.value.indexOf("@");
+      if (at >= 0) {                        // an "@" typed or pasted: the rest goes on in the domain box
+        dom.value = code.value.slice(at + 1).trim(); code.value = code.value.slice(0, at);
+        dom.focus(); dom.setSelectionRange(dom.value.length, dom.value.length);
+      }
+      const c = codeOf(code.value, dom.value);
       add.disabled = !c.code;
       addMsg.className = c.err ? "err" : "muted"; addMsg.textContent = c.err || "";
-    });
+    };
+    code.addEventListener("input", check);
+    dom.addEventListener("input", check);
     const addForm = el("form", { class: "invite first", id: "add-form", novalidate: true },
-      el("div", { class: "addr" }, code, el("span", { class: "suffix", "aria-hidden": "true", text: "@ic.ac.uk" })), add);
+      el("div", { class: "addr" }, code, el("span", { class: "suffix", "aria-hidden": "true", text: "@" }), dom), add);
     addForm.addEventListener("submit", async (e) => {
       e.preventDefault();
-      const c = codeOf(code.value);
+      const c = codeOf(code.value, dom.value);
       if (!c.code) return;
       add.disabled = true;
       try {
-        const r = await api("POST", "/api/admin/allowed", { email: c.code });
+        const r = await api("POST", "/api/admin/allowed", { email: c.email });
         S.set.added = r.state === "already" ? `${r.email} is already on the list.`
           : r.welcome === "queued" ? `Added ${r.email}. The welcome email with their username and first password is on its way (tell them to look in junk too).`
           : `Added ${r.email}. Tell them: username ${r.username}, first password ${r.username}${r.user && !r.user.must_change ? " (or the one they had)" : ""}.`;
@@ -2357,7 +2370,6 @@
     }));
     if (!events.length) evs.append(el("li", { class: "muted", text: "Nothing yet." }));
     body.replaceChildren(...[
-      el("p", { class: "intro", text: "Only Imperial addresses on this list can sign in. Contributors also add papers with papercast; admins also manage people and the base prompt." }),
       el("p", { class: "pref-h", text: "Add someone" }), addForm, addMsg,
       el("p", { class: "muted", text: `They sign in with the short code as username and as first password, and choose their own straight away. They start as contributors.${j && j.email ? " The hub emails them a welcome with both." : ""}` }),
       el("p", { class: "pref-h sec", text: `On the list (${listed.length})` }), ul,

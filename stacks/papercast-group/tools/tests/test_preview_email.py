@@ -16,7 +16,7 @@ sys.path.insert(0, str(GROUP / "tools"))
 
 import preview_email as pe  # noqa: E402
 
-VALUES = {"name": "Ann <O'Neil>", "username": "a.ganose", "signin_url": "https://papercast.virtualatoms.org/signin?x=1&y=2",
+VALUES = {"name": "Ann <O'Neil>", "username": "a.ganose", "login_email": "a.ganose@ic.ac.uk", "signin_url": "https://papercast.virtualatoms.org/signin?x=1&y=2",
           "site_url": "https://papercast.virtualatoms.org/", "github_url": "https://github.com/leolou0512/papercast"}
 
 

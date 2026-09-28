@@ -4,6 +4,8 @@ The job's "PDF" holds lines key=value that say what to do:
   sleep=S         take S seconds (in two halves: stage1, stage2; a resumed run skips stage1)
   limit_once=S    the first attempt stops with UsageLimit(resume in S seconds)
   ask=1           raise NeedsAnswer unless job.json has yes: true
+  answer=K        answer as the real pipeline does when the hub has the paper after all
+                  (K = needs_confirmation, unless yes) or someone makes it (K = in_progress)
   fail_once=TEXT  the first attempt fails with PipelineError(TEXT)
   crash=1         a bug: RuntimeError
   child=1         start `sleep 60` (as claude would be) and record its pid
@@ -55,6 +57,13 @@ def run_job(job_dir, api, progress):
     if dv.get("ask") and not job.get("yes"):
         raise NeedsAnswer("“A Paper” already has an episode by Alice. Make your own "
                           "version?", paper_id="p_alice")
+    if dv.get("answer") == "needs_confirmation" and not job.get("yes"):
+        return {"status": "needs_confirmation", "made_by": ["Bob"],
+                "paper": {"id": "p_bob", "title": "A Paper", "episodes": [{"made_by": {"name": "Bob"}}]},
+                "question": "made by Bob. Make your own version? [y/N]"}
+    if dv.get("answer") == "in_progress":
+        return {"status": "in_progress", "by": {"name": "Bob"}, "since": "2026-09-28T04:00:00Z",
+                "message": "Bob is making this paper now"}
     if dv.get("fail_once") and attempt == 1:
         raise PipelineError(dv["fail_once"])
     if dv.get("crash"):

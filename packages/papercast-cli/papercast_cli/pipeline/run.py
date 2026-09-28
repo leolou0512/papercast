@@ -347,6 +347,15 @@ class Job:
         self._progress(phase, round(self._max, 3), detail)
 
     def input(self) -> str:
+        """The paper. For a job the CLI's queue made: its copy of the PDF (`source`, in the job
+        dir: what was typed may be a relative path, the job runs in its own directory, and the
+        original may have moved since), or the link `add` made of what was typed (an arXiv id or
+        a DOI becomes https://arxiv.org/abs/... or https://doi.org/...). Else what job.json names."""
+        kind, src, url = self.job.get("kind"), self.job.get("source"), self.job.get("url")
+        if kind == "pdf" and isinstance(src, str) and src.strip() and os.path.isfile(self.p(src.strip())):
+            return self.p(src.strip())
+        if kind == "url" and isinstance(url, str) and is_url(url):
+            return url.strip()
         for k in ("input", "source", "path", "url"):
             v = self.job.get(k)
             if isinstance(v, str) and v.strip():
@@ -692,10 +701,26 @@ class Job:
 
     # ---------------------------------------------------------------- 4. prompt and prefs
     def _prompt(self) -> None:
-        if self.done("prompt"):
+        """The group's base guideline (how an episode is made) and this person's preferences,
+        asked of the hub for every job: nothing is kept from one job to the next and no copy
+        ships with the package, so a hub that cannot be reached stops the job here instead of
+        an older guideline being used. Fixed for the job from the moment Claude is given the
+        episode instruction (it reads guideline.md then): a job that goes on after that
+        (Claude's usage limit, sleep, `papercast retry`) keeps the guideline its script was
+        started under, and the manifest names that version. Until then it is asked for again
+        each time the job runs."""
+        if self.done("prompt") and (self.done("episode") or self._delivered("episode")):
             return
         self.progress("writing", AT["prompt"], "fetching the guideline", force=True)
-        st, pr = self._api("prompt", self.api.get, "/api/cli/prompt")
+        try:
+            st, pr = self._api("prompt", self.api.get, "/api/cli/prompt")
+        except PipelineError as e:
+            if e.code != "hub_unreachable":
+                raise
+            raise PipelineError("prompt", "hub_unreachable",
+                                "could not fetch the group's current guideline from the hub, "
+                                "and an episode is never started from an older copy: "
+                                + e.message, retryable=True)
         if st != 200 or not isinstance(pr.get("guideline"), str) or not pr["guideline"].strip():
             raise self._refused("prompt", st, pr, "the base prompt")
         st, pf = self._api("prompt", self.api.get, "/api/cli/prefs")

@@ -784,6 +784,25 @@ def run_one(job_dir) -> int:
                    error=f"{type(e).__name__}: {e} (log: {d / LOG})")
         else:
             r = result if isinstance(result, dict) else {}
+            # The pipeline answers these two instead of raising (pipeline/run.py): the paper
+            # turned out to be on the hub already once its title was known, or someone else
+            # is making it right now. Neither is an upload.
+            if r.get("status") == "needs_confirmation":
+                paper = r.get("paper") if isinstance(r.get("paper"), dict) else {}
+                q = str(r.get("question") or "Make your own version? [y/N]")
+                q = (f"“{paper['title']}” already has an episode " if paper.get("title") else
+                     "This paper already has an episode ") + q
+                update(d, state="asking", pid=None, question=q[:500],
+                       ask_paper_id=paper.get("id"))
+                _log(f"{job['id']}: asks: {q}")
+                return 0
+            if r.get("status") == "in_progress":
+                by = r.get("by") if isinstance(r.get("by"), dict) else {}
+                update(d, state="failed", pid=None, finished_at=util.now_iso(),
+                       error=f"{by.get('name') or 'Someone'} is making this paper right now; "
+                             "try again once theirs is up")
+                _log(f"{job['id']}: someone else is making it")
+                return 0
             with edit(d) as j:
                 j.update(state="done", pid=None, phase="uploaded", progress=1.0, detail=None,
                          error=None, finished_at=util.now_iso(),

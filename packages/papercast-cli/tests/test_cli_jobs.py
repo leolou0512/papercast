@@ -238,6 +238,33 @@ class JobsTest(CliTestCase):
         last_start = [e for e in self.events(jid) if e["ev"] == "start"][-1]
         self.assertEqual((last_start["yes"], last_start["version_of"]), (True, "p_alice"))
 
+    def test_the_pipeline_finds_the_paper_on_the_hub_then_retry_yes(self):
+        """The real pipeline answers needs_confirmation (not NeedsAnswer) when the hub has the
+        paper once its title is known: the job asks; it is not marked uploaded."""
+        self.add(self.pdf(answer="needs_confirmation"))
+        jid = self.jobs()[0]["id"]
+        self.wait_for(lambda: self.job(jid)["state"] == "asking", 20, "asking")
+        self.assertIsNone(self.job(jid).get("episode_id"))
+        st = self.run_cli("status")
+        self.assertIn("“A Paper” already has an episode made by Bob. Make your own version?", st.stdout)
+        self.assertIn(f"papercast retry {jid} --yes", st.stdout)
+        self.assertNotIn("uploaded", st.stdout)
+        self.wait_worker_gone()
+        r = self.run_cli("retry", jid, "--yes")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.wait_for(lambda: self.job(jid)["state"] == "done", 20, "done")
+        last_start = [e for e in self.events(jid) if e["ev"] == "start"][-1]
+        self.assertEqual((last_start["yes"], last_start["version_of"]), (True, "p_bob"))
+
+    def test_someone_else_making_it_fails_the_job_saying_who(self):
+        self.add(self.pdf(answer="in_progress"))
+        jid = self.jobs()[0]["id"]
+        self.wait_for(lambda: self.job(jid)["state"] == "failed", 20, "failed")
+        self.assertIn("Bob is making this paper right now", self.job(jid)["error"])
+        self.assertIsNone(self.job(jid).get("episode_id"))
+        st = self.run_cli("status")
+        self.assertIn(f"papercast retry {jid}", st.stdout)
+
     def test_a_rejected_episode_is_made_again_as_a_new_job(self):
         self.add(self.pdf(title="Rejected Paper"))
         old = self.jobs()[0]["id"]

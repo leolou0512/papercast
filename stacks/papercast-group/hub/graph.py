@@ -10,7 +10,12 @@ link that already exists (a person's or an agent's) is left as it is. A link who
 not in the library yet waits in pending_links until that paper arrives.
 
 Locked graphs: only admins change them, their links included (a link between two members of a
-locked graph); agents still add links and the tag rule still brings new papers in."""
+locked graph); agents still add links and the tag rule still brings new papers in.
+
+Links from uploads are automatic (as above) or, when an admin sets them to suggest only, kept as
+suggestions: the same rules decide which (a pair a person removed, a later paper built on by an
+earlier one, a loop: none), and a person accepts one (it becomes their link.add, so it can be
+undone) or dismisses it (for good: that pair is never suggested again)."""
 from __future__ import annotations
 
 import hashlib
@@ -56,7 +61,30 @@ SEED_GRAPHS = [
     ("Robotics and agents", ["robotic manipulation", "sim-to-real", "vision language agents"]),
 ]
 
+AGENT_MODES = ("auto", "suggest")
+
 EXTRA_SCHEMA = """
+CREATE TABLE IF NOT EXISTS graph_settings (   -- site-wide settings of the graphs: agent_links = auto | suggest
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_by INTEGER REFERENCES users(id),
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS link_suggestions ( -- a link an upload found while links from uploads were suggestions only
+  id INTEGER PRIMARY KEY,
+  src TEXT NOT NULL REFERENCES papers(id),
+  dst TEXT NOT NULL REFERENCES papers(id),
+  grade TEXT NOT NULL CHECK (grade IN ('e', 's', 'w')),
+  user_id INTEGER REFERENCES users(id),           -- the uploader
+  created_at TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open', 'accepted', 'dismissed')),
+  decided_by INTEGER REFERENCES users(id),
+  decided_at TEXT,
+  link_id INTEGER,
+  UNIQUE (src, dst)                               -- one per pair, ever: a dismissed pair stays dismissed
+);
+
 CREATE TABLE IF NOT EXISTS pending_links (    -- an upload's link whose other paper is not here yet
   id INTEGER PRIMARY KEY,
   paper_id TEXT NOT NULL REFERENCES papers(id),   -- the uploaded paper
@@ -92,6 +120,16 @@ CREATE TABLE IF NOT EXISTS layout_state (     -- one row per graph: which layout
   updated_at TEXT
 );
 CREATE INDEX IF NOT EXISTS links_dst ON links(dst);
+
+CREATE TABLE IF NOT EXISTS graph_rev (        -- one row per graph: its revision, one up with every change to it
+  graph_id TEXT PRIMARY KEY REFERENCES graphs(id),
+  rev INTEGER NOT NULL DEFAULT 0,
+  sig TEXT,                                       -- its members and links at this revision
+  user_id INTEGER,                                -- who made the change (null: the agent's upload, or the library)
+  actor TEXT,                                     -- human | agent | library (members that came or went by
+  log_id INTEGER,                                 --   their tags or episodes, seen by a changed sig)
+  at TEXT
+);
 """
 
 
@@ -248,7 +286,7 @@ def _norm_doi(v):
 class _World:
     """Everything a graph answer is made from, read in one snapshot; rebuilt only when the
     database's signature changes."""
-    __slots__ = ("sig", "users", "papers", "graphs", "how", "members", "links", "pos", "lstate")
+    __slots__ = ("sig", "users", "papers", "graphs", "how", "members", "links", "pos", "lstate", "revs", "sugg")
 
 
 _world_cache = None
@@ -264,6 +302,8 @@ _SIG_SQL = """SELECT
          || ':' || total(state = 'rejected') || ':' || total(made_by) FROM episodes),
  (SELECT count(*) || ':' || coalesce(group_concat(id || '=' || name, ','), '') FROM users),
  (SELECT count(*) || ':' || total(rev) FROM layout_state),
+ (SELECT count(*) || ':' || total(rev) FROM graph_rev),
+ (SELECT count(*) || ':' || total(state = 'open') || ':' || coalesce(max(id), 0) FROM link_suggestions),
  (SELECT count(*) || ':' || total(length(name)) || ':' || total(locked) || ':' || count(deleted_at)
          || ':' || total(length(rule_tags)) FROM graphs),
  (SELECT count(*) || ':' || total(length(how)) FROM graph_members),
@@ -329,6 +369,15 @@ def _world() -> _World:
         for r in c.execute("SELECT graph_id, paper_id, x, y FROM layout"):
             w.pos[r[0]][r[1]] = (r[2], r[3])
         w.lstate = {r["graph_id"]: dict(r) for r in c.execute("SELECT * FROM layout_state")}
+        w.revs = {r["graph_id"]: dict(r) for r in c.execute("SELECT * FROM graph_rev")}
+        # the open suggestions still worth showing: no link of the pair either way (a pair a person
+        # removed, or one linked since, is not suggested)
+        seen_pairs = {(r[0], r[1]) for r in c.execute("SELECT src, dst FROM links")}
+        back = {(l["dst"], l["src"]) for l in w.links}
+        w.sugg = [dict(r) for r in c.execute(
+            "SELECT s.id, s.src, s.dst, s.grade, s.user_id, s.created_at, u.name AS by_name FROM link_suggestions s "
+            "LEFT JOIN users u ON u.id = s.user_id WHERE s.state = 'open' ORDER BY s.id")
+            if (r["src"], r["dst"]) not in seen_pairs and (r["src"], r["dst"]) not in back]
     if not in_tx:          # never cache what an open (maybe rolled-back) write transaction sees
         _world_cache = w
     return w
@@ -378,6 +427,104 @@ def layout_input(gid: str):
 
 def graph_ids() -> list:
     return list(_world().graphs)
+
+
+# ---------------------------------------------------------------- revisions
+# Every graph has a revision that goes up by one with every change touching it: its members, the
+# links among them, its name, tags or lock, a label of one of its papers, its deletion, and the
+# undo or redo of any of these. GET /api/graphs/<id> says which revision it shows; an edit that
+# names the revision it was made on (base_rev) is refused with 409 `stale` when the graph moved
+# on since, so two people never edit one graph on top of each other. Members can also come or go
+# without an edit here (a paper that joins by its tags, a paper whose episodes were all deleted):
+# the stored signature of members and links then no longer matches, and the next read or edit
+# counts that as one more revision.
+
+def _gsig(w: _World, gid: str) -> str:
+    mem = w.members.get(gid, set())
+    return layout_sig(mem, [(l["src"], l["dst"]) for l in w.links if l["src"] in mem and l["dst"] in mem])
+
+
+def _rev_now(c, w: _World, gid: str) -> dict:
+    """Graph gid's revision row now, inside a write transaction (one up when its members or links
+    changed some other way since the last change here)."""
+    sig = _gsig(w, gid)
+    r = c.execute("SELECT * FROM graph_rev WHERE graph_id = ?", (gid,)).fetchone()
+    if r is None:
+        row = {"graph_id": gid, "rev": 1, "sig": sig, "user_id": None, "actor": None, "log_id": None, "at": db.now()}
+        c.execute("INSERT INTO graph_rev(graph_id, rev, sig, at) VALUES (?, 1, ?, ?)", (gid, sig, row["at"]))
+        return row
+    row = dict(r)
+    if row["sig"] != sig:
+        row.update(rev=row["rev"] + 1, sig=sig, user_id=None, actor="library", log_id=None, at=db.now())
+        c.execute("UPDATE graph_rev SET rev = ?, sig = ?, user_id = NULL, actor = 'library', log_id = NULL, at = ? "
+                  "WHERE graph_id = ?", (row["rev"], sig, row["at"], gid))
+    return row
+
+
+def _bump(c, gids, user_id, actor, log_id=None) -> dict:
+    """After a change, inside its transaction: each graph it touched goes up one revision.
+    -> {graph id: new revision}"""
+    gids = [g for g in dict.fromkeys(gids) if g]
+    if not gids:
+        return {}
+    w = _world()                    # inside the transaction: the state after the change
+    at, out = db.now(), {}
+    for gid in gids:
+        r = c.execute("SELECT rev FROM graph_rev WHERE graph_id = ?", (gid,)).fetchone()
+        rev = (r[0] if r else 0) + 1
+        c.execute("INSERT OR REPLACE INTO graph_rev(graph_id, rev, sig, user_id, actor, log_id, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                  (gid, rev, _gsig(w, gid) if gid in w.graphs else None, user_id, actor, log_id, at))
+        out[gid] = rev
+    return out
+
+
+def _base(req, b=None):
+    """The graph and the revision of it the page saw, when it sent them (body or query):
+    -> (graph id or None, revision or None)."""
+    b = b if isinstance(b, dict) else {}
+    rev = b["base_rev"] if "base_rev" in b else req.arg("base_rev")
+    gid = b["graph_id"] if "graph_id" in b else req.arg("graph_id")
+    if gid is not None and not isinstance(gid, str):
+        raise HTTPError(400, "bad_base", "graph_id is a graph's id")
+    if rev is None or rev == "":
+        return gid, None
+    try:
+        if isinstance(rev, bool):
+            raise ValueError
+        rev = int(rev)
+    except (TypeError, ValueError):
+        raise HTTPError(400, "bad_base", "base_rev is the revision of the graph the page shows")
+    return gid, rev
+
+
+def _changed_by(w: _World, row) -> dict | None:
+    """Who made a graph's latest revision, and when."""
+    if not row or row.get("actor") is None:
+        return None
+    uid = row.get("user_id")
+    return {"by": {"id": uid, "name": w.users.get(uid)} if uid is not None else None,
+            "actor": row.get("actor"), "at": row.get("at"), "log_id": row.get("log_id")}
+
+
+def _fresh(c, w: _World, gid, base) -> None:
+    """Refuse (409 stale, nothing changed) an edit made on another revision of graph gid than the
+    one it is at now. Without a base revision nothing is checked (the CLI, the tests, older pages)."""
+    if base is None:
+        return
+    if not gid:
+        raise HTTPError(400, "bad_base", "base_rev needs the graph_id it is a revision of")
+    if gid not in w.graphs:
+        raise HTTPError(409, "stale", "this graph was deleted since the page loaded it", graph_id=gid, rev=None,
+                        base_rev=base, deleted=True)
+    cur = _rev_now(c, w, gid)
+    if cur["rev"] == base:
+        return
+    ch = _changed_by(w, cur) or {}
+    actor = ch.get("actor")
+    who = ((ch.get("by") or {}).get("name") or "someone") if actor == "human" else \
+        "an upload" if actor == "agent" else "a change in the library"
+    raise HTTPError(409, "stale", f"{who} changed this graph since the page loaded it", graph_id=gid, rev=cur["rev"],
+                    base_rev=base, by=ch.get("by"), actor=actor, at=ch.get("at"))
 
 
 # ---------------------------------------------------------------- the graph answer
@@ -468,16 +615,36 @@ def _graph_item(w: _World, g: dict, user=None) -> dict:
     cb = g["created_by"]
     out = {"id": g["id"], "name": g["name"], "tags": g["tags"], "locked": g["locked"], "n": len(mem),
            "links": sum(1 for l in w.links if l["src"] in mem and l["dst"] in mem),
+           "suggestions": sum(1 for x in w.sugg if x["src"] in mem and x["dst"] in mem),
            "created_by": {"id": cb, "name": w.users.get(cb)} if cb is not None else None,
-           "created_at": g["created_at"]}
+           "created_at": g["created_at"],
+           "rev": (w.revs.get(g["id"]) or {}).get("rev", 0), "changed": _changed_by(w, w.revs.get(g["id"]))}
     if user is not None:
-        out["can_edit"] = _is_admin(user) or not g["locked"]
-        out["can_delete"] = out["can_edit"] and (_is_admin(user) or cb == user.get("id"))
+        out.update(_perms(g, user))
     return out
 
 
-def _view(gid: str):
-    """GET /api/graphs/<id> without the per-person parts, cached until the database changes."""
+def _perms(g: dict, user) -> dict:
+    edit = _is_admin(user) or not g["locked"]
+    return {"can_edit": edit, "can_delete": edit and (_is_admin(user) or g["created_by"] == user.get("id"))}
+
+
+def _lazy_rev(gid: str, row, sig: str) -> None:
+    """A read found graph gid's members or links changed without an edit here (or no revision
+    yet): one more revision, unless another one was made meanwhile."""
+    if db.conn().in_transaction:           # never inside a caller's transaction
+        return
+    with db.transaction() as c:
+        if row is None:
+            c.execute("INSERT OR IGNORE INTO graph_rev(graph_id, rev, sig, at) VALUES (?, 1, ?, ?)", (gid, sig, db.now()))
+        else:
+            c.execute("UPDATE graph_rev SET rev = rev + 1, sig = ?, user_id = NULL, actor = 'library', log_id = NULL, "
+                      "at = ? WHERE graph_id = ? AND rev = ?", (sig, db.now(), gid, row["rev"]))
+
+
+def _view(gid: str, _again: int = 0):
+    """GET /api/graphs/<id> without the per-person parts, cached until the database changes. Its
+    revision is the one of what it shows (one snapshot)."""
     from . import layout
     w = _world()
     hit = _views.get(gid)
@@ -489,6 +656,11 @@ def _view(gid: str):
     mem = w.members[gid]
     ids = sorted(mem, key=lambda i: w.papers[i]["okey"])
     links = _glinks(w, gid)
+    sig = layout_sig(ids, [(l["src"], l["dst"]) for l in links])
+    rrow = w.revs.get(gid)
+    if (rrow is None or rrow.get("sig") != sig) and _again < 3 and not db.conn().in_transaction:
+        _lazy_rev(gid, rrow, sig)
+        return _view(gid, _again + 1)
     deg = defaultdict(int)
     for l in links:
         deg[l["src"]] += 1
@@ -503,13 +675,17 @@ def _view(gid: str):
                       "made_by": list(p["made_by"]), "x": round(x, 1), "y": round(y, 1), "deg": deg[i],
                       "placed": i in placed, "ready": p["ready"]})
     st = w.lstate.get(gid) or {}
-    current = st.get("sig") == layout_sig(ids, [(l["src"], l["dst"]) for l in links]) and len(placed) == len(ids)
-    view = {"graph": _graph_item(w, g),
+    current = st.get("sig") == sig and len(placed) == len(ids)
+    item = _graph_item(w, g)
+    view = {"graph": item, "rev": item["rev"],
             "nodes": nodes,
             "links": [{"id": l["id"], "src": l["src"], "dst": l["dst"], "grade": l["grade"], "origin": l["origin"],
                        "created_at": l.get("created_at"),     # the map's link card: "added by the agent for Alice"
                        "by": {"id": l["created_by"], "name": l.get("by_name")} if l.get("created_by") is not None else None}
                       for l in links],
+            "suggestions": [{"id": x["id"], "src": x["src"], "dst": x["dst"], "grade": x["grade"], "created_at": x["created_at"],
+                             "by": {"id": x["user_id"], "name": x["by_name"]} if x["user_id"] is not None else None}
+                            for x in w.sugg if x["src"] in mem and x["dst"] in mem],
             **info,
             "layout": {"rev": st.get("rev", 0), "updated_at": st.get("updated_at"), "current": current}}
     if w is _world_cache:
@@ -531,10 +707,9 @@ def graph_for(gid: str, user) -> dict | None:
         listened = {r[0] for r in db.conn().execute("SELECT paper_id FROM listened WHERE user_id = ?", (user["id"],))}
     out = dict(v)
     out["nodes"] = [dict(n, listened=n["id"] in listened) for n in v["nodes"]]
-    w = _world()
-    g = w.graphs.get(gid)
+    g = _world().graphs.get(gid)
     if g is not None and user is not None:
-        out["graph"] = _graph_item(w, g, user)
+        out["graph"] = dict(v["graph"], **_perms(g, user))      # the rest as of the view's snapshot
     return out
 
 
@@ -668,10 +843,12 @@ def _reaches(adj, a, b, skip=None) -> bool:
     return False
 
 
-def _depths(c, rows) -> dict:
-    """Revert-chain depth of each row: 0 a change, odd an undo, even (> 0) a redo."""
+def _depths(c, rows, roots=None) -> dict:
+    """Revert-chain depth of each row: 0 a change, odd an undo, even (> 0) a redo. With `roots`
+    (a dict), each row's change at the start of its chain goes there too."""
     known = {r["id"]: r for r in rows}
     depth: dict = {}
+    root: dict = {} if roots is None else roots
     for r in rows:
         chain, rid = [], r["id"]
         while rid is not None and rid not in depth:
@@ -684,9 +861,12 @@ def _depths(c, rows) -> dict:
             chain.append(rid)
             rid = x["revert_of"]
         base = depth.get(rid, -1) if rid is not None else -1
+        top = root.get(rid) if rid is not None else None
         for x in reversed(chain):
             base += 1
             depth[x] = base
+            top = x if top is None else top
+            root[x] = top
     return depth
 
 
@@ -801,11 +981,29 @@ def _after(ids) -> list:
             touched.setdefault(gid, e["id"])
             if e["op"] in LAYOUT_OPS:
                 relayout.add(gid)
+    by_id = {e["id"]: e for e in entries}
     for gid, lid in touched.items():
-        events.publish("graph", {"id": gid, "change": "edit", "log_id": lid})
+        e = by_id[lid]
+        events.publish("graph", {"id": gid, "change": "edit", "log_id": lid, "log_op": e["op"], "actor": e["actor"],
+                                 "by": e["user"], "graph_rev": (w.revs.get(gid) or {}).get("rev"),
+                                 "deleted": gid not in w.graphs})
     if relayout:
         layout.schedule(sorted(relayout))
     return entries
+
+
+def _after_suggestions(sids) -> None:
+    """After a commit: the graphs that show these suggestions (made, accepted, dismissed) hear of it."""
+    sids = [i for i in (sids or []) if i is not None]
+    if not sids:
+        return
+    c, w = db.conn(), _world()
+    rows = c.execute(f"SELECT src, dst FROM link_suggestions WHERE id IN ({','.join('?' * len(sids))})", sids).fetchall()
+    gids = sorted({g for r in rows for g in _link_graphs(w, r[0], r[1])})
+    for gid in gids:
+        events.publish("graph", {"id": gid, "change": "suggestions"})
+    if not gids:
+        events.publish("graph", {"change": "suggestions", "graphs": []})     # the count in the settings
 
 
 # ---------------------------------------------------------------- the agent's links
@@ -846,8 +1044,34 @@ def _pending_keys(other: dict):
     return ax, doi, tn
 
 
-def _agent_add(c, adj, src, dst, grade, user_id):
-    """One agent link, unless a person's decision or the time order says no. -> (outcome, log id)."""
+def _link_graphs(w: _World, src, dst) -> list:
+    """The graphs that show a link between these two papers."""
+    return [gid for gid, m in w.members.items() if src in m and dst in m]
+
+
+def _bump_links(c, lids, user_id, actor) -> dict:
+    """The graphs showing these log rows' links go up one revision each."""
+    if not lids:
+        return {}
+    w, gids = _world(), []
+    for lid in lids:
+        r = c.execute("SELECT l.src, l.dst FROM graph_log g JOIN links l ON l.id = CAST(g.target AS INTEGER) "
+                      "WHERE g.id = ?", (lid,)).fetchone()
+        if r:
+            gids += _link_graphs(w, r[0], r[1])
+    return _bump(c, gids, user_id, actor, lids[-1])
+
+
+def _agent_mode(c) -> str:
+    """Links from uploads: "auto" (added as links) or "suggest" (kept as suggestions)."""
+    r = c.execute("SELECT value FROM graph_settings WHERE key = 'agent_links'").fetchone()
+    return r[0] if r and r[0] in AGENT_MODES else "auto"
+
+
+def _agent_add(c, adj, src, dst, grade, user_id, sugg=None):
+    """One agent link, unless a person's decision or the time order says no; with `sugg` (a list:
+    links from uploads are suggestions only) a suggestion instead, its id appended there.
+    -> (outcome, log id)"""
     r = c.execute("SELECT * FROM links WHERE src = ? AND dst = ?", (src, dst)).fetchone()
     if r is not None:
         return ("removed" if r["state"] == "removed" else "exists"), None
@@ -857,6 +1081,13 @@ def _agent_add(c, adj, src, dst, grade, user_id):
         return "order", None             # the parent is the later paper (build.py drops these too)
     if _reaches(adj, dst, src):
         return "cycle", None
+    if sugg is not None:
+        old = c.execute("SELECT state FROM link_suggestions WHERE src = ? AND dst = ?", (src, dst)).fetchone()
+        if old is not None:
+            return ("dismissed" if old[0] == "dismissed" else "suggested already"), None
+        sugg.append(c.execute("INSERT INTO link_suggestions(src, dst, grade, user_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                              (src, dst, grade, user_id, db.now())).lastrowid)
+        return "suggested", None
     at = db.now()
     cur = c.execute("INSERT INTO links(src, dst, grade, origin, state, created_by, created_at, updated_at) "
                     "VALUES (?, ?, ?, 'agent', 'active', ?, ?, ?)", (src, dst, grade, user_id, at, at))
@@ -865,8 +1096,8 @@ def _agent_add(c, adj, src, dst, grade, user_id):
     return "added", _log(c, user_id, "agent", "link.add", cur.lastrowid, None, snap)
 
 
-def _resolve_for(c, adj, paper) -> list:
-    """Pending links that name this paper: add them now. -> log ids."""
+def _resolve_for(c, adj, paper, sugg=None) -> list:
+    """Pending links that name this paper: add them now (or suggest them, with `sugg`). -> log ids."""
     ax, doi, tn = _norm_arxiv(paper["arxiv_id"]), _norm_doi(paper["doi"]), paper["title_norm"]
     tn = tn if tn and len(tn) >= TITLE_MATCH_MIN else None
     if not (ax or doi or tn):
@@ -880,9 +1111,9 @@ def _resolve_for(c, adj, paper) -> list:
         if r["paper_id"] == paper["id"]:
             outcome, lid = "self", None
         elif r["direction"] == "builds_on":            # the uploaded paper builds on this one
-            outcome, lid = _agent_add(c, adj, paper["id"], r["paper_id"], r["grade"], r["user_id"])
+            outcome, lid = _agent_add(c, adj, paper["id"], r["paper_id"], r["grade"], r["user_id"], sugg)
         else:
-            outcome, lid = _agent_add(c, adj, r["paper_id"], paper["id"], r["grade"], r["user_id"])
+            outcome, lid = _agent_add(c, adj, r["paper_id"], paper["id"], r["grade"], r["user_id"], sugg)
         link = None
         if lid is not None:
             link = int(c.execute("SELECT target FROM graph_log WHERE id = ?", (lid,)).fetchone()[0])
@@ -899,7 +1130,9 @@ def apply_agent_links(episode, paper_id=None, user_id=None, links=None) -> dict:
     apply_agent_links(episode_row, links). Also adds the earlier uploads' pending links that
     name this paper. Never re-adds a link a person removed and never changes an existing link.
 
-    -> {"added", "pending", "resolved", "skipped": [{"index", "reason"}], "log_ids"}"""
+    While links from uploads are suggestions only, the links it would add are suggested instead.
+
+    -> {"added", "suggested", "pending", "resolved", "skipped": [{"index", "reason"}], "log_ids"}"""
     ensure_schema()
     if links is None and isinstance(paper_id, (list, tuple)):
         links, paper_id = paper_id, None
@@ -916,15 +1149,16 @@ def apply_agent_links(episode, paper_id=None, user_id=None, links=None) -> dict:
             user_id = user_id if user_id is not None else r["made_by"]
     if not paper_id:
         raise ValueError("apply_agent_links: no paper for this episode")
-    out = {"added": 0, "pending": 0, "resolved": 0, "skipped": [], "log_ids": []}
+    out = {"added": 0, "suggested": 0, "pending": 0, "resolved": 0, "skipped": [], "log_ids": []}
     ids = []
     with _tx() as c:
         me = _paper_row(c, paper_id)
         if me is None:
             raise ValueError(f"apply_agent_links: no paper {paper_id}")
         adj = _adj(c)
-        got = _resolve_for(c, adj, me)
-        out["resolved"] = len(got)
+        sugg = [] if _agent_mode(c) == "suggest" else None
+        got = _resolve_for(c, adj, me, sugg)
+        out["resolved"] = len(got) + len(sugg or [])
         ids += got
         for k, item in enumerate(links or []):
             if not isinstance(item, dict) or not isinstance(item.get("other"), dict):
@@ -955,14 +1189,19 @@ def apply_agent_links(episode, paper_id=None, user_id=None, links=None) -> dict:
                 out["skipped"].append({"index": k, "reason": "self"})
                 continue
             src, dst = (oid, paper_id) if direction == "builds_on" else (paper_id, oid)
-            outcome, lid = _agent_add(c, adj, src, dst, grade, user_id)
-            if lid is None:
-                out["skipped"].append({"index": k, "reason": outcome})
-            else:
+            n0 = len(sugg or [])
+            outcome, lid = _agent_add(c, adj, src, dst, grade, user_id, sugg)
+            if lid is not None:
                 out["added"] += 1
                 ids.append(lid)
+            elif sugg is not None and len(sugg) > n0:
+                out["suggested"] += 1
+            else:
+                out["skipped"].append({"index": k, "reason": outcome})
+        _bump_links(c, ids, user_id, "agent")
     out["log_ids"] = ids
     _after(ids)
+    _after_suggestions(sugg)
     from . import layout
     layout.schedule(reset=False)       # a new paper may have joined graphs by its tags
     return out
@@ -983,10 +1222,15 @@ def resolve_pending(paper_id=None) -> int:
                 "((q.arxiv_id IS NOT NULL AND q.arxiv_id = p.arxiv_id) OR (q.doi IS NOT NULL AND q.doi = lower(p.doi)) "
                 "OR (q.title_norm IS NOT NULL AND q.title_norm = p.title_norm))").fetchall()
         adj = _adj(c)
+        sugg = [] if _agent_mode(c) == "suggest" else None
         for r in rows:
-            ids += _resolve_for(c, adj, r)
+            ids += _resolve_for(c, adj, r, sugg)
+        if ids:
+            u = c.execute("SELECT user_id FROM graph_log WHERE id = ?", (ids[-1],)).fetchone()
+            _bump_links(c, ids, u[0] if u else None, "agent")
     _after(ids)
-    return len(ids)
+    _after_suggestions(sugg)
+    return len(ids) + len(sugg or [])
 
 
 on_paper_created = resolve_pending
@@ -997,22 +1241,32 @@ on_paper_created = resolve_pending
 def _candidates(c, user) -> dict:
     """Among the newest 100 ops: per scope, the change to undo (the newest un-reverted change or
     redo), the undo to redo, and the newest un-reverted row of any kind. `mine` is the person's
-    own edits (not the agent's links from their uploads)."""
+    own edits (not the agent's links from their uploads). As in an editor, a change made after an
+    undo leaves nothing to redo there, also when that change was undone and redone since; redoing
+    older undos does not (undo, undo, then redo, redo walks forward again): an undo can be redone
+    while no change in effect (un-reverted, or redone) in scope is newer than it."""
     rows = c.execute("SELECT * FROM graph_log ORDER BY id DESC LIMIT ?", (UNDO_WINDOW,)).fetchall()
-    depth = _depths(c, rows)
-    res = {s: {"undo": None, "redo": None, "latest": None} for s in ("mine", "any")}
+    roots: dict = {}
+    depth = _depths(c, rows, roots)
+    res = {s: {"undo": None, "redo": None, "latest": None, "newest": 0} for s in ("mine", "any")}
     for r in rows:
         if r["reverted_by"] is not None:
             continue
-        kind = "redo" if depth.get(r["id"], 0) % 2 else "undo"
+        d = depth.get(r["id"], 0)
+        kind = "redo" if d % 2 else "undo"
         for scope in ("mine", "any"):
             if scope == "mine" and not (user is not None and r["user_id"] == user["id"] and r["actor"] == "human"):
                 continue
             slot = res[scope]
             if slot["latest"] is None:
                 slot["latest"] = r
-            if slot[kind] is None:
-                slot[kind] = r
+            if kind == "redo":
+                if slot["redo"] is None and slot["newest"] < r["id"]:
+                    slot["redo"] = r
+            else:
+                if slot["undo"] is None:
+                    slot["undo"] = r
+                slot["newest"] = max(slot["newest"], roots.get(r["id"], r["id"]))   # the change it has in effect
     return res
 
 
@@ -1140,11 +1394,12 @@ def h_create(req):
                   (gid, name, db.dumps(tags), req.user["id"], db.now()))
         lid = _log(c, req.user["id"], "human", "graph.create", gid, None,
                    {"name": name, "tags": tags, "locked": False, "deleted": False})
+        revs = _bump(c, [gid], req.user["id"], "human", lid)
     entries = _after([lid])
     from . import layout
     layout.schedule([gid], delay=1.0)
     w = _world()
-    req.send_json(201, {"graph": _graph_item(w, w.graphs[gid], req.user), "log": entries[0]})
+    req.send_json(201, {"graph": _graph_item(w, w.graphs[gid], req.user), "log": entries[0], "revs": revs})
 
 
 def h_update(req, gid):
@@ -1163,7 +1418,8 @@ def h_update(req, gid):
         fields["locked"] = b["locked"]
     if not fields:
         raise HTTPError(400, "nothing", "send name, tags or locked")
-    ids = []
+    _, base = _base(req, b)
+    ids, revs = [], {}
     with _tx() as c:
         row = _graph_row(c, gid)
         if row is None or row["deleted_at"] is not None:
@@ -1171,20 +1427,26 @@ def h_update(req, gid):
         g = _graph_snap(row)
         if g["locked"] and not _is_admin(req.user):
             raise _locked_error(g["name"])
-        for key, op, col in (("name", "graph.rename", "name"), ("tags", "graph.set_tags", "rule_tags"),
-                             ("locked", "graph.lock", "locked")):
-            if key in fields and fields[key] != g[key]:
-                v = fields[key]
-                c.execute(f"UPDATE graphs SET {col} = ? WHERE id = ?",
-                          (db.dumps(v) if key == "tags" else (int(v) if key == "locked" else v), gid))
-                ids.append(_log(c, req.user["id"], "human", op, gid, {key: g[key]}, {key: v}))
+        todo = [(key, op, col) for key, op, col in (("name", "graph.rename", "name"), ("tags", "graph.set_tags", "rule_tags"),
+                                                    ("locked", "graph.lock", "locked")) if key in fields and fields[key] != g[key]]
+        if todo:
+            _fresh(c, _world(), gid, base)
+        for key, op, col in todo:
+            v = fields[key]
+            c.execute(f"UPDATE graphs SET {col} = ? WHERE id = ?",
+                      (db.dumps(v) if key == "tags" else (int(v) if key == "locked" else v), gid))
+            ids.append(_log(c, req.user["id"], "human", op, gid, {key: g[key]}, {key: v}))
+        if ids:
+            revs = _bump(c, [gid], req.user["id"], "human", ids[-1])
     entries = _after(ids)
     w = _world()
-    req.send_json(200, {"graph": _graph_item(w, w.graphs[gid], req.user), "log": entries})
+    req.send_json(200, {"graph": _graph_item(w, w.graphs[gid], req.user), "log": entries, "revs": revs,
+                        "already": not ids})
 
 
 def h_delete(req, gid):
     ensure_schema()
+    _, base = _base(req, req.json())
     with _tx() as c:
         row = _graph_row(c, gid)
         if row is None or row["deleted_at"] is not None:
@@ -1193,15 +1455,18 @@ def h_delete(req, gid):
             raise _locked_error(row["name"])
         if not (_is_admin(req.user) or row["created_by"] == req.user["id"]):
             raise HTTPError(403, "forbidden", "only the graph's maker or an admin can delete it")
+        _fresh(c, _world(), gid, base)
         c.execute("UPDATE graphs SET deleted_at = ? WHERE id = ?", (db.now(), gid))
         lid = _log(c, req.user["id"], "human", "graph.delete", gid, {"deleted": False}, {"deleted": True})
+        revs = _bump(c, [gid], req.user["id"], "human", lid)
     entries = _after([lid])
-    req.send_json(200, {"log": entries[0]})
+    req.send_json(200, {"log": entries[0], "revs": revs})
 
 
-def _membership(req, gid, pid, want: str):
+def _membership(req, gid, pid, want: str, b=None):
     ensure_schema()
-    lid = None
+    lid, revs = None, {}
+    _, base = _base(req, b)
     with _tx() as c:
         row = _graph_row(c, gid)
         if row is None or row["deleted_at"] is not None:
@@ -1214,20 +1479,24 @@ def _membership(req, gid, pid, want: str):
         how, match = _how(c, gid, pid), _rule_matches(row, p)
         member = how == "added" or (how is None and match)
         if (want == "added") != member:
+            _fresh(c, _world(), gid, base)
             _set_how(c, gid, pid, want)
             lid = _log(c, req.user["id"], "human", "graph.add_paper" if want == "added" else "graph.remove_paper",
                        f"{gid}/{pid}", {"how": how}, {"how": want})
+            revs = _bump(c, [gid], req.user["id"], "human", lid)
     entries = _after([lid])
     w = _world()
-    req.send_json(200, {"member": pid in w.members.get(gid, set()), "log": entries[0] if entries else None})
+    req.send_json(200, {"member": pid in w.members.get(gid, set()), "log": entries[0] if entries else None,
+                        "revs": revs, "already": lid is None})
 
 
 def h_add_paper(req, gid):
-    _membership(req, gid, _body_paper(req, req.json()), "added")
+    b = req.json()
+    _membership(req, gid, _body_paper(req, b), "added", b)
 
 
 def h_remove_paper(req, gid, pid):
-    _membership(req, gid, pid, "removed")
+    _membership(req, gid, pid, "removed", req.json())
 
 
 def h_relayout(req, gid):
@@ -1249,48 +1518,70 @@ def h_add_link(req):
         raise HTTPError(400, "bad_grade", "grade is e, s or w")
     if src == dst:
         raise HTTPError(400, "bad_link", "a paper cannot build on itself")
+    bg, base = _base(req, b)
+    done = lid = None
     with _tx() as c:
         ps, pd = _paper_row(c, src), _paper_row(c, dst)
         if ps is None or pd is None:
             raise HTTPError(404, "not_found", "no such paper")
         if ps["year"] and pd["year"] and ps["year"] > pd["year"]:
             raise HTTPError(400, "order", f"src is the earlier paper: {ps['year']} is after {pd['year']}")
-        _check_links_edit(_world(), req.user, src, dst)
+        w = _world()
+        _check_links_edit(w, req.user, src, dst)
         row = c.execute("SELECT * FROM links WHERE src = ? AND dst = ?", (src, dst)).fetchone()
-        if row is not None and row["state"] == "active":
-            raise HTTPError(409, "exists", "these papers are already linked", link=_link_snap(row))
-        if _reaches(_adj(c), dst, src):
-            raise HTTPError(409, "cycle", "that link would make a loop: the earlier paper already builds on the later one")
-        at = db.now()
-        if row is not None:           # a removed link a person brings back
-            before = _link_snap(row)
-            c.execute("UPDATE links SET grade = ?, origin = 'human', state = 'active', updated_at = ? WHERE id = ?",
-                      (grade, at, row["id"]))
-            link_id = row["id"]
+        if base is not None and row is not None and row["state"] == "active" and row["grade"] == grade:
+            done = _link_snap(row)          # made already (by someone else meanwhile): done, whatever base_rev says
         else:
-            before = None
-            link_id = c.execute("INSERT INTO links(src, dst, grade, origin, state, created_by, created_at, updated_at) "
-                                "VALUES (?, ?, ?, 'human', 'active', ?, ?, ?)",
-                                (src, dst, grade, req.user["id"], at, at)).lastrowid
-        after = _link_snap(_link_row(c, link_id))
-        lid = _log(c, req.user["id"], "human", "link.add", link_id, before, after)
+            _fresh(c, w, bg, base)
+            if row is not None and row["state"] == "active":
+                raise HTTPError(409, "exists", "these papers are already linked", link=_link_snap(row))
+            if _reaches(_adj(c), dst, src):
+                raise HTTPError(409, "cycle", "that link would make a loop: the earlier paper already builds on the later one")
+            after, lid = _person_link(c, req.user["id"], src, dst, grade, row)
+            revs = _bump(c, _link_graphs(w, src, dst), req.user["id"], "human", lid)
+    if done is not None:
+        req.send_json(200, {"link": done, "log": None, "revs": {}, "already": True})
+        return
     entries = _after([lid])
-    req.send_json(201, {"link": after, "log": entries[0]})
+    req.send_json(201, {"link": after, "log": entries[0], "revs": revs})
 
 
-def _link_change(req, link_id, grade=None):
+def _person_link(c, user_id, src, dst, grade, row):
+    """A person's new link (or a removed one they bring back), logged as their link.add.
+    -> (the link's snapshot, the log row's id)"""
+    at = db.now()
+    if row is not None:
+        before = _link_snap(row)
+        c.execute("UPDATE links SET grade = ?, origin = 'human', state = 'active', updated_at = ? WHERE id = ?",
+                  (grade, at, row["id"]))
+        link_id = row["id"]
+    else:
+        before = None
+        link_id = c.execute("INSERT INTO links(src, dst, grade, origin, state, created_by, created_at, updated_at) "
+                            "VALUES (?, ?, ?, 'human', 'active', ?, ?, ?)", (src, dst, grade, user_id, at, at)).lastrowid
+    after = _link_snap(_link_row(c, link_id))
+    return after, _log(c, user_id, "human", "link.add", link_id, before, after)
+
+
+def _link_change(req, link_id, grade=None, b=None):
     """Regrade (grade given) or remove a link; a no-op answers with the link and no log row."""
     ensure_schema()
-    lid = None
+    lid, revs = None, {}
+    bg, base = _base(req, b)
     with _tx() as c:
         row = _link_row(c, int(link_id))
         if row is None:
             raise HTTPError(404, "not_found", "no such link")
         after = _link_snap(row)
-        if row["state"] != "active" and grade is not None:
+        active = row["state"] == "active"
+        if not active and grade is not None and base is None:
             raise HTTPError(409, "removed", "that link was removed")
-        if row["state"] == "active" and (grade is None or grade != row["grade"]):
-            _check_links_edit(_world(), req.user, row["src"], row["dst"])
+        if active and (grade is None or grade != row["grade"]) or (not active and grade is not None):
+            w = _world()
+            _check_links_edit(w, req.user, row["src"], row["dst"])
+            _fresh(c, w, bg, base)
+            if not active:
+                raise HTTPError(409, "removed", "that link was removed")
             if grade is not None:
                 c.execute("UPDATE links SET grade = ?, updated_at = ? WHERE id = ?", (grade, db.now(), row["id"]))
                 op = "link.grade"
@@ -1299,41 +1590,197 @@ def _link_change(req, link_id, grade=None):
                 op = "link.remove"
             after = _link_snap(_link_row(c, row["id"]))
             lid = _log(c, req.user["id"], "human", op, row["id"], _link_snap(row), after)
+            revs = _bump(c, _link_graphs(w, row["src"], row["dst"]), req.user["id"], "human", lid)
     entries = _after([lid])
-    req.send_json(200, {"link": after, "log": entries[0] if entries else None})
+    req.send_json(200, {"link": after, "log": entries[0] if entries else None, "revs": revs, "already": lid is None})
 
 
 def h_grade_link(req, link_id):
-    grade = _grade(req.json().get("grade"))
+    b = req.json()
+    grade = _grade(b.get("grade"))
     if grade is None:
         raise HTTPError(400, "bad_grade", "grade is e, s or w")
-    _link_change(req, link_id, grade)
+    _link_change(req, link_id, grade, b)
 
 
 def h_remove_link(req, link_id):
-    _link_change(req, link_id)
+    _link_change(req, link_id, None, req.json())
 
 
 def h_label(req, pid):
     ensure_schema()
-    v = req.json().get("label")
+    b = req.json()
+    v = b.get("label")
     if v is not None and not isinstance(v, str):
         raise HTTPError(400, "bad_label", "label is a string (empty: automatic)")
     lab = " ".join((v or "").split()) or None
     if lab and len(lab) > LABEL_MAX:
         raise HTTPError(400, "bad_label", f"a label is at most {LABEL_MAX} characters")
-    lid = None
+    bg, base = _base(req, b)
+    lid, revs = None, {}
     with _tx() as c:
         row = _paper_row(c, pid)
         if row is None:
             raise HTTPError(404, "not_found", "no such paper")
         if row["label"] != lab:
+            w = _world()
+            _fresh(c, w, bg, base)
             c.execute("UPDATE papers SET label = ? WHERE id = ?", (lab, pid))
             lid = _log(c, req.user["id"], "human", "paper.label", pid, {"label": row["label"]}, {"label": lab})
+            revs = _bump(c, [gid for gid, m in w.members.items() if pid in m], req.user["id"], "human", lid)
     entries = _after([lid])
     p = _world().papers.get(pid) or {}
     req.send_json(200, {"paper": {"id": pid, "label": p.get("label"), "custom": lab is not None},
-                        "log": entries[0] if entries else None})
+                        "log": entries[0] if entries else None, "revs": revs, "already": lid is None})
+
+
+# ---------------------------------------------------------------- links from uploads: automatic or suggested
+
+def _settings(c) -> dict:
+    r = c.execute("SELECT s.*, u.name FROM graph_settings s LEFT JOIN users u ON u.id = s.updated_by "
+                  "WHERE s.key = 'agent_links'").fetchone()
+    return {"agent_links": _agent_mode(c), "suggestions": len(_world().sugg),
+            "changed": {"by": {"id": r["updated_by"], "name": r["name"]} if r["updated_by"] is not None else None,
+                        "at": r["updated_at"]} if r else None}
+
+
+def h_settings(req):
+    ensure_schema()
+    req.send_json(200, _settings(db.conn()))
+
+
+def h_set_settings(req):
+    """PUT /api/graph-settings {"agent_links": "auto" | "suggest"} (admins)."""
+    ensure_schema()
+    v = req.json().get("agent_links")
+    if v not in AGENT_MODES:
+        raise HTTPError(400, "bad_mode", "agent_links is auto or suggest")
+    with _tx() as c:
+        c.execute("INSERT OR REPLACE INTO graph_settings(key, value, updated_by, updated_at) VALUES ('agent_links', ?, ?, ?)",
+                  (v, req.user["id"], db.now()))
+    events.publish("graph", {"change": "settings", "agent_links": v, "graphs": []})
+    req.send_json(200, _settings(db.conn()))
+
+
+def _sugg_row(c, sid):
+    try:
+        return c.execute("SELECT * FROM link_suggestions WHERE id = ?", (int(sid),)).fetchone()
+    except ValueError:
+        return None
+
+
+def _sugg_out(r) -> dict:
+    return {"id": r["id"], "src": r["src"], "dst": r["dst"], "grade": r["grade"], "state": r["state"],
+            "link_id": r["link_id"]}
+
+
+def _accept(c, w, adj, user_id, s):
+    """Accept suggestion row s as user_id's link. -> (outcome, link snapshot or None, log id or None)
+    Outcomes: accepted, exists (linked already: the suggestion is done), removed (a person removed
+    that link: it stays removed), order, cycle."""
+    src, dst = s["src"], s["dst"]
+    row = c.execute("SELECT * FROM links WHERE src = ? AND dst = ?", (src, dst)).fetchone()
+    if row is not None and row["state"] == "active":
+        if s["state"] == "open":
+            c.execute("UPDATE link_suggestions SET state = 'accepted', decided_by = ?, decided_at = ?, link_id = ? WHERE id = ?",
+                      (user_id, db.now(), row["id"], s["id"]))
+        return "exists", _link_snap(row), None
+    if row is not None:
+        return "removed", None, None
+    ps, pd = _paper_row(c, src), _paper_row(c, dst)
+    if ps["year"] and pd["year"] and ps["year"] > pd["year"]:
+        return "order", None, None
+    if _reaches(adj, dst, src):
+        return "cycle", None, None
+    after, lid = _person_link(c, user_id, src, dst, s["grade"], row)
+    adj[src].append(dst)
+    c.execute("UPDATE link_suggestions SET state = 'accepted', decided_by = ?, decided_at = ?, link_id = ? WHERE id = ?",
+              (user_id, db.now(), after["id"], s["id"]))
+    return "accepted", after, lid
+
+
+def h_accept(req, sid):
+    """POST /api/link-suggestions/<id>/accept: the suggestion becomes the person's link (their
+    link.add: undo and redo work on it)."""
+    ensure_schema()
+    b = req.json()
+    bg, base = _base(req, b)
+    lid, revs = None, {}
+    with _tx() as c:
+        s = _sugg_row(c, sid)
+        if s is None:
+            raise HTTPError(404, "not_found", "no such suggestion")
+        if s["state"] == "dismissed":
+            raise HTTPError(409, "dismissed", "that suggestion was dismissed", suggestion=_sugg_out(s))
+        w = _world()
+        _check_links_edit(w, req.user, s["src"], s["dst"])
+        cur = c.execute("SELECT state FROM links WHERE src = ? AND dst = ?", (s["src"], s["dst"])).fetchone()
+        if s["state"] == "accepted" and not (cur and cur[0] == "active"):
+            raise HTTPError(409, "decided", "that suggestion was accepted, and its link removed since", suggestion=_sugg_out(s))
+        if not (cur and cur[0] == "active"):
+            _fresh(c, w, bg, base)
+        outcome, link, lid = _accept(c, w, _adj(c), req.user["id"], s)
+        if outcome == "removed":
+            raise HTTPError(409, "removed", "a person removed that link: it stays removed (add it by hand to bring it back)")
+        if outcome == "order":
+            raise HTTPError(400, "order", "the earlier paper must be the one built on")
+        if outcome == "cycle":
+            raise HTTPError(409, "cycle", "that link would make a loop: the earlier paper already builds on the later one")
+        if lid is not None:
+            revs = _bump(c, _link_graphs(w, s["src"], s["dst"]), req.user["id"], "human", lid)
+        s = _sugg_row(c, sid)
+    entries = _after([lid])
+    _after_suggestions([s["id"]])
+    req.send_json(200, {"suggestion": _sugg_out(s), "link": link, "log": entries[0] if entries else None, "revs": revs,
+                        "already": lid is None})
+
+
+def h_dismiss(req, sid):
+    """POST /api/link-suggestions/<id>/dismiss: dropped for good; that pair is never suggested again."""
+    ensure_schema()
+    with _tx() as c:
+        s = _sugg_row(c, sid)
+        if s is None:
+            raise HTTPError(404, "not_found", "no such suggestion")
+        done = s["state"] != "open"
+        if not done:
+            _check_links_edit(_world(), req.user, s["src"], s["dst"])
+            c.execute("UPDATE link_suggestions SET state = 'dismissed', decided_by = ?, decided_at = ? WHERE id = ?",
+                      (req.user["id"], db.now(), s["id"]))
+        s = _sugg_row(c, sid)
+    if not done:
+        _after_suggestions([s["id"]])
+    req.send_json(200, {"suggestion": _sugg_out(s), "already": done})
+
+
+def h_accept_all(req):
+    """POST /api/link-suggestions/accept-all {"graph_id"?} (admins): every open suggestion (in that
+    graph) the rules still allow becomes the admin's link, one log row each."""
+    ensure_schema()
+    gid = req.json().get("graph_id")
+    if gid is not None and not isinstance(gid, str):
+        raise HTTPError(400, "bad_graph", "graph_id is a graph's id")
+    ids, sids, skipped, gids = [], [], [], []
+    with _tx() as c:
+        w, adj = _world(), _adj(c)
+        mem = w.members.get(gid) if gid else None
+        if gid and mem is None:
+            raise HTTPError(404, "not_found", "no such graph")
+        for s in c.execute("SELECT * FROM link_suggestions WHERE state = 'open' ORDER BY id").fetchall():
+            if mem is not None and not (s["src"] in mem and s["dst"] in mem):
+                continue
+            outcome, link, lid = _accept(c, w, adj, req.user["id"], s)
+            if outcome in ("accepted", "exists"):
+                sids.append(s["id"])
+            else:
+                skipped.append({"id": s["id"], "reason": outcome})
+            if lid is not None:
+                ids.append(lid)
+                gids += _link_graphs(w, s["src"], s["dst"])
+        revs = _bump(c, gids, req.user["id"], "human", ids[-1] if ids else None)
+    _after(ids)
+    _after_suggestions(sids)
+    req.send_json(200, {"accepted": len(ids), "skipped": skipped, "log_ids": ids, "revs": revs})
 
 
 def _int_arg(req, name, default, lo, hi):
@@ -1402,6 +1849,7 @@ def h_revert(req):
     except (TypeError, ValueError):
         raise HTTPError(400, "bad_expect", "expect is the id of the op the page showed")
     redo = b.get("redo") is True
+    bg, base = _base(req, b)
     with _tx() as c:
         slot = _candidates(c, req.user)[scope]
         want = slot["redo"] if redo else slot["undo"]
@@ -1414,9 +1862,15 @@ def h_revert(req):
             nxt = _entries(c, [want])[0] if want is not None else None
             raise HTTPError(409, "moved", "the history moved on: look again", next=nxt)
         target_id = target["id"]
+        w = _world()
+        touched = _affected(w, {"op": target["op"], "target": target["target"],
+                                "before": db.loads(target["before"]), "after": db.loads(target["after"])})
+        if bg in touched:                # the page shows a graph this undo changes: as it is now?
+            _fresh(c, w, bg, base)
         rid = _revert_row(c, req.user, target)
+        revs = _bump(c, touched, req.user["id"], "human", rid)
     entries = _after([rid])
-    req.send_json(200, {"reverted": log_entries([target_id])[0], "log": entries[0]})
+    req.send_json(200, {"reverted": log_entries([target_id])[0], "log": entries[0], "revs": revs})
 
 
 ROUTES = [
@@ -1434,4 +1888,9 @@ ROUTES = [
     ("GET", r"^/api/graph-log$", h_log, "viewer"),
     ("POST", r"^/api/graph-log/revert$", h_revert, "viewer"),
     ("PUT", r"^/api/papers/([^/]+)/label$", h_label, "viewer"),
+    ("GET", r"^/api/graph-settings$", h_settings, "viewer"),
+    ("PUT", r"^/api/graph-settings$", h_set_settings, "admin"),
+    ("POST", r"^/api/link-suggestions/accept-all$", h_accept_all, "admin"),
+    ("POST", r"^/api/link-suggestions/(\d+)/accept$", h_accept, "viewer"),
+    ("POST", r"^/api/link-suggestions/(\d+)/dismiss$", h_dismiss, "viewer"),
 ]

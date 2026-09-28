@@ -7,6 +7,7 @@
   --pm-text: var(--text, #111111); --pm-muted: var(--text-2, #5C5C5C); --pm-faint: #A3A3A3;
   --pm-node: #8C8C8C; --pm-line: #B0B0B0; --pm-hi: var(--text, #111111); --pm-start: var(--accent, #C8431A); --pm-done: var(--alive, #1E9E4A);
   --pm-on-accent: var(--on-accent, #FFFFFF); --pm-danger: var(--danger, #B3261E); --pm-input: var(--input-line, #D6D6D6);
+  --pm-warn: var(--warn, #8F5400); --pm-scrim: var(--scrim, rgba(0,0,0,.32));
   --pm-toast-bg: var(--toast-bg, #1C1C1C); --pm-toast-fg: var(--toast-fg, #F2F2F2); --pm-toast-link: var(--toast-link, #FF8A5C);
   position: fixed; inset: 0; z-index: 45; overflow: hidden; background: var(--pm-bg); color: var(--pm-text);
   font: 14px/1.45 var(--sans, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif); -webkit-font-smoothing: antialiased;
@@ -25,9 +26,9 @@
 .pm-cv.over { cursor: pointer; }
 .pm-cv.grabbing { cursor: grabbing; }
 
-/* the bar: tabs over the search on the left, the icons on the right */
-.pm-top { position: absolute; top: 12px; left: 16px; right: 16px; display: grid; grid-template-columns: minmax(0, 1fr) auto auto;
-  grid-template-areas: "head icons close" "q . ."; column-gap: 12px; row-gap: 8px; align-items: start; pointer-events: none; }
+/* the bar: tabs over the search on the left, Undo and Redo, the icons, Close on the right */
+.pm-top { position: absolute; top: 12px; left: 16px; right: 16px; display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto;
+  grid-template-areas: "head undo icons close" "q . . ." "sub . . ."; column-gap: 12px; row-gap: 8px; align-items: start; pointer-events: none; }
 .pm-top > * { pointer-events: auto; }
 .pm-head { grid-area: head; display: flex; align-items: baseline; gap: 18px; min-width: 0; pointer-events: none; }
 .pm-head > * { pointer-events: auto; }
@@ -46,10 +47,17 @@
   color: var(--pm-text); font: 13px var(--sans, sans-serif); padding: 0 10px; }
 .pm-q:focus { outline: none; border-color: var(--pm-muted); }
 .pm-icons { grid-area: icons; display: flex; gap: 2px; flex: none; }
+.pm-undobox { grid-area: undo; display: flex; gap: 2px; flex: none; }
+.pm-sub { grid-area: sub; justify-self: start; display: flex; align-items: center; gap: 12px; min-width: 0; pointer-events: none; }
+.pm-sub > * { pointer-events: auto; }
+.pm-sub:not(:has(> :not([hidden]))) { display: none; }
+.pm-live { font-size: 12px; color: var(--pm-muted); pointer-events: none !important; }
+.pm-suggb[aria-pressed="true"] { background: var(--pm-panel); }
+.pm-modes { margin-top: 6px; }
 .pm-closebox { grid-area: close; display: flex; }
 .pm-closebox:empty { display: none; }
 .pm-ib { width: 36px; height: 36px; border-radius: 6px; display: grid; place-items: center; color: var(--pm-muted); }
-.pm-ib:hover, .pm-ib[aria-pressed="true"] { color: var(--pm-text); background: var(--pm-panel); }
+.pm-ib:hover:not(:disabled), .pm-ib[aria-pressed="true"] { color: var(--pm-text); background: var(--pm-panel); }
 .pm-ib svg, .pm-x svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 
 /* panels: Start here, Undo, History, Graph settings, New graph (one at a time, on the right) */
@@ -89,6 +97,8 @@
 .pm-btn:hover:not(:disabled) { background: var(--pm-panel); }
 .pm-btn.pm-small { padding: 2px 8px; font-size: 12px; }
 .pm-btn.pm-danger { color: var(--pm-danger); }
+.pm-btn.pm-danger-fill { background: var(--pm-danger); border-color: var(--pm-danger); color: var(--pm-on-accent); font-weight: 600; }
+.pm-btn.pm-danger-fill:hover:not(:disabled) { background: var(--pm-danger); filter: brightness(.92); }
 .pm-seg { display: flex; margin-top: 4px; border: 1px solid var(--pm-border); border-radius: 6px; overflow: hidden; }
 .pm-segb { flex: 1; text-align: center !important; padding: 6px 4px; font-size: 13px; }
 .pm-segb + .pm-segb { border-left: 1px solid var(--pm-border) !important; }
@@ -132,6 +142,12 @@
   border: 1px solid var(--pm-border); border-radius: 6px; padding: 6px 9px; box-shadow: 0 4px 14px rgba(0,0,0,.18); }
 .pm-tip-t { font-size: 13px; line-height: 1.3; font-weight: 600; }
 .pm-tip-s { font-size: 12px; color: var(--pm-muted); margin-top: 2px; font-variant-numeric: tabular-nums; }
+/* the line by the pointer while a link is aimed */
+.pm-aim { position: absolute; left: 0; top: 0; max-width: 300px; pointer-events: none; background: var(--pm-bg); color: var(--pm-text);
+  border: 1px solid var(--pm-border); border-radius: 6px; padding: 4px 8px; font-size: 13px; line-height: 1.3; white-space: nowrap;
+  box-shadow: 0 4px 14px rgba(0,0,0,.14); }
+.pm-aim.warn { color: var(--pm-warn); border-color: var(--pm-warn); }
+.pm-warn { color: var(--pm-warn); font-size: 12px; margin: 4px 0 2px; }
 
 .pm-legend { position: absolute; right: 16px; bottom: 14px; color: var(--pm-muted); font-size: 12px; display: flex; gap: 14px; align-items: center; pointer-events: none; }
 .pm-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
@@ -149,10 +165,23 @@
   padding: 9px 14px; font-size: 13px; box-shadow: 0 6px 20px rgba(0,0,0,.22); }
 .pm-msg-b { color: var(--pm-toast-link) !important; font-weight: 600; flex: none; }
 
+/* the dialog before a graph is deleted: over the map, the rest dimmed */
+.pm-dialog { width: min(380px, calc(100% - 32px)); box-sizing: border-box; padding: 0; margin: auto; border: 1px solid var(--pm-border);
+  border-radius: 10px; background: var(--pm-bg); color: var(--pm-text); box-shadow: 0 12px 36px rgba(0,0,0,.24); }
+.pm-dialog::backdrop { background: rgba(0,0,0,.32); background: var(--pm-scrim, rgba(0,0,0,.32)); }
+.pm-dlg-in { padding: 16px 18px 14px; }
+.pm-dlg-h { font-size: 15px; font-weight: 600; line-height: 1.35; margin: 0 0 6px; overflow-wrap: anywhere; }
+.pm-dlg-p { margin: 0; color: var(--pm-muted); font-size: 13px; }
+.pm-dlg-act { justify-content: flex-end; margin-top: 18px; }
+
 @media (max-width: 760px) {
-  /* two rows: the tabs (and Close), then the search and the icons */
+  /* two rows: the tabs, Undo and Redo, Close; then the search and the icons */
   .pm-top { top: calc(8px + env(safe-area-inset-top)); left: 12px; right: 8px; grid-template-columns: minmax(0, 1fr) auto 44px;
-    grid-template-areas: "head head close" "q icons icons"; column-gap: 6px; row-gap: 4px; align-items: center; }
+    grid-template-areas: "head undo close" "q icons icons" "sub sub sub"; column-gap: 6px; row-gap: 4px; align-items: center; }
+  /* with Show suggestions under the search, what hangs under the bar goes down a row */
+  .pmap.pm-subrow .pm-panel { top: calc(156px + env(safe-area-inset-top)); max-height: calc(100% - 172px - env(safe-area-inset-top)); }
+  .pmap.pm-subrow .pm-msg { top: calc(156px + env(safe-area-inset-top)); }
+  .pm-undobox { justify-self: end; }
   .pm-closebox { justify-content: flex-end; }
   .pm-title { display: none; }
   .pm-tabs { gap: 14px; }

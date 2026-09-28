@@ -2299,6 +2299,8 @@
       el("p", { class: "intro", text: "The voice your new versions are recorded in. A version you made can be recorded again in another voice from its page." }),
       el("div", { class: "pref" }, el("p", { class: "pref-h", text: "My voice" }), list),
       el("div", { class: "save-row" }, msg));
+  }
+
   // Slack (admins): whether it is set up, where it posts, a test message, the last 20 posts.
   const SLACK_STATE = { posted: "posted", pending: "waiting", sending: "sending", retrying: "trying again", failed: "failed", skipped: "not posted" };
   async function slackTab(body) {
@@ -2331,6 +2333,7 @@
       el("div", { class: "save-row" }, test, res),
       el("p", { class: "pref-h sec", text: "Last 20" }), ul);
   }
+
 
   // ------------------------------------------------------------------ live events
   function connect() {

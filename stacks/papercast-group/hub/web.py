@@ -228,7 +228,8 @@ def _one(req, pid: str) -> dict:
 def get_config(req):
     req.send_json(200, {"me": {"id": _uid(req), "name": _u(req, "name"), "email": _u(req, "email"),
                                "role": _u(req, "role")},
-                        "auth": req.cfg.auth, "build": build(req.cfg), "undo_days": UNDO_DAYS})
+                        "auth": req.cfg.auth, "build": build(req.cfg), "undo_days": UNDO_DAYS,
+                        "public_url": req.cfg.public_url})     # the address `papercast login --server` takes
 
 
 def get_library(req):

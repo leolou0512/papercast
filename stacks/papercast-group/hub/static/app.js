@@ -1839,6 +1839,24 @@
       },
     };
   }
+
+  // ------------------------------------------------------------------ the tour and "?"
+  // tour.js (window.PaperTour): the tour a new person gets, Tour again, and the help panel.
+  function tourCtx() {
+    return {
+      api, me: () => S.me, cfg: () => S.cfg, phone,
+      view: () => ($("map").hidden ? S.view : "map"),
+      openId: () => S.open,
+      papers: () => shownPapers(),
+      hasAudio: anyAudio,
+      // a paper opened without a step in the history
+      open: (pid) => { history.replaceState(null, "", `#p=${pid}`); openFromHash(true); },
+      list: () => { closeMenu(); closeQueue(); if (S.view !== "list") goList(); },
+      openMap, closeMap: () => closeMap(), closeMenu, map: () => S.map,
+      idle: () => $("overlay").hidden && $("q-overlay").hidden && !S.menu && document.visibilityState === "visible",
+    };
+  }
+
   // A time in a comment: that version plays from there. It becomes the version this paper plays
   // here (as a tap on it in Versions would); play() is called in the tap itself, so a phone lets it.
   function seekPlay(eid, t) {
@@ -2680,6 +2698,7 @@
       const last = store.get("pcg.last");
       if (!phone() && last && S.papers.has(last)) { history.replaceState(null, "", `#p=${last}`); openFromHash(); }
     }
+    S.tour = window.PaperTour ? window.PaperTour.mount(tourCtx()) : null;
   }
   document.addEventListener("DOMContentLoaded", start);
 })();

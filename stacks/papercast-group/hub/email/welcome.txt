@@ -1,0 +1,19 @@
+Hi, {name}
+
+Welcome to Virtual Atoms Lab Papercast! This is an App that turns research papers into podcasts, then stores them in a centralized knowledge graph, with everyone in the group able to listen to these podcasts from anywhere.
+
+Please accept this invitation to join our group Papercast at: {site_url}
+
+Join: {signin_url}
+
+We have made an account for you already. Please sign in with your SHORT Imperial email, and your password is the part before the @.
+
+  Email:     {username}@ic.ac.uk
+  Password:  {username}
+
+If you want to contribute a paper to the shared graph, please follow instructions on {github_url}.
+
+Wish you a very pleasant start on papercast, and if you have any feedback, please get in touch with me.
+
+Best,
+Leo

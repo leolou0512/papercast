@@ -1539,7 +1539,7 @@ class MapTest(unittest.TestCase):
                       new Promise((ok, no) => { const e = Object.assign(document.createElement(t), a); e.onload = ok; e.onerror = no; document.head.append(e); })))""")
                 self.wait("!!window.pcgTheme", "theme.js")
                 px, var, close = self.colours()
-                for theme, bg in (("paper", "#FFFCF0"), ("latte", "#EFF1F5"), ("dimmed", "#212830"), ("forest", "#2D353B"), ("dark", None), ("light", None)):
+                for theme, bg in (("paper", "#FFFCF0"), ("latte", "#EFF1F5"), ("dimmed", "#212830"), ("forest", "#2D353B"), ("rose", "#FAF4ED"), ("neon", "#262335"), ("dark", None), ("light", None)):
                     self.js(f"pcgTheme.set({J(theme)})")
                     if bg:
                         self.assertEqual(self.js("getComputedStyle(document.getElementById('map')).getPropertyValue('--pm-bg').trim().toUpperCase()"), bg)

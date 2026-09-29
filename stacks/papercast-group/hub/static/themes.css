@@ -13,7 +13,11 @@
    Dimmed: GitHub Dark Dimmed, from Primer's primitives (dark-dimmed). https://primer.style/primitives
      MIT licence, https://github.com/primer/primitives/blob/main/LICENSE
    Forest: Everforest (dark, medium), by sainnhe. https://github.com/sainnhe/everforest/blob/master/palette.md
-     MIT licence, https://github.com/sainnhe/everforest/blob/master/LICENSE */
+     MIT licence, https://github.com/sainnhe/everforest/blob/master/LICENSE
+   Rose: Rosé Pine Dawn, by mvllow and the Rosé Pine team. https://rosepinetheme.com/palette
+     MIT licence, https://github.com/rose-pine/palette/blob/main/LICENSE
+   Neon: SynthWave '84, by Robb Owen. https://github.com/robb0wen/synthwave-vscode
+     MIT licence, https://github.com/robb0wen/synthwave-vscode/blob/master/LICENSE */
 
 /* ---------- Paper: Flexoki light, warm paper and ink ---------- */
 :root[data-theme="paper"] {
@@ -131,6 +135,64 @@
 }
 :root[data-theme="forest"] .pmap { --pm-faint: #A0AAA1; --pm-node: #859289; --pm-line: #56635F; }  /* grey2+, grey1, bg5 */
 
+/* ---------- Rose: Rosé Pine Dawn, pale pink paper ---------- */
+:root[data-theme="rose"] {
+  --bg: #FAF4ED;                 /* base */
+  --side: #F8EDE6;               /* base, a little rose */
+  --surface: #F2E9E1;            /* overlay */
+  --hover: #F0E1D9;              /* overlay, a little rose */
+  --sel: #EED9D1;                /* overlay, more rose */
+  --text: #464261;               /* text */
+  --text-2: #605C7A;             /* subtle to text: subtle is 3.2:1 on the rose selection */
+  --hairline: #E8DCD6;
+  --input-line: #847F94;         /* muted, darker */
+  --track: #DFDAD9;              /* highlight med */
+  --quote: #CECACD;              /* highlight high */
+  --accent: #874A5C;             /* love, darker: love is 3.8:1 on base */
+  --on-accent: #FAF4ED;
+  --alive: #286983;              /* pine */
+  --warn: #754E1A;               /* gold, darker */
+  --danger: #9C2F4B;             /* love, redder and darker */
+  --on-danger: #FAF4ED;
+  --toast-bg: #232136; --toast-fg: #E0DEF4; --toast-link: #EB6F92;    /* Rosé Pine Moon's base, text and love */
+  --scrim: rgba(25, 23, 36, .32);
+  --mark: #F0D4CE;               /* rose over base */
+  --now: #EDD4CD; --hl: rgba(180, 99, 122, .18);
+  --tour-scrim: rgba(25, 23, 36, .56); --tour-card: var(--bg);
+  --bd-title: #785269;           /* the accent greyed with subtle */
+  color-scheme: light;
+}
+:root[data-theme="rose"] .pmap { --pm-faint: #605C7A; --pm-node: #847F94; --pm-line: #CECACD; }   /* subtle+, muted-, highlight high */
+
+/* ---------- Neon: SynthWave '84, neon on night purple ---------- */
+:root[data-theme="neon"] {
+  --bg: #262335;                 /* editor */
+  --side: #241B2F;               /* side bar */
+  --surface: #2A2139;            /* input */
+  --hover: #34294A;
+  --sel: #37294D;                /* list hover */
+  --text: #F4EEFF;               /* foreground, a touch of lavender */
+  --text-2: #A6ABCF;             /* comment, lighter: the comment grey is 4.0:1 on the selection */
+  --hairline: #3B3052;
+  --input-line: #7B81AF;
+  --track: #463A5E;
+  --quote: #4F4468;
+  --accent: #FF7EDB;             /* pink */
+  --on-accent: #262335;
+  --alive: #72F1B8;              /* green */
+  --warn: #FEDE5D;               /* yellow */
+  --danger: #FE737C;             /* red, lighter: red is 4.5:1 on the page only just */
+  --on-danger: #262335;
+  --toast-bg: #171520; --toast-fg: #FFFFFF; --toast-link: #36F9F6;    /* activity bar, white, cyan */
+  --scrim: rgba(10, 8, 16, .6);
+  --mark: #472B57;               /* pink, dark */
+  --now: #3B2E55; --hl: rgba(255, 126, 219, .24);
+  --tour-scrim: rgba(10, 8, 16, .72); --tour-card: var(--surface);
+  --bd-title: #C884CE;           /* the pink greyed with the comment grey */
+  color-scheme: dark;
+}
+:root[data-theme="neon"] .pmap { --pm-faint: #9DA2CA; --pm-node: #848BBD; --pm-line: #544A74; }  /* comment+, comment */
+
 /* ---------- the swatches in Settings: the theme's page, its list pane and its accent ---------- */
 #acct-theme button { display: inline-flex; align-items: center; padding-left: 12px; }
 .sw {
@@ -146,3 +208,5 @@
 .sw[data-sw="latte"] { --sw-bg: #EFF1F5; --sw-side: #DCE0E8; --sw-ac: #AA4307; --sw-line: #ACB0BE; }
 .sw[data-sw="dimmed"] { --sw-bg: #212830; --sw-side: #2A313C; --sw-ac: #F69D50; --sw-line: #545D68; }
 .sw[data-sw="forest"] { --sw-bg: #2D353B; --sw-side: #343F44; --sw-ac: #E69875; --sw-line: #56635F; }
+.sw[data-sw="rose"] { --sw-bg: #FAF4ED; --sw-side: #EED9D1; --sw-ac: #874A5C; --sw-line: #CECACD; }
+.sw[data-sw="neon"] { --sw-bg: #262335; --sw-side: #241B2F; --sw-ac: #FF7EDB; --sw-line: #544A74; }

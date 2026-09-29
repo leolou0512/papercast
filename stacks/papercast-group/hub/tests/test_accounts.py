@@ -1289,10 +1289,11 @@ class PasswordPagesTest(unittest.TestCase):
         self.assertIsNone(self.js("localStorage.getItem('pcg-theme')"))
         # every theme, each with its swatch; each one's page colour, family and color-scheme
         self.assertEqual(self.js("[...document.querySelectorAll('#acct-theme [role=radio]')].map(b => b.dataset.v)"),
-                         ["system", "light", "paper", "latte", "dark", "dimmed", "forest"])
+                         ["system", "light", "paper", "latte", "rose", "dark", "dimmed", "forest", "neon"])
         self.assertTrue(self.js("[...document.querySelectorAll('#acct-theme [role=radio]')].every(b => (s => !!s && s.getBoundingClientRect().width > 0 && s.dataset.sw === b.dataset.v)(b.querySelector('.sw[aria-hidden=true]')))"))
         for v, bg, scheme in (("paper", "rgb(255, 252, 240)", "light"), ("latte", "rgb(239, 241, 245)", "light"),
-                              ("dimmed", "rgb(33, 40, 48)", "dark"), ("forest", "rgb(45, 53, 59)", "dark"), ("dark", "rgb(14, 14, 14)", "dark")):
+                              ("rose", "rgb(250, 244, 237)", "light"), ("dimmed", "rgb(33, 40, 48)", "dark"), ("forest", "rgb(45, 53, 59)", "dark"),
+                              ("neon", "rgb(38, 35, 53)", "dark"), ("dark", "rgb(14, 14, 14)", "dark")):
             self.js(f"document.querySelector('#acct-theme [data-v={v}]').click()")
             self.assertEqual(self.js("[document.documentElement.dataset.theme, document.documentElement.dataset.scheme, localStorage.getItem('pcg-theme')]"), [v, scheme, v])
             self.assertEqual(self.js("document.querySelector('#acct-theme [aria-checked=true]').dataset.v"), v)
@@ -1304,11 +1305,14 @@ class PasswordPagesTest(unittest.TestCase):
         self.b.goto(self.base + "/#settings=account")
         self.wait("!!document.getElementById('acct-theme')", "the account tab again")
         self.assertEqual(self.js("[document.documentElement.dataset.theme, document.querySelector('#acct-theme [aria-checked=true]').dataset.v]"), ["forest", "forest"])
-        self.js("localStorage.setItem('pcg-theme', 'neon')")
+        self.js("localStorage.setItem('pcg-theme', 'plaid')")
         self.b.goto("about:blank")
         self.b.goto(self.base + "/#settings=account")
         self.wait("!!document.getElementById('acct-theme')", "the account tab, an unknown theme")
         self.assertEqual(self.js("[document.documentElement.getAttribute('data-theme'), document.querySelector('#acct-theme [aria-checked=true]').dataset.v]"), [None, "system"])
+        # the sign-in page's button: each theme to its counterpart in the other family
+        pairs = self.js("pcgTheme.themes.map(t => { pcgTheme.set(t.v); pcgTheme.toggle(); const o = pcgTheme.current(); pcgTheme.set(''); return [t.v, o]; })")
+        self.assertEqual(dict(pairs), {"light": "dark", "dark": "light", "paper": "forest", "forest": "paper", "latte": "dimmed", "dimmed": "latte", "rose": "neon", "neon": "rose"})
 
     def test_9_the_size_in_account_settings(self):
         """The whole page at 125% by default (CSS zoom, as if the browser were zoomed), 100% and 150%

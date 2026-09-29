@@ -44,8 +44,8 @@ class TestThemeContrast(unittest.TestCase):
         code, out = run(STATIC)
         self.assertEqual(code, 0, out)
         got = tc.themes(STATIC)
-        self.assertEqual(sorted(got), ["dark", "dimmed", "forest", "latte", "light", "paper"])
-        for t in ("paper", "latte", "dimmed", "forest"):
+        self.assertEqual(sorted(got), ["dark", "dimmed", "forest", "latte", "light", "neon", "paper", "rose"])
+        for t in ("paper", "latte", "rose", "dimmed", "forest", "neon"):
             self.assertRegex(out, rf"(?m)^{t}: \d+ pairs, 0 under AA$")
 
     def test_a_token_left_out_fails(self):

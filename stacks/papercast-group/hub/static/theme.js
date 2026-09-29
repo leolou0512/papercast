@@ -1,8 +1,9 @@
 // papercast-group: how the site looks in this browser, applied in <head> (loaded without defer)
 // so a page is drawn that way from the first paint.
-// - The theme, "pcg-theme": light | dark | paper | latte | dimmed | forest (the last four in
-//   themes.css); none: the system's light or dark. :root[data-theme] carries it and
-//   :root[data-scheme] its family, light or dark (the sign-in page's logo and its sun or moon).
+// - The theme, "pcg-theme": light | dark | paper | latte | rose | dimmed | forest | neon (all
+//   but the first two in themes.css); none: the system's light or dark. :root[data-theme]
+//   carries it and :root[data-scheme] its family, light or dark (the sign-in page's logo and its
+//   sun or moon).
 //   A change fires "pcg-theme" on document with the family (the map redraws its colours on it).
 // - The size, "pcg-size": 100 | 125 | 150 (per cent); none: 125 on a computer or tablet, 100 on
 //   a phone. CSS zoom on :root, as if the browser were zoomed, in browsers with standard CSS zoom
@@ -20,9 +21,11 @@
     light: { label: "Light", dark: false, other: "dark" },
     paper: { label: "Paper", dark: false, other: "forest" },
     latte: { label: "Latte", dark: false, other: "dimmed" },
+    rose: { label: "Rose", dark: false, other: "neon" },
     dark: { label: "Dark", dark: true, other: "light" },
     dimmed: { label: "Dimmed", dark: true, other: "latte" },
     forest: { label: "Forest", dark: true, other: "paper" },
+    neon: { label: "Neon", dark: true, other: "rose" },
   };
   var SIZES = [100, 125, 150];
   var CAN_ZOOM = "currentCSSZoom" in root;

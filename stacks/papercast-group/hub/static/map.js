@@ -995,7 +995,7 @@
       g.revEp = (g.revEp || 0) + 1;              // the edits made before this answer came go as they were made
       reload(g).then(function (ok) {
         loadList(); loadLog(true);
-        var who = b.actor !== "human" ? (b.actor === "agent" ? "An upload just changed" : "This graph just changed") :
+        var who = b.actor !== "human" ? (b.actor === "agent" ? "The agent just changed" : "This graph just changed") :
           isMe(b.by) ? "An edit of yours just changed" : (nameOf(b.by) || "Someone") + " just changed";
         say(who + " this graph; " + (ok ? "it’s up to date now. Try again." : "it could not be loaded again: " + (g.loadErr || "the hub did not answer") + "."));
       });

@@ -385,7 +385,7 @@ class TestAgentLinks(Base):
         self.assertEqual(len(rows), 4)
         self.assertTrue(all(r["actor"] == "agent" and r["user_id"] == h.alice for r in rows))
         e = h.ok("GET", "/api/graph-log")["log"][0]
-        self.assertTrue(e["summary"].startswith("the agent (Alice’s upload) linked"), e["summary"])
+        self.assertTrue(e["summary"].startswith("the agent for Alice linked"), e["summary"])
         # an agent's links are not the uploader's own edits
         self.assertIsNone(h.ok("GET", "/api/graph-log")["undo"]["mine"])
         # the pending one resolves when that paper's own upload comes in (the SPEC's call form)

@@ -795,6 +795,32 @@ class Retrying(unittest.TestCase):
         self.assertTrue(all(x < y for x, y in zip(a, b)))
         self.assertLessEqual(max(b), plinks.BACKOFF_CAP_S)
 
+    def test_s2_citation_pages_stop_at_its_window_and_keep_what_came(self):
+        import tempfile, urllib.parse as up
+        from papercast_cli.pipeline import links as plinks
+        asked = []
+
+        def fetch(url):
+            q = dict(up.parse_qsl(up.urlsplit(url).query))
+            off, lim = int(q["offset"]), int(q["limit"])
+            asked.append((off, lim))
+            if off + lim >= plinks.S2_WINDOW:
+                return 400, {"error": "offset + limit must be < 10000"}
+            nxt = off + lim if off + lim < 9_500 else None
+            return 200, {"data": [{"citingPaper": {"paperId": f"p{off + k}"}} for k in range(lim)], "next": nxt}
+
+        s2 = plinks.S2(fetch, tempfile.mkdtemp(prefix="pcg-s2-"))
+        got = s2.edges("X", "citations")
+        self.assertEqual(asked[-1], (9000, 999))            # the last page shrinks to fit the window
+        self.assertEqual(len(got), 9999)
+        # a page refused after the first keeps the pages already fetched
+        def flaky(url):
+            off = int(dict(up.parse_qsl(up.urlsplit(url).query))["offset"])
+            return (200, {"data": [{"citingPaper": {"paperId": "a"}}], "next": 1}) if off == 0 else (500, None)
+        self.assertEqual(len(plinks.S2(flaky, tempfile.mkdtemp(prefix="pcg-s2-")).edges("Y", "citations")), 1)
+        with self.assertRaises(OSError):                     # nothing at all: still an error
+            plinks.S2(lambda url: (500, None), tempfile.mkdtemp(prefix="pcg-s2-")).edges("Z", "references")
+
     def test_gives_up_and_says_so(self):
         from papercast_cli.pipeline import links as plinks
         fetch, seen = self.fetcher([(429, None)])

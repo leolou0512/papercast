@@ -941,7 +941,7 @@ def _entries(c, rows, w: _World | None = None) -> list:
         user = {"id": uid, "name": w.users.get(uid)} if uid is not None else None
         name = (user or {}).get("name") or "someone"
         text = _describe(w, gnames, r["op"], r["target"], before, after)
-        who = f"the agent ({name}’s upload)" if r["actor"] == "agent" else name
+        who = f"the agent for {name}" if r["actor"] == "agent" else name
         summary = f"{who} {text}" + {"change": "", "undo": " (undo)", "redo": " (redo)"}[kind]
         out.append({"id": r["id"], "at": r["at"], "user": user, "actor": r["actor"], "op": r["op"],
                     "target": r["target"], "before": before, "after": after, "revert_of": r["revert_of"],

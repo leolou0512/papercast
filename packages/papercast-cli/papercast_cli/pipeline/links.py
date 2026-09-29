@@ -48,6 +48,7 @@ REF_FIELDS = "isInfluential,paperId,title,year,externalIds"
 USER_AGENT = "papercast-group/0.1 (research group podcast library)"
 MAX_BODY = 32 << 20
 MAX_PAGES = 10                 # 10 x 1000 references or citations: more than any library holds
+S2_WINDOW = 10_000             # S2's graph API serves offset + limit below this, no further
 GRADER_MODEL = "claude-haiku-4-5"
 BATCH = 50
 TRIES = 3                      # grading attempts per batch (judge2.py)
@@ -198,10 +199,20 @@ class S2:
 
     def edges(self, pid: str, kind: str) -> list[dict]:
         """References ("references": [{isInfluential, citedPaper}]) or citations ("citations":
-        [{isInfluential, citingPaper}]) of one paper, every page."""
+        [{isInfluential, citingPaper}]) of one paper, every page S2 serves: offset + limit stays
+        under S2_WINDOW (S2 refuses past it, e.g. for a paper with 9,000+ citations), and a page
+        refused after the first keeps the pages already fetched."""
         out, off = [], 0
         for _ in range(MAX_PAGES):
-            j = self.get(f"/paper/{pid}/{kind}", {"fields": REF_FIELDS, "limit": 1000, "offset": off})
+            limit = min(1000, S2_WINDOW - 1 - off)
+            if limit <= 0:
+                break
+            try:
+                j = self.get(f"/paper/{pid}/{kind}", {"fields": REF_FIELDS, "limit": limit, "offset": off})
+            except OSError:
+                if out:
+                    break
+                raise
             if not isinstance(j, dict):
                 break
             out += [x for x in (j.get("data") or []) if isinstance(x, dict)]

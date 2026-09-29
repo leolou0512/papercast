@@ -23,6 +23,11 @@
   };
   const SPEEDS = [1, 1.25, 1.5, 1.75, 2, 0.75];
   const phone = () => window.matchMedia("(max-width: 720px)").matches;
+  // The page's zoom (theme.js's size): getBoundingClientRect, clientX and innerWidth are in the
+  // screen's px, style, scrollTop and offsetWidth in the page's CSS px, the screen's / zoom.
+  const zoom = () => document.documentElement.currentCSSZoom || 1;
+  const box = (e) => { const r = e.getBoundingClientRect(), z = zoom();
+    return { left: r.left / z, top: r.top / z, right: r.right / z, bottom: r.bottom / z, width: r.width / z, height: r.height / z }; };
   const isAdmin = () => S.me && S.me.role === "admin";
   const store = {
     get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
@@ -778,7 +783,7 @@
     });
     inner.addEventListener("pointermove", (e) => {
       if (x0 === null || e.pointerId !== pid) return;
-      const mx = e.clientX - x0, my = e.clientY - y0;
+      const mx = (e.clientX - x0) / zoom(), my = (e.clientY - y0) / zoom();
       if (!mode) {
         if (Math.abs(mx) > 8 && Math.abs(mx) > Math.abs(my)) {
           mode = "h";
@@ -1563,14 +1568,14 @@
     Q.dragging = true;
     li.classList.add("drag");
     const from = [...list.children].indexOf(li);
-    let y0 = ev.clientY;
+    let y0 = ev.clientY / zoom();
     // Past half of a neighbour, the row takes its place; it follows the pointer in between.
     const move = (e) => {
       if (e.pointerId !== ev.pointerId) return;
-      const prev = li.previousElementSibling, next = li.nextElementSibling, dy = e.clientY - y0;
+      const y = e.clientY / zoom(), prev = li.previousElementSibling, next = li.nextElementSibling, dy = y - y0;
       if (next && dy > next.offsetHeight / 2) { list.insertBefore(next, li); y0 += next.offsetHeight; }
       else if (prev && dy < -prev.offsetHeight / 2) { list.insertBefore(li, prev); y0 -= prev.offsetHeight; }
-      li.style.transform = `translateY(${e.clientY - y0}px)`;
+      li.style.transform = `translateY(${y - y0}px)`;
     };
     const done = (e) => {
       if (e.pointerId !== ev.pointerId) return;
@@ -1718,26 +1723,26 @@
   }
   // The part of it a sentence is seen in: under the phone's top bar, which stays.
   function trView() {
-    const r = trScroller().getBoundingClientRect(), pt = document.querySelector("#paper > .phone-top");
-    const top = pt && pt.getClientRects().length && getComputedStyle(pt).position === "sticky" ? Math.max(r.top, pt.getBoundingClientRect().bottom) : r.top;
+    const r = box(trScroller()), pt = document.querySelector("#paper > .phone-top");
+    const top = pt && pt.getClientRects().length && getComputedStyle(pt).position === "sticky" ? Math.max(r.top, box(pt).bottom) : r.top;
     return { top, bottom: r.bottom, h: Math.max(1, r.bottom - top) };
   }
   function curVisible() {
     const els = curEls();
     if (!els.length || !trShown()) return false;
-    const v = trView(), a = els[0].getBoundingClientRect(), b = els[els.length - 1].getBoundingClientRect();
+    const v = trView(), a = box(els[0]), b = box(els[els.length - 1]);
     return b.bottom > v.top + 8 && a.top < v.bottom - 8;
   }
   const motion = () => (window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth");
   function scrollWinTo(node, at) {
-    const w = trScroller(), v = trView(), r = node.getBoundingClientRect();
+    const w = trScroller(), v = trView(), r = box(node);
     T.autoUntil = Date.now() + 1000;        // this scroll is the page's own, not the person's
     w.scrollTo({ top: Math.max(0, w.scrollTop + r.top - (v.top + v.h * at)), behavior: motion() });
   }
   function keepInView(force) {
     const els = curEls();
     if (!els.length || !trShown()) return;
-    const v = trView(), r = els[0].getBoundingClientRect();
+    const v = trView(), r = box(els[0]);
     if (!force && r.top >= v.top + v.h * 0.22 && r.top <= v.top + v.h * 0.42 && r.bottom <= v.bottom - 8) return;
     scrollWinTo(els[0], 0.32);
   }
@@ -1783,7 +1788,7 @@
     if (!n) return;
     if (keep) { goHit(Math.max(0, Math.min(n - 1, was)), true); return; }
     // the first match at or under the top of what is on screen
-    const top = trView().top, i = T.hits.findIndex((mk) => mk.getBoundingClientRect().bottom > top);
+    const top = trView().top, i = T.hits.findIndex((mk) => box(mk).bottom > top);
     goHit(i < 0 ? 0 : i, !go);
   }
   function goHit(i, quiet) {
@@ -1795,7 +1800,7 @@
     T.hits[i].classList.add("on");
     $("tr-count").textContent = `${i + 1} of ${n}`;
     if (quiet) return;
-    const v = trView(), r = T.hits[i].getBoundingClientRect();
+    const v = trView(), r = box(T.hits[i]);
     if (r.top < v.top + 8 || r.bottom > v.bottom - 64) { T.follow = false; scrollWinTo(T.hits[i], 0.35); }
     trNowBtn();
   }
@@ -1923,10 +1928,10 @@
     anchor.setAttribute("aria-expanded", "true");
     const node = el("div", { class: "menu", role: "menu" }, items);
     document.body.append(node);
-    const r = anchor.getBoundingClientRect(), mw = node.offsetWidth, mh = node.offsetHeight;
-    const top = r.bottom + 4 + mh > window.innerHeight - 8 ? Math.max(8, r.top - 4 - mh) : r.bottom + 4;
+    const r = box(anchor), mw = node.offsetWidth, mh = node.offsetHeight, vw = window.innerWidth / zoom(), vh = window.innerHeight / zoom();
+    const top = r.bottom + 4 + mh > vh - 8 ? Math.max(8, r.top - 4 - mh) : r.bottom + 4;
     node.style.top = `${top}px`;
-    node.style.left = `${Math.max(8, Math.min(window.innerWidth - mw - 8, r.right - mw))}px`;
+    node.style.left = `${Math.max(8, Math.min(vw - mw - 8, r.right - mw))}px`;
     S.menu = { node, anchor, for: key };
     const first = node.querySelector("button, a");
     if (first) first.focus({ preventScroll: true });
@@ -2204,7 +2209,6 @@
     const pwMsg = el("p", { class: "err", id: "acct-pw-msg", role: "status" });
     const pwSave = el("button", { type: "submit", class: "btn-accent", id: "acct-pw-save", text: "Change password" });
     const form = el("form", { id: "acct-pw", novalidate: true }, user, curL, cur, newL, nw,
-      el("p", { class: "muted", text: "At least 10 characters, and not your username. Every other browser signed in as you is signed out." }),
       el("div", { class: "save-row" }, pwSave), pwMsg);
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
@@ -2230,25 +2234,35 @@
       all.disabled = true;
       try { await api("POST", "/api/auth/signout-all"); location.replace("/signin"); } catch (e) { all.disabled = false; toast(e.message); }
     });
-    // light or dark in this browser (theme.js); System follows the computer's setting
-    const look = el("div", { class: "seg", id: "acct-theme", role: "radiogroup", "aria-label": "Appearance" });
+    // the theme and the size in this browser (theme.js; the themes' colours in themes.css); System
+    // follows the computer's light or dark
+    const PT = window.pcgTheme;
+    const look = el("div", { class: "seg", id: "acct-theme", role: "radiogroup", "aria-label": "Theme" });
     const drawLook = () => {
-      const now = window.pcgTheme ? window.pcgTheme.saved() : "";
-      look.replaceChildren(...[["", "System"], ["light", "Light"], ["dark", "Dark"]].map(([v, t]) => el("button", {
+      const now = PT ? PT.saved() : "";
+      const all = [{ v: "", label: "System" }].concat(PT ? PT.themes : [{ v: "light", label: "Light" }, { v: "dark", label: "Dark" }]);
+      look.replaceChildren(...all.map(({ v, label }) => el("button", {
         type: "button", role: "radio", "aria-checked": String(now === v), "data-v": v || "system",
-        onclick: () => { if (window.pcgTheme) window.pcgTheme.set(v); drawLook(); },
-      }, t)));
+        onclick: () => { if (PT) PT.set(v); drawLook(); },
+      }, el("span", { class: "sw", "data-sw": v || "system", "aria-hidden": "true" }), label)));
     };
     drawLook();
+    const sizeSeg = el("div", { class: "seg", id: "acct-size", role: "radiogroup", "aria-label": "Size" });
+    const drawSize = () => {
+      const now = PT ? PT.size() : 100;
+      sizeSeg.replaceChildren(...(PT ? PT.sizes : [100]).map((v) => el("button", {
+        type: "button", role: "radio", "aria-checked": String(now === v), "data-v": String(v),
+        onclick: () => { if (PT) PT.setSize(v); drawSize(); },
+      }, `${v}%`)));
+    };
+    drawSize();
     body.replaceChildren(
-      el("p", { class: "intro", text: "Your name as the group sees it, your password, how the site looks, and where you are signed in." }),
       el("p", { class: "pref-h", text: "Name" }), el("div", { class: "invite first" }, name, nameSave), nameMsg,
       ...pictureSection(),
       el("p", { class: "pref-h sec", text: "Appearance" }), look,
-      el("p", { class: "muted", text: "Light or dark in this browser. System follows your computer's setting." }),
+      el("p", { class: "pref-h sec", text: "Size" }), sizeSeg,
       el("p", { class: "pref-h sec", text: "Change password" }), form,
       el("p", { class: "pref-h sec", text: "Sign out" }),
-      el("p", { class: "muted", text: "Sign out everywhere ends every browser session of yours, this one too. papercast on your computers stays logged in: remove those under Devices." }),
       el("div", { class: "save-row" }, out, all));
   }
 
@@ -2561,7 +2575,7 @@
   // the hub records it again in the fair queue, this version plays on meanwhile, and when the
   // new audio lands this page moves to it at the same sentence. The audio's revision is in its
   // URL (?v=), so no browser plays a cached old one. Samples come from tools/make_voice_samples.py.
-  S.voices = null; S.vpick = null;
+  S.voices = null; S.vpick = null; S.vtab = null;
   const makesVersions = () => !!S.me && (S.me.role === "contributor" || S.me.role === "admin");
   function audioUrl(e) {
     const r = e && e.voice && e.voice.rev;
@@ -2612,12 +2626,12 @@
       b.innerHTML = playing ? I.pause(16) : I.play(16);
     }
   }
-  // The presets as radio rows, each with its sample (the Versions list's look).
+  // The voices as radio rows, each with its sample (the Versions list's look).
   function voiceRows(list, sel, pick) {
     return list.map((x) => el("div", { class: "vrow", "data-voice": x.id },
       el("button", { type: "button", class: "ver", role: "radio", "aria-checked": String(x.id === sel), onclick: () => pick(x.id) },
         el("span", { class: "mark", "aria-hidden": "true" }),
-        el("span", { class: "v-main" }, el("span", { class: "v-who", text: x.name }), x.about ? el("span", { class: "v-sum", text: x.about }) : null)),
+        el("span", { class: "v-main" }, el("span", { class: "v-who", text: x.name }))),
       x.sample
         ? el("button", { type: "button", class: "icon-btn vplay", "data-sample": x.id, "aria-pressed": "false", "aria-label": `Play the sample of ${x.name}`,
           html: I.play(16), onclick: () => playSample(x) })
@@ -2649,17 +2663,19 @@
     if (!S.vpick || S.vpick.eid !== c.id || pd || !v.can_change) { box.hidden = true; box.dataset.sig = ""; return; }
     voicesList().then((j) => {
       if (!S.vpick || S.vpick.eid !== c.id) return;
-      const bsig = JSON.stringify([c.id, S.vpick.id, v.id]);
+      const bsig = JSON.stringify([c.id, S.vpick.id, v.id, v.custom || null, !!v.custom_old]);
       box.hidden = false;
       if (box.dataset.sig === bsig) return;
       box.dataset.sig = bsig;
-      const to = j.voices.find((x) => x.id === S.vpick.id);
-      const go = el("button", { type: "button", class: "btn-accent", id: "voice-go", disabled: !to || S.vpick.id === v.id,
-        text: to && S.vpick.id !== v.id ? `Record it in ${to.name}` : "Pick a voice", onclick: () => askChange(c.id, S.vpick.id) });
+      // the presets, then its maker's custom voice (in an older version of it: recorded again)
+      const rows = j.voices.concat(v.custom ? [v.custom] : []);
+      const to = rows.find((x) => x.id === S.vpick.id);
+      const same = S.vpick.id === v.id && !(v.id === "custom" && v.custom_old);
+      const go = el("button", { type: "button", class: "btn-accent", id: "voice-go", disabled: !to || same,
+        text: to && !same ? `Record it in ${to.name}` : "Pick a voice", onclick: () => askChange(c.id, S.vpick.id) });
       box.replaceChildren(el("div", { class: "col" }, el("h3", { class: "sec-h", text: "Voice" }),
         el("div", { class: "vlist", role: "radiogroup", "aria-label": "Voice for this version" },
-          voiceRows(j.voices, S.vpick.id, (id) => { S.vpick.id = id; renderWin(); })),
-        el("p", { class: "vnote", text: "It is recorded again in that voice, in the same queue as new versions. This one plays until the new one is ready." }),
+          voiceRows(rows, S.vpick.id, (id) => { S.vpick.id = id; renderWin(); })),
         el("div", { class: "save-row" }, go, el("button", { type: "button", class: "text-btn", id: "voice-close", text: "Cancel", onclick: () => { S.vpick = null; stopSample(); renderWin(); } }))));
       drawSampleButtons();
     }).catch((e) => toast(e.message));
@@ -2708,15 +2724,19 @@
     if (d.kind === "episode" && d.data && d.data.voice_swap) voiceSwapped(d.data);
   });
 
-  // Settings, Voice: my voice for new versions, and every voice's sample.
+  // Settings, Voice: my voice for new versions (the presets, and my custom voice once I have
+  // one), every voice's sample, and Custom: a description in Breeze's words, previewed through
+  // the voice queue (customvoice.py; the page follows it live), then used.
+  const PREVIEW_STATE = { queued: "Waiting", working: "Making…", done: "Ready", failed: "Didn’t work: try other words" };
   async function voiceTab(body) {
     stopSample();
+    S.voices = null;                    // the custom voice and its preview change: read them afresh
     let j;
     try { j = await voicesList(); } catch (e) { if (stillOn("voice")) failed(body, e); return; }
     if (!stillOn("voice")) return;
     const msg = el("span", { class: "ok", id: "voice-msg", role: "status" });
     const list = el("div", { class: "vlist", id: "voice-list", role: "radiogroup", "aria-label": "My voice" });
-    const draw = () => { list.replaceChildren(...voiceRows(j.voices, j.mine, pick)); drawSampleButtons(); };
+    const draw = () => { list.replaceChildren(...voiceRows(j.voices.concat(j.custom ? [j.custom] : []), j.mine, pick)); drawSampleButtons(); };
     const pick = async (id) => {
       if (id === j.mine) return;
       const was = j.mine;
@@ -2727,12 +2747,82 @@
         j.mine = r.mine; msg.textContent = "Saved";
       } catch (e) { j.mine = was; draw(); msg.className = "err"; msg.textContent = e.message; }
     };
+    const custom = customVoice(j, draw, msg);
+    S.vtab = (d) => {                   // a live `voice` event (mine only), or a resync
+      if (!stillOn("voice")) return;
+      if (d === null) { api("GET", "/api/voices").then((x) => { Object.assign(j, x); draw(); custom.draw(); }).catch(() => {}); return; }
+      if ("preview" in d) j.preview = d.preview;
+      if (d.custom) j.custom = d.custom;
+      if (d.mine) j.mine = d.mine;
+      draw(); custom.draw();
+    };
     draw();
     body.replaceChildren(
-      el("p", { class: "intro", text: "The voice your new versions are recorded in. A version you made can be recorded again in another voice from its page." }),
       el("div", { class: "pref" }, el("p", { class: "pref-h", text: "My voice" }), list),
+      custom.el,
       el("div", { class: "save-row" }, msg));
   }
+  function customVoice(j, drawList, msg) {
+    const max = j.custom_max || 500;
+    const text = el("textarea", { class: "field note", id: "vc-text", maxlength: String(max), rows: "3",
+      placeholder: j.custom_example || "", "aria-label": "Custom voice" });
+    text.value = (j.preview && j.preview.description) || (j.custom && j.custom.description) || "";
+    const count = el("div", { class: "counter t", id: "vc-count" });
+    const prev = el("button", { type: "button", class: "btn-accent", id: "vc-preview", text: "Preview" });
+    const again = el("button", { type: "button", class: "text-btn", id: "vc-again", text: "Another take" });
+    const use = el("button", { type: "button", class: "text-btn", id: "vc-use", text: "Use this voice" });
+    const state = el("span", { class: "vc-state", id: "vc-state", role: "status" });
+    const play = el("button", { type: "button", class: "icon-btn vplay", id: "vc-play", "data-sample": "preview", "aria-pressed": "false",
+      "aria-label": "Play the preview", html: I.play(16) });
+    let asking = false;
+    const draw = () => {
+      const pv = j.preview, said = text.value.replace(/\s+/g, " ").trim();
+      const same = !!pv && pv.description === said, st = pv ? pv.state : null;
+      const inUse = same && st === "done" && j.mine === "custom" && !!j.custom && j.custom.key === pv.key;
+      count.textContent = `${text.value.length} / ${max}`;
+      prev.disabled = asking || !said || st === "working" || (same && (st === "queued" || st === "done"));
+      again.hidden = !(same && (st === "done" || st === "failed"));
+      again.disabled = asking;
+      use.hidden = !(same && st === "done");
+      use.disabled = asking || inUse;
+      use.textContent = inUse ? "In use" : "Use this voice";
+      const show = !!pv && (same || st === "queued" || st === "working");
+      state.textContent = show ? PREVIEW_STATE[st] || "" : "";
+      state.className = `vc-state${show && st === "failed" ? " err" : ""}`;
+      play.hidden = !(same && st === "done" && pv.sample);
+      drawSampleButtons();
+    };
+    const ask = async (another) => {
+      asking = true; draw();
+      msg.className = "ok"; msg.textContent = "";
+      try { j.preview = (await api("POST", "/api/voices/custom/preview", { description: text.value, another })).preview; }
+      catch (e) { msg.className = "err"; msg.textContent = e.message; }
+      asking = false; draw();
+    };
+    prev.addEventListener("click", () => ask(false));
+    again.addEventListener("click", () => ask(true));
+    use.addEventListener("click", async () => {
+      asking = true; draw();
+      msg.className = "ok"; msg.textContent = "";
+      try {
+        const r = await api("PUT", "/api/voices/custom", { preview: j.preview.id });
+        j.mine = r.mine; j.custom = r.custom; msg.textContent = "Saved";
+        drawList();
+      } catch (e) { msg.className = "err"; msg.textContent = e.message; }
+      asking = false; draw();
+    });
+    play.addEventListener("click", () => { if (j.preview && j.preview.sample) playSample({ id: "preview", sample: j.preview.sample }); });
+    text.addEventListener("input", draw);
+    draw();
+    return { draw, el: el("div", { class: "pref vcustom", id: "voice-custom" }, el("p", { class: "pref-h", text: "Custom" }), text, count,
+      el("div", { class: "save-row vc-row" }, prev, again, use, state, play)) };
+  }
+  window.addEventListener("papercast:event", (ev) => {
+    const d = ev.detail || {};
+    if (!S.vtab) return;
+    if (d.kind === "voice") S.vtab(d.data || {});
+    else if (d.kind === "resync") S.vtab(null);
+  });
 
   // Slack (admins): whether it is set up, where it posts, a test message, the last 20 posts.
   const SLACK_STATE = { posted: "posted", pending: "waiting", sending: "sending", retrying: "trying again", failed: "failed", skipped: "not posted" };
@@ -2796,6 +2886,7 @@
     on("episode", (d) => touched(d.paper_id || (d.paper && d.paper.id) || S.epPaper.get(d.episode_id || d.id)));
     on("graph", (d) => toMap("graph", d));
     on("log", (d) => toMap("log", d));
+    on("voice", () => {});               // my custom voice's preview (Settings, Voice): as papercast:event
     queueEvents(es);
     // profile pictures: avatar.js redraws each one on the page; a resync reads them all again
     on("avatar", avatarChanged);

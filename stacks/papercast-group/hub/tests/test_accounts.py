@@ -925,6 +925,7 @@ TAPS = r"""(() => {
     let fixed = false;
     for (let a = e; a; a = a.parentElement) if (['fixed', 'sticky'].includes(getComputedStyle(a).position)) { fixed = true; break; }
     if (!fixed) e.scrollIntoView({block: 'center', inline: 'nearest'});
+    else if (e.closest('.tabs')) e.scrollIntoView({block: 'nearest', inline: 'nearest'});    // Settings' tabs scroll sideways on a narrow phone
     const b = e.getBoundingClientRect();
     for (const [x, y] of [[b.left + 1, b.top + b.height / 2], [b.right - 1, b.top + b.height / 2], [b.left + b.width / 2, b.top + 1], [b.left + b.width / 2, b.bottom - 1]]) {
       if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) continue;
@@ -1009,6 +1010,7 @@ class PasswordPagesTest(unittest.TestCase):
         return self.js(f"(() => {{ const e = document.querySelector({json.dumps(sel)}); return !!e && !e.closest('[hidden]') && e.getClientRects().length > 0; }})()")
 
     def taps(self, where):
+        self.wait("(w => !w || !w.getAnimations().length)(document.getElementById('win'))", "the window at rest")
         bad = json.loads(self.js(TAPS))
         self.assertEqual(bad, [], f"phone, {where}: {len(bad)} tap target(s) too small or covered:\n" + "\n".join(bad))
 
@@ -1246,6 +1248,31 @@ class PasswordPagesTest(unittest.TestCase):
         self.assertTrue(c["value"].startswith("v2s."))
         self.js("pcgTheme.set('')")
         self.assertIsNone(self.js("localStorage.getItem('pcg-theme')"))
+        # a theme of the dark family (Dimmed): the logo's light letters and the sun; the button
+        # switches to its light counterpart (Latte), which draws the logo as it is and the moon
+        self.js("localStorage.setItem('pcg-theme', 'dimmed')")
+        self.b.call("Network.clearBrowserCookies")          # signed out: the sign-in page again
+        self.b.goto(self.base + "/signin")
+        self.wait("location.pathname === '/signin' && !document.getElementById('signin').hidden", "the form in Dimmed")
+        self.assertEqual(self.js("[document.documentElement.dataset.theme, document.documentElement.dataset.scheme]"), ["dimmed", "dark"])
+        self.assertEqual(self.js("getComputedStyle(document.body).backgroundColor"), "rgb(33, 40, 48)")
+        self.assertIn("invert", self.js("getComputedStyle(document.querySelector('.brand')).filter"))
+        self.assertEqual(self.js("[getComputedStyle(document.querySelector('#theme .i-sun')).display, getComputedStyle(document.querySelector('#theme .i-moon')).display]"), ["block", "none"])
+        self.assertEqual(self.js("document.getElementById('theme').getAttribute('aria-label')"), "Light mode")
+        self.click("#theme")
+        self.assertEqual(self.js("[document.documentElement.dataset.theme, document.documentElement.dataset.scheme, localStorage.getItem('pcg-theme')]"), ["latte", "light", "latte"])
+        self.assertEqual(self.js("getComputedStyle(document.body).backgroundColor"), "rgb(239, 241, 245)")
+        self.assertEqual(self.js("getComputedStyle(document.querySelector('.brand')).filter"), "none")
+        self.assertEqual(self.js("[getComputedStyle(document.querySelector('#theme .i-sun')).display, getComputedStyle(document.querySelector('#theme .i-moon')).display]"), ["none", "block"])
+        self.assertEqual(self.js("document.getElementById('theme').getAttribute('aria-label')"), "Dark mode")
+        # a light theme stays light on a computer set to dark (the system's dark is for System only)
+        self.b.call("Emulation.setEmulatedMedia", features=[{"name": "prefers-color-scheme", "value": "dark"}])
+        self.addCleanup(lambda: self.b.call("Emulation.setEmulatedMedia", features=[]))
+        self.assertEqual(self.js("getComputedStyle(document.body).backgroundColor"), "rgb(239, 241, 245)")
+        self.assertEqual(self.js("getComputedStyle(document.querySelector('.brand')).filter"), "none")
+        self.js("pcgTheme.set('')")
+        self.assertEqual(self.js("[document.documentElement.dataset.scheme, getComputedStyle(document.body).backgroundColor]"), ["dark", "rgb(14, 14, 14)"])
+        self.assertIn("invert", self.js("getComputedStyle(document.querySelector('.brand')).filter"))
 
     def test_8_the_theme_in_account_settings(self):
         self.signed_in_as_leo("/#settings=account")
@@ -1260,6 +1287,104 @@ class PasswordPagesTest(unittest.TestCase):
         self.js("document.querySelector('#acct-theme [data-v=system]').click()")
         self.assertIsNone(self.js("document.documentElement.getAttribute('data-theme')"))
         self.assertIsNone(self.js("localStorage.getItem('pcg-theme')"))
+        # every theme, each with its swatch; each one's page colour, family and color-scheme
+        self.assertEqual(self.js("[...document.querySelectorAll('#acct-theme [role=radio]')].map(b => b.dataset.v)"),
+                         ["system", "light", "paper", "latte", "rose", "dark", "dimmed", "forest", "neon"])
+        self.assertTrue(self.js("[...document.querySelectorAll('#acct-theme [role=radio]')].every(b => (s => !!s && s.getBoundingClientRect().width > 0 && s.dataset.sw === b.dataset.v)(b.querySelector('.sw[aria-hidden=true]')))"))
+        for v, bg, scheme in (("paper", "rgb(255, 252, 240)", "light"), ("latte", "rgb(239, 241, 245)", "light"),
+                              ("rose", "rgb(250, 244, 237)", "light"), ("dimmed", "rgb(33, 40, 48)", "dark"), ("forest", "rgb(45, 53, 59)", "dark"),
+                              ("neon", "rgb(38, 35, 53)", "dark"), ("dark", "rgb(14, 14, 14)", "dark")):
+            self.js(f"document.querySelector('#acct-theme [data-v={v}]').click()")
+            self.assertEqual(self.js("[document.documentElement.dataset.theme, document.documentElement.dataset.scheme, localStorage.getItem('pcg-theme')]"), [v, scheme, v])
+            self.assertEqual(self.js("document.querySelector('#acct-theme [aria-checked=true]').dataset.v"), v)
+            self.assertEqual(self.js("getComputedStyle(document.getElementById('win')).backgroundColor"), bg, v)
+            self.assertEqual(self.js("getComputedStyle(document.documentElement).colorScheme"), scheme, v)
+        # kept after a reload; a value this page does not know is the system's
+        self.js("document.querySelector('#acct-theme [data-v=forest]').click()")
+        self.b.goto("about:blank")                         # a hash alone would not reload the page
+        self.b.goto(self.base + "/#settings=account")
+        self.wait("!!document.getElementById('acct-theme')", "the account tab again")
+        self.assertEqual(self.js("[document.documentElement.dataset.theme, document.querySelector('#acct-theme [aria-checked=true]').dataset.v]"), ["forest", "forest"])
+        self.js("localStorage.setItem('pcg-theme', 'plaid')")
+        self.b.goto("about:blank")
+        self.b.goto(self.base + "/#settings=account")
+        self.wait("!!document.getElementById('acct-theme')", "the account tab, an unknown theme")
+        self.assertEqual(self.js("[document.documentElement.getAttribute('data-theme'), document.querySelector('#acct-theme [aria-checked=true]').dataset.v]"), [None, "system"])
+        # the sign-in page's button: each theme to its counterpart in the other family
+        pairs = self.js("pcgTheme.themes.map(t => { pcgTheme.set(t.v); pcgTheme.toggle(); const o = pcgTheme.current(); pcgTheme.set(''); return [t.v, o]; })")
+        self.assertEqual(dict(pairs), {"light": "dark", "dark": "light", "paper": "forest", "forest": "paper", "latte": "dimmed", "dimmed": "latte", "rose": "neon", "neon": "rose"})
+
+    def test_9_the_size_in_account_settings(self):
+        """The whole page at 125% by default (CSS zoom, as if the browser were zoomed), 100% and 150%
+        in Settings, kept in this browser; the page fits the window at each size, and a window too
+        narrow for the two panes at that size gets less."""
+        b = self.b
+        b.pin_size(None)
+        self.addCleanup(b.repin_size)
+        self.addCleanup(lambda: self.js("localStorage.removeItem('pcg-size')"))
+        self.signed_in_as_leo("/#settings=account")
+        self.js("localStorage.removeItem('pcg-size')")
+        b.goto("about:blank")                               # a hash alone would not reload the page
+        b.goto(self.base + "/#settings=account")
+        self.wait("!!document.getElementById('acct-size')", "the account tab")
+        fits = """(() => { const a = document.querySelector('.app').getBoundingClientRect(), d = document.documentElement;
+            return [Math.round(a.width), Math.round(a.height), d.scrollWidth <= d.clientWidth, innerWidth, innerHeight]; })()"""
+        state = "[document.documentElement.currentCSSZoom, getComputedStyle(document.documentElement).getPropertyValue('--pcg-zoom').trim(), document.querySelector('#acct-size [aria-checked=true]').dataset.v, localStorage.getItem('pcg-size')]"
+        self.assertEqual(self.js("[...document.querySelectorAll('#acct-size [role=radio]')].map(b => b.textContent)"), ["100%", "125%", "150%"])
+        self.assertEqual(self.js(state), [1.25, "1.25", "125", None])
+        w, h, ok, iw, ih = self.js(fits)
+        self.assertEqual((w, h, ok), (iw, ih, True), "the page does not fit the window at 125%")
+        self.assertEqual(self.js("Math.round(document.getElementById('list-pane').getBoundingClientRect().width)"), 425)    # 340 CSS px
+        for v, z in (("150", 1.5), ("100", 1)):
+            self.js(f"document.querySelector('#acct-size [data-v=\"{v}\"]').click()")
+            self.assertEqual(self.js(state), [z, "" if z == 1 else str(z), v, v])
+            w, h, ok, iw, ih = self.js(fits)
+            self.assertEqual((w, h, ok), (iw, ih, True), f"the page does not fit the window at {v}%")
+        # kept after a reload, drawn at that size from the start
+        self.js("document.querySelector('#acct-size [data-v=\"150\"]').click()")
+        b.goto(self.base + "/")
+        self.wait("document.querySelectorAll('#rows .row').length >= 0 && !!document.querySelector('.app')", "the library")
+        self.assertEqual(self.js("[document.documentElement.currentCSSZoom, document.documentElement.style.zoom]"), [1.5, "1.5"])
+        # a window 800 px wide: the two panes keep their 721 CSS px, so 150% is 800 / 721
+        b.viewport(800, 860)
+        self.wait("document.documentElement.currentCSSZoom < 1.2", "the zoom capped")
+        self.assertAlmostEqual(self.js("document.documentElement.currentCSSZoom"), 1.109, places=3)
+        self.assertTrue(self.js("document.documentElement.scrollWidth <= document.documentElement.clientWidth"))
+        self.assertEqual(self.js("pcgTheme.size()"), 150)
+        b.viewport(1280, 860)
+        self.wait("document.documentElement.currentCSSZoom === 1.5", "150% again")
+
+    def test_9b_the_size_on_a_phone(self):
+        """A phone is 100% by default; a size chosen there fits its screen (340 CSS px at least):
+        nothing scrolls sideways, and the sign-in page's taps stay 44 px and uncovered."""
+        b = self.b
+        b.pin_size(None)
+        self.addCleanup(b.repin_size)
+        self.addCleanup(lambda: self.js("localStorage.removeItem('pcg-size')"))
+        b.viewport(390, 844, mobile=True)
+        side = "['documentElement', 'win', 'list-pane'].filter(k => (e => !!e && e.scrollWidth > e.clientWidth)(k === 'documentElement' ? document.documentElement : document.getElementById(k)))"
+        b.goto(self.base + "/signin")
+        self.wait("!document.getElementById('signin').hidden", "the form")
+        self.js("localStorage.setItem('pcg-size', '150')")
+        b.goto(self.base + "/signin")
+        self.wait("!document.getElementById('signin').hidden", "the form at 150%")
+        self.assertAlmostEqual(self.js("document.documentElement.currentCSSZoom"), 1.147, places=3)     # 390 / 340
+        self.assertEqual(self.js(side), [], "the sign-in page scrolls sideways")
+        self.taps("sign-in at 150% on the phone")
+        self.signed_in_as_leo("/#settings=account")
+        self.wait("!!document.getElementById('acct-size')", "the account tab")
+        self.assertAlmostEqual(self.js("document.documentElement.currentCSSZoom"), 1.147, places=3)
+        self.assertEqual(self.js(side), [], "Settings scrolls sideways at 150% on the phone")
+        self.assertEqual(self.js("document.querySelector('#acct-size [aria-checked=true]').dataset.v"), "150")
+        # the phone's default: 100%
+        self.js("localStorage.removeItem('pcg-size')")
+        b.goto("about:blank")
+        b.goto(self.base + "/#settings=account")
+        self.wait("!!document.getElementById('acct-size')", "the account tab at the default")
+        self.assertEqual(self.js("[document.documentElement.currentCSSZoom, document.querySelector('#acct-size [aria-checked=true]').dataset.v]"), [1, "100"])
+        self.js("document.querySelector('#acct-size [data-v=\"125\"]').click()")
+        self.assertAlmostEqual(self.js("document.documentElement.currentCSSZoom"), 1.147, places=3)
+        self.assertEqual(self.js(side), [], "Settings scrolls sideways at 125% on the phone")
 
     def test_6_phone_tap_targets(self):
         self.new_person("pg601")

@@ -67,6 +67,24 @@ class Browser:
         self.call("Page.enable")
         self.call("Runtime.enable")
         self.call("Network.enable")
+        self._size_script = None
+        self.repin_size()
+
+    def repin_size(self):
+        """Back to the suite's size: PAPERCAST_TEST_SIZE (100, 125 or 150) when it is set, else the
+        site's own default (theme.js: 125%, 100% on a phone)."""
+        self.pin_size(os.environ.get("PAPERCAST_TEST_SIZE") or None)
+
+    def pin_size(self, size: str | None):
+        """The page's size (theme.js, "pcg-size") set on every page this browser opens from now on
+        ("100", "125", "150"), or None: left to the page (the site's default, or what a test chose
+        in Settings). A test that sets the size itself unpins first and repins after."""
+        if self._size_script:
+            self.call("Page.removeScriptToEvaluateOnNewDocument", identifier=self._size_script)
+            self._size_script = None
+        if size:
+            src = f"try {{ localStorage.setItem('pcg-size', {json.dumps(str(size))}); }} catch (e) {{}}"
+            self._size_script = self.call("Page.addScriptToEvaluateOnNewDocument", source=src)["identifier"]
 
     def call(self, method: str, **params):
         self.n += 1

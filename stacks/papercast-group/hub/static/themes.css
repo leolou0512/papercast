@@ -1,0 +1,212 @@
+/* papercast-group: the themes besides Light and Dark (theme.js; chosen in Settings, Account,
+   Appearance). Every page links this after its own stylesheets, so each block redefines the
+   tokens of all of them: app.css, social.css, tour.css, auth.css, and the map's own greys
+   (map.css, --pm-faint/-node/-line; its other --pm-* follow the page's). Each keeps its palette's
+   colours where they reach WCAG AA (4.5:1 for text on every background it sits on, 3:1 for field
+   borders and the map's papers; tools/theme_contrast.py checks); where one does not, it is moved
+   along the palette's own ramp, and the comment says so. The swatches in Settings are at the end.
+
+   Paper: Flexoki (light), by Steph Ango. https://stephango.com/flexoki
+     MIT licence, https://github.com/kepano/flexoki/blob/main/LICENSE
+   Latte: Catppuccin Latte. https://catppuccin.com/palette
+     MIT licence, https://github.com/catppuccin/palette/blob/main/LICENSE
+   Dimmed: GitHub Dark Dimmed, from Primer's primitives (dark-dimmed). https://primer.style/primitives
+     MIT licence, https://github.com/primer/primitives/blob/main/LICENSE
+   Forest: Everforest (dark, medium), by sainnhe. https://github.com/sainnhe/everforest/blob/master/palette.md
+     MIT licence, https://github.com/sainnhe/everforest/blob/master/LICENSE
+   Rose: Rosé Pine Dawn, by mvllow and the Rosé Pine team. https://rosepinetheme.com/palette
+     MIT licence, https://github.com/rose-pine/palette/blob/main/LICENSE
+   Neon: SynthWave '84, by Robb Owen. https://github.com/robb0wen/synthwave-vscode
+     MIT licence, https://github.com/robb0wen/synthwave-vscode/blob/master/LICENSE */
+
+/* ---------- Paper: Flexoki light, warm paper and ink ---------- */
+:root[data-theme="paper"] {
+  --bg: #FFFCF0;                 /* paper */
+  --side: #F7F5E9;               /* paper to base-50 */
+  --surface: #F2F0E5;            /* base-50 */
+  --hover: #EFEDE2;
+  --sel: #ECEADF;                /* base-50 to base-100 */
+  --text: #1C1B1A;               /* base-950 */
+  --text-2: #63625E;             /* base-600 to 700: 600 is under 4.5:1 on base-50 */
+  --hairline: #E6E4D9;           /* base-100 */
+  --input-line: #878580;         /* base-500 */
+  --track: #DAD8CE;              /* base-150 */
+  --quote: #CECDC3;              /* base-200 */
+  --accent: #AC4A12;             /* orange-600 to 700: 600 is under 4.5:1 on base-50 */
+  --on-accent: #FFFCF0;
+  --alive: #536907;              /* green-700 */
+  --warn: #7D5F05;               /* yellow-700, darker */
+  --danger: #AF3029;             /* red-600 */
+  --on-danger: #FFFCF0;
+  --toast-bg: #282726; --toast-fg: #F2F0E5; --toast-link: #EC8B49;    /* base-900, base-50, orange-300 */
+  --scrim: rgba(16, 15, 15, .32);
+  --mark: #FFE7CE;               /* orange-50 */
+  --now: #E6E4D9; --hl: rgba(188, 82, 21, .16);
+  --tour-scrim: rgba(16, 15, 15, .56); --tour-card: var(--bg);
+  --bd-title: #7E4C2E;           /* orange-700 greyed with base-700 */
+  color-scheme: light;
+}
+:root[data-theme="paper"] .pmap { --pm-faint: #696864; --pm-node: #878580; --pm-line: #B7B5AC; }   /* base-600+, 500, 300 */
+
+/* ---------- Latte: Catppuccin's light flavour, cool and soft ---------- */
+:root[data-theme="latte"] {
+  --bg: #EFF1F5;                 /* base */
+  --side: #E6E9EF;               /* mantle */
+  --surface: #E1E5EC;            /* mantle to crust */
+  --hover: #E1E5EC;
+  --sel: #DCE0E8;                /* crust */
+  --text: #4C4F69;               /* text */
+  --text-2: #575A73;             /* subtext 1 to text: subtext 1 is under 4.5:1 on crust */
+  --hairline: #DCE0E8;           /* crust */
+  --input-line: #7C7F93;         /* overlay 2 */
+  --track: #CCD0DA;              /* surface 0 */
+  --quote: #BCC0CC;              /* surface 1 */
+  --accent: #AA4307;             /* peach, darker: peach itself is 2.6:1 on base */
+  --on-accent: #EFF1F5;
+  --alive: #2D701E;              /* green, darker */
+  --warn: #7B4E10;               /* yellow, darker */
+  --danger: #B90D32;             /* red, a little darker */
+  --on-danger: #EFF1F5;
+  --toast-bg: #303446; --toast-fg: #C6D0F5; --toast-link: #EF9F76;    /* Frappé's base, text and peach */
+  --scrim: rgba(17, 17, 27, .32);                                     /* Mocha's crust */
+  --mark: #F2D8CB;               /* peach over base */
+  --now: #DCE0E8; --hl: rgba(254, 100, 11, .18);
+  --tour-scrim: rgba(17, 17, 27, .56); --tour-card: var(--bg);
+  --bd-title: #84482E;           /* the accent greyed with text */
+  color-scheme: light;
+}
+:root[data-theme="latte"] .pmap { --pm-faint: #606379; --pm-node: #7C7F93; --pm-line: #ACB0BE; }   /* subtext 0 to 1, overlay 2, surface 2 */
+
+/* ---------- Dimmed: GitHub's dark dimmed, blue-grey and low glare ---------- */
+:root[data-theme="dimmed"] {
+  --bg: #212830;                 /* bgColor-default */
+  --side: #262C36;               /* bgColor-muted */
+  --surface: #2A313C;            /* control-bgColor-rest */
+  --hover: #2F3742;              /* control-bgColor-hover */
+  --sel: #323A45;
+  --text: #D1D7E0;               /* fgColor-default */
+  --text-2: #9DA3AC;             /* fgColor-muted, lighter: it is under 4.5:1 on the hover colour */
+  --hairline: #3D444D;           /* borderColor-default */
+  --input-line: #6E7681;         /* borderColor-emphasis, lighter */
+  --track: #3D444D;
+  --quote: #454C56;
+  --accent: #F69D50;             /* orange (prettylights variable) */
+  --on-accent: #212830;
+  --alive: #57AB5A;              /* fgColor-success */
+  --warn: #C69026;               /* fgColor-attention */
+  --danger: #F47067;             /* coral (prettylights keyword): fgColor-danger is 3.5:1 on the surface */
+  --on-danger: #212830;
+  --toast-bg: #373E47; --toast-fg: #D1D7E0; --toast-link: #F69D50;
+  --scrim: rgba(1, 4, 9, .6);
+  --mark: #4A331F;               /* orange, muted and dark */
+  --now: #2F3742; --hl: rgba(246, 157, 80, .24);
+  --tour-scrim: rgba(1, 4, 9, .72); --tour-card: var(--surface);
+  --bd-title: #C49A78;           /* the accent greyed with fgColor-muted */
+  color-scheme: dark;
+}
+:root[data-theme="dimmed"] .pmap { --pm-faint: #959CA5; --pm-node: #9198A1; --pm-line: #545D68; }  /* fgColor-muted+, fgColor-muted */
+
+/* ---------- Forest: Everforest's dark (medium), warm green-grey ---------- */
+:root[data-theme="forest"] {
+  --bg: #2D353B;                 /* bg0 */
+  --side: #272E33;               /* bg0 to bg_dim */
+  --surface: #343F44;            /* bg1 */
+  --hover: #313A3F;
+  --sel: #343F44;                /* bg1 */
+  --text: #D3C6AA;               /* fg */
+  --text-2: #AAB0A2;             /* grey2 to fg: grey2 is under 4.5:1 on bg1 */
+  --hairline: #3D484D;           /* bg2 */
+  --input-line: #7A8478;         /* grey0 */
+  --track: #475258;              /* bg3 */
+  --quote: #4F585E;              /* bg4 */
+  --accent: #E69875;             /* orange */
+  --on-accent: #2D353B;
+  --alive: #A7C080;              /* green */
+  --warn: #DBBC7F;               /* yellow */
+  --danger: #EC9496;             /* red, lighter: red is 4.0:1 on bg1 */
+  --on-danger: #2D353B;
+  --toast-bg: #3D484D; --toast-fg: #D3C6AA; --toast-link: #E9A889;    /* bg2, fg, orange lighter */
+  --scrim: rgba(20, 24, 27, .6);
+  --mark: #434238;               /* bg_yellow, darker */
+  --now: #3D484D; --hl: rgba(230, 152, 117, .24);
+  --tour-scrim: rgba(20, 24, 27, .72); --tour-card: var(--surface);
+  --bd-title: #CDA58D;           /* orange greyed with grey2 */
+  color-scheme: dark;
+}
+:root[data-theme="forest"] .pmap { --pm-faint: #A0AAA1; --pm-node: #859289; --pm-line: #56635F; }  /* grey2+, grey1, bg5 */
+
+/* ---------- Rose: Rosé Pine Dawn, pale pink paper ---------- */
+:root[data-theme="rose"] {
+  --bg: #FAF4ED;                 /* base */
+  --side: #F8EDE6;               /* base, a little rose */
+  --surface: #F2E9E1;            /* overlay */
+  --hover: #F0E1D9;              /* overlay, a little rose */
+  --sel: #EED9D1;                /* overlay, more rose */
+  --text: #464261;               /* text */
+  --text-2: #605C7A;             /* subtle to text: subtle is 3.2:1 on the rose selection */
+  --hairline: #E8DCD6;
+  --input-line: #847F94;         /* muted, darker */
+  --track: #DFDAD9;              /* highlight med */
+  --quote: #CECACD;              /* highlight high */
+  --accent: #874A5C;             /* love, darker: love is 3.8:1 on base */
+  --on-accent: #FAF4ED;
+  --alive: #286983;              /* pine */
+  --warn: #754E1A;               /* gold, darker */
+  --danger: #9C2F4B;             /* love, redder and darker */
+  --on-danger: #FAF4ED;
+  --toast-bg: #232136; --toast-fg: #E0DEF4; --toast-link: #EB6F92;    /* Rosé Pine Moon's base, text and love */
+  --scrim: rgba(25, 23, 36, .32);
+  --mark: #F0D4CE;               /* rose over base */
+  --now: #EDD4CD; --hl: rgba(180, 99, 122, .18);
+  --tour-scrim: rgba(25, 23, 36, .56); --tour-card: var(--bg);
+  --bd-title: #785269;           /* the accent greyed with subtle */
+  color-scheme: light;
+}
+:root[data-theme="rose"] .pmap { --pm-faint: #605C7A; --pm-node: #847F94; --pm-line: #CECACD; }   /* subtle+, muted-, highlight high */
+
+/* ---------- Neon: SynthWave '84, neon on night purple ---------- */
+:root[data-theme="neon"] {
+  --bg: #262335;                 /* editor */
+  --side: #241B2F;               /* side bar */
+  --surface: #2A2139;            /* input */
+  --hover: #34294A;
+  --sel: #37294D;                /* list hover */
+  --text: #F4EEFF;               /* foreground, a touch of lavender */
+  --text-2: #A6ABCF;             /* comment, lighter: the comment grey is 4.0:1 on the selection */
+  --hairline: #3B3052;
+  --input-line: #7B81AF;
+  --track: #463A5E;
+  --quote: #4F4468;
+  --accent: #FF7EDB;             /* pink */
+  --on-accent: #262335;
+  --alive: #72F1B8;              /* green */
+  --warn: #FEDE5D;               /* yellow */
+  --danger: #FE737C;             /* red, lighter: red is 4.5:1 on the page only just */
+  --on-danger: #262335;
+  --toast-bg: #171520; --toast-fg: #FFFFFF; --toast-link: #36F9F6;    /* activity bar, white, cyan */
+  --scrim: rgba(10, 8, 16, .6);
+  --mark: #472B57;               /* pink, dark */
+  --now: #3B2E55; --hl: rgba(255, 126, 219, .24);
+  --tour-scrim: rgba(10, 8, 16, .72); --tour-card: var(--surface);
+  --bd-title: #C884CE;           /* the pink greyed with the comment grey */
+  color-scheme: dark;
+}
+:root[data-theme="neon"] .pmap { --pm-faint: #9DA2CA; --pm-node: #848BBD; --pm-line: #544A74; }  /* comment+, comment */
+
+/* ---------- the swatches in Settings: the theme's page, its list pane and its accent ---------- */
+#acct-theme button { display: inline-flex; align-items: center; padding-left: 12px; }
+.sw {
+  --sw-bg: #FFFFFF; --sw-side: #FAFAFA; --sw-ac: #C8431A; --sw-line: #D6D6D6;
+  flex: none; width: 18px; height: 18px; border-radius: 50%; margin-right: 8px; display: inline-grid; place-items: center;
+  background: linear-gradient(135deg, var(--sw-bg) 50%, var(--sw-side) 50%); box-shadow: inset 0 0 0 1px var(--sw-line);
+}
+.sw::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--sw-ac); }
+.sw[data-sw="system"] { --sw-bg: #FFFFFF; --sw-side: #0E0E0E; --sw-line: #8C8C8C; }
+.sw[data-sw="system"]::after { background: linear-gradient(135deg, #C8431A 50%, #FF7A45 50%); }
+.sw[data-sw="dark"] { --sw-bg: #0E0E0E; --sw-side: #121212; --sw-ac: #FF7A45; --sw-line: #5A5A5A; }
+.sw[data-sw="paper"] { --sw-bg: #FFFCF0; --sw-side: #F2F0E5; --sw-ac: #AC4A12; --sw-line: #B7B5AC; }
+.sw[data-sw="latte"] { --sw-bg: #EFF1F5; --sw-side: #DCE0E8; --sw-ac: #AA4307; --sw-line: #ACB0BE; }
+.sw[data-sw="dimmed"] { --sw-bg: #212830; --sw-side: #2A313C; --sw-ac: #F69D50; --sw-line: #545D68; }
+.sw[data-sw="forest"] { --sw-bg: #2D353B; --sw-side: #343F44; --sw-ac: #E69875; --sw-line: #56635F; }
+.sw[data-sw="rose"] { --sw-bg: #FAF4ED; --sw-side: #EED9D1; --sw-ac: #874A5C; --sw-line: #CECACD; }
+.sw[data-sw="neon"] { --sw-bg: #262335; --sw-side: #241B2F; --sw-ac: #FF7EDB; --sw-line: #544A74; }

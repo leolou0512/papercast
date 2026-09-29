@@ -17,6 +17,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent))
+sys.path.insert(2, str(HERE.parents[1]))           # stacks/papercast-group: the hub's voices (specs)
 
 import fake_papercast_voice as fv  # noqa: E402
 from fake_hub import FakeHub  # noqa: E402
@@ -299,6 +300,41 @@ class TestWorker(WorkerCase):
         self.assertEqual(self.worker(env, "--exit-when-idle").wait(timeout=60), 0, self.log())
         self.assertEqual(len(self.hub.uploads), 3)
         self.assertIn("voiced again; its job directory starts afresh", self.log())
+
+    # ---- a custom voice's preview (hub/customvoice.py): an episode-shaped job, vp-<user id>
+
+    def custom(self, uid: int, description: str, seed: int) -> dict:
+        from hub import voices
+        return voices.for_claim(voices.custom_preset(voices.custom_spec(uid, description, seed)))
+
+    def test_a_voice_preview_is_voiced_like_an_episode(self):
+        from hub import voices
+        desc = "Young adult female, mid-20s, Irish accent. Warm, clear voice, steady pace."
+        take1, take2 = self.custom(7, desc, 42), self.custom(7, desc, 1234567)
+        self.hub.add("vp-7", "Voice preview", voices.SAMPLE_TEXT + "\n", first_author=None, voice=take1)
+        env = self.env(self.voice())
+        self.assertEqual(self.worker(env, "--exit-when-idle").wait(timeout=60), 0, self.log())
+        v = self.jobs / "vp-7" / "voice"
+        job = json.loads((v / "job.json").read_text())
+        self.assertEqual((job["voice"], job["engine"]), (take1["spec"], "auto"))
+        self.assertRegex(job["paper_id"], fv.ID_RE.pattern)
+        self.assertEqual(self.hub.uploads, [("vp-7", take1["spec"]["voice"])])
+        self.assertTrue(self.hub.audio["vp-7"]["ok"])
+        self.assertEqual(self.status("vp-7")["output"]["voice_spec"], take1["spec"])
+        # another take: the same job directory, started afresh (nothing of the first take reused)
+        self.hub.add("vp-7", "Voice preview", voices.SAMPLE_TEXT + "\n", first_author=None, voice=take2)
+        self.assertEqual(self.worker(env, "--exit-when-idle").wait(timeout=60), 0, self.log())
+        self.assertEqual(self.hub.uploads[-1], ("vp-7", take2["spec"]["voice"]))
+        self.assertEqual(json.loads((v / "job.json").read_text())["voice"], take2["spec"])
+        self.assertEqual(self.status("vp-7")["resumed_chunks"], 0)
+        self.assertIn("vp-7: another voice; its job directory starts afresh", self.log())
+        # a description the voice cannot make (the loudness check): reported, not uploaded
+        self.hub.add("vp-7", "Voice preview", voices.SAMPLE_TEXT + "\n", first_author=None,
+                     voice=self.custom(7, desc + " Whispering.", 42))
+        self.assertEqual(self.worker(self.env(self.voice(fail="encode_failed")), "--exit-when-idle").wait(timeout=60),
+                         0, self.log())
+        self.assertEqual(self.hub.failures["vp-7"]["code"], "encode_failed")
+        self.assertEqual(len(self.hub.uploads), 2)
 
     def test_timings_are_a_bonus(self):
         # a voice without timings (papercast-voice before 1.5), and a hub that refuses them

@@ -1436,5 +1436,119 @@ class MapTest(unittest.TestCase):
         self.wait("(m => !m.hidden && m.textContent.startsWith('Bob just changed'))(document.querySelector('#map .pm-msg'))", "said")
 
 
+    # ------------------------------------------------------------------ 25. the page zoomed (theme.js's size)
+    def test_25_the_page_zoomed(self):
+        """At 125% and 150% (CSS zoom on :root, as theme.js sets it): the canvas at the screen's
+        pixels (sharp), each paper drawn where a click, a hover, a drag and the aimed arrow find it,
+        the hover card beside the pointer, a wheel zoom about the pointer. In 2D and WebGL."""
+        for zoom in (1.25, 1.5):
+            for query, webgl in (("webgl=0", False), ("", True)):
+                with self.subTest(zoom=zoom, webgl=webgl):
+                    self.hub.stop()
+                    self.hub = FakeHub().start()
+                    # the page zoomed from the start, as theme.js does it in <head>
+                    src = ("new MutationObserver((m, o) => { if (document.documentElement) { document.documentElement.style.zoom = '%s'; o.disconnect(); } })"
+                           ".observe(document, {childList: true});" % zoom)
+                    sid = self.b.call("Page.addScriptToEvaluateOnNewDocument", source=src)["identifier"]
+                    try:
+                        self.open(query)
+                    finally:
+                        self.b.call("Page.removeScriptToEvaluateOnNewDocument", identifier=sid)
+                    if webgl and not self.js(f"{M}.webgl()"):
+                        continue
+                    self.assertEqual(self.js(f"{M}.zoom()"), zoom)
+                    time.sleep(0.2)
+                    # sharp: both canvases hold a device pixel per screen pixel
+                    self.assertEqual(self.js("[...document.querySelectorAll('#map canvas')].map(c => (r => [c.width, c.height, Math.round(r.width * devicePixelRatio), Math.round(r.height * devicePixelRatio)])(c.getBoundingClientRect()))"),
+                                     [[1440, 900, 1440, 900]] * 2)
+                    # each paper is drawn at the place pos() gives (the paper's colour there, the background beside it)
+                    px, var, close = self.colours()
+                    for pid in (TRPO, PPO, DPO):
+                        x, y = self.pos(pid)
+                        self.assertFalse(close(px(pid), var("--pm-bg")), f"{pid} is not drawn at {x:.0f},{y:.0f}")
+                    # hover: the card, 14 CSS px right of the pointer
+                    x, y = self.pos(PPO)
+                    self.move(x, y)
+                    self.wait("!document.querySelector('#map .pm-tip').hidden", "hover card")
+                    self.assertEqual(self.text(".pm-tip-t"), "Proximal Policy Optimization Algorithms")
+                    left = self.js("document.querySelector('#map .pm-tip').getBoundingClientRect().left")
+                    self.assertAlmostEqual(left, x + 14 * zoom, delta=1.5)
+                    # a drag: the paper stays under the pointer
+                    x, y = self.pos(RLHF)
+                    self.assertEqual(self.js(f"document.elementFromPoint({x}, {y}).classList.contains('pm-cv')"), True, "RLHF is covered")
+                    self.b.call("Input.dispatchMouseEvent", type="mousePressed", x=x, y=y, button="left", clickCount=1)
+                    for i in range(1, 7):
+                        self.b.call("Input.dispatchMouseEvent", type="mouseMoved", x=x + 12 * i, y=y - 7 * i, button="left", buttons=1)
+                    time.sleep(0.15)
+                    nx, ny = self.pos(RLHF)
+                    self.assertAlmostEqual(nx, x + 72, delta=1.5)
+                    self.assertAlmostEqual(ny, y - 42, delta=1.5)
+                    self.b.call("Input.dispatchMouseEvent", type="mouseReleased", x=x + 72, y=y - 42, button="left", clickCount=1)
+                    self.wait(f"!{M}.state().running", "at rest after the drag", 10)
+                    # a click picks the paper under it
+                    x, y = self.pos(DPO)
+                    self.click(x, y)
+                    self.wait(f"{M}.state().sel === {J(DPO)} && !document.querySelector('#map .pm-card').hidden", "DPO picked")
+                    # aiming a link: the arrow snaps to the paper under the pointer, its words over it
+                    self.js(f"{M}.select({J(TRPO)})")
+                    self.press(".pm-card", "Link to…")
+                    self.wait("!document.querySelector('#map .pm-banner').hidden", "linking")
+                    dx, dy = self.pos(DPO)
+                    self.move(dx + 2, dy + 1)
+                    a = self.settled_aim("snapped", DPO)
+                    self.assertEqual((a["over"], a["text"]), (DPO, "DPO builds on TRPO"))
+                    self.assertAlmostEqual(a["tip"][0] * zoom, dx, delta=0.01)          # the aim is in CSS px
+                    self.assertAlmostEqual(a["tip"][1] * zoom, dy, delta=0.01)
+                    tip = self.js("(r => [(r.left + r.right) / 2, r.bottom])(document.querySelector('#map .pm-aim').getBoundingClientRect())")
+                    self.assertLess(abs(tip[0] - dx), 1.5 * zoom, "the words are not over the paper")
+                    self.assertLessEqual(tip[1], dy - a["r"] * zoom - 6 * zoom, "the words cover the paper")
+                    self.key("Escape", "Escape", 27)
+                    self.key("Escape", "Escape", 27, up=True)
+                    # a wheel zoom keeps the paper under the pointer
+                    self.wait(f"!{M}.state().running", "at rest", 10)
+                    x, y = self.pos(PPO)
+                    k0 = self.js(f"{M}.view().k")
+                    self.b.call("Input.dispatchMouseEvent", type="mouseWheel", x=x + 20, y=y + 10, deltaX=0, deltaY=-240)
+                    self.wait(f"{M}.view().k > {k0} * 1.2", "zoomed in")
+                    nx, ny = self.pos(PPO)
+                    k = self.js(f"{M}.view().k") / k0
+                    self.assertAlmostEqual(nx, x + 20 - 20 * k, delta=1.5)
+                    self.assertAlmostEqual(ny, y + 10 - 10 * k, delta=1.5)
+                    # the zoom changed while the map is open (another tab's Settings): sharp again, and a click still lands
+                    self.js("document.documentElement.style.zoom = '1.1'")
+                    self.wait(f"Math.abs({M}.zoom() - 1.1) < 1e-6", "the new zoom")        # a float32
+                    self.assertEqual(self.js("(c => [c.width, Math.round(c.getBoundingClientRect().width * devicePixelRatio)])(document.querySelector('#map canvas'))"), [1440, 1440])
+                    self.wait(f"!{M}.state().running", "at rest", 10)
+                    x, y = self.pos(PPO)
+                    self.click(x, y)
+                    self.wait(f"{M}.state().sel === {J(PPO)}", "PPO picked at the new zoom")
+
+    # ------------------------------------------------------------------ 26. every theme (theme.js, themes.css)
+    def test_26_every_theme_redraws_the_map(self):
+        """A theme chosen on the page (theme.js's "pcg-theme" event) redraws the map in its colours,
+        in 2D and WebGL: the background, a paper, a place to start, a listened paper."""
+        for query, webgl in (("webgl=0", False), ("", True)):
+            with self.subTest(webgl=webgl):
+                self.hub.stop()
+                self.hub = FakeHub().start()
+                self.open(query)
+                if webgl and not self.js(f"{M}.webgl()"):
+                    continue
+                self.js("""localStorage.setItem('pcg-size', '100');
+                    Promise.all([['link', {rel: 'stylesheet', href: '/themes.css'}], ['script', {src: '/theme.js'}]].map(([t, a]) =>
+                      new Promise((ok, no) => { const e = Object.assign(document.createElement(t), a); e.onload = ok; e.onerror = no; document.head.append(e); })))""")
+                self.wait("!!window.pcgTheme", "theme.js")
+                px, var, close = self.colours()
+                for theme, bg in (("paper", "#FFFCF0"), ("latte", "#EFF1F5"), ("dimmed", "#212830"), ("forest", "#2D353B"), ("rose", "#FAF4ED"), ("neon", "#262335"), ("dark", None), ("light", None)):
+                    self.js(f"pcgTheme.set({J(theme)})")
+                    if bg:
+                        self.assertEqual(self.js("getComputedStyle(document.getElementById('map')).getPropertyValue('--pm-bg').trim().toUpperCase()"), bg)
+                    want = var("--pm-bg")
+                    self.wait(f"(g => {J(want)}.every((w, i) => Math.abs(g[i] - w) <= 3))({M}.pixel(700, 800))", f"{theme}: the background drawn")
+                    self.assertTrue(close(px(INSTRUCT), var("--pm-node")), f"{theme}: a paper, got {px(INSTRUCT)}")
+                    self.assertTrue(close(px(TRPO), var("--pm-start")), f"{theme}: a place to start, got {px(TRPO)}")
+                    self.assertTrue(close(px(DPO), var("--pm-done")), f"{theme}: listened, got {px(DPO)}")
+                self.js("pcgTheme.set('')")
+
 if __name__ == "__main__":
     unittest.main()

@@ -240,6 +240,8 @@ class PageBase(unittest.TestCase):
         self.b.call("Emulation.setDeviceMetricsOverride", width=390, height=844, deviceScaleFactor=1, mobile=True)
 
     def assertTargets(self, where):
+        # the phone's window at rest, not sliding in or out (a control mid-slide is at no place)
+        self.b.wait_js("(w => !w || !w.getAnimations().length)(document.getElementById('win'))", 3, "the window at rest")
         bad = json.loads(self.b.js(TAP_TARGETS))
         self.assertEqual(bad, [], f"phone, {where}: {len(bad)} tap target(s) too small or covered:\n" + "\n".join(bad))
 
@@ -750,6 +752,66 @@ class Page(PageBase):
         b.js("document.getElementById('map-btn').click()")
         b.wait_js("!document.getElementById('map').hidden && !!(window.PaperMap && document.querySelector('#map canvas'))",
                   10, "map mounted")
+
+    def test_y_the_page_at_each_size(self):
+        """100%, 125% (the default) and 150% (theme.js's CSS zoom): the page fills the window and
+        no more; a menu opens under its button, right edges aligned, on the screen; the seek bar's
+        thumb is where the pointer presses and the position is the fraction pressed."""
+        b = self.b
+        self.addCleanup(b.repin_size)
+        self.addCleanup(lambda: b.js("localStorage.removeItem('pcg-size')"))      # the class's other tests: the default
+        for size in ("100", "125", "150"):
+            with self.subTest(size=size):
+                b.pin_size(size)
+                self.load()
+                b.wait_js("document.querySelectorAll('#rows .row').length > 0", 10, "page started")
+                z = size and int(size) / 100
+                self.assertEqual(b.js("document.documentElement.currentCSSZoom"), z)
+                self.no_side_scroll(f"{size}%")
+                self.open(self.two)
+                b.wait_js("!document.getElementById('bar').hidden", 5, "the bar")
+                # the list and the window, then the player bar under them: the window, and no more
+                a = b.js("[document.querySelector('.app'), document.getElementById('bar')].map(e => (r => [r.left, r.top, r.right, r.bottom])(e.getBoundingClientRect()))")
+                self.assertEqual([round(v) for v in a[0][:3] + a[1][2:]], [0, 0, 1440, 1440, 900], "the page does not fill the window")
+                self.assertAlmostEqual(a[0][3], a[1][1], delta=1, msg="the window does not end at the bar")
+                # the window's ⋯ menu: under the button, its right edge on the button's
+                b.js("document.getElementById('w-more').click()")
+                b.wait_js("!!document.querySelector('.menu')", 3, "menu")
+                m, k = b.js("[document.querySelector('.menu'), document.getElementById('w-more')].map(e => (r => [r.left, r.top, r.right, r.bottom])(e.getBoundingClientRect()))")
+                self.assertAlmostEqual(m[2], k[2], delta=1, msg=f"{size}%: the menu {m} is not under its button {k}")
+                self.assertAlmostEqual(m[1], k[3] + 4 * z, delta=1, msg=f"{size}%: the menu {m} is not under its button {k}")
+                self.assertTrue(m[0] >= 0 and m[3] <= 900, f"{size}%: the menu {m} is off the screen")
+                b.js("document.getElementById('w-more').click()")
+                # the seek bar: pressed at a quarter, the thumb under the pointer; released, a quarter in
+                x0, y0, w = b.js("(r => [r.left, r.top + r.height / 2, r.width])(document.querySelector('#scrub .track').getBoundingClientRect())")
+                x = x0 + w / 4
+                b.call("Input.dispatchMouseEvent", type="mousePressed", x=x, y=y0, button="left", clickCount=1)
+                b.wait_js("(t => Math.abs((t.left + t.right) / 2 - %s) < 1.5)(document.getElementById('thumb').getBoundingClientRect())" % x, 3,
+                          f"{size}%: the thumb under the pointer")
+                b.call("Input.dispatchMouseEvent", type="mouseReleased", x=x, y=y0, button="left", clickCount=1)
+                b.wait_js("Math.abs(Number(document.getElementById('scrub').getAttribute('aria-valuenow')) - 7.5) <= 0.6", 5, f"{size}%: a quarter of 30 s")
+                b.js("(a => a && a.pause())(document.querySelector('audio'))")
+        # the phone at 125% (390 / 340 = 1.147 at most, so the page keeps 340 CSS px): nothing
+        # scrolls sideways, and a row swiped follows the finger, then opens its Delete
+        self.addCleanup(lambda: (b.call("Emulation.setTouchEmulationEnabled", enabled=False), b.viewport(1440, 900)))
+        self.phone()
+        b.call("Emulation.setTouchEmulationEnabled", enabled=True, maxTouchPoints=1)
+        b.pin_size("125")
+        self.load()
+        b.wait_js("document.querySelectorAll('#rows .row').length > 0", 10, "page started")
+        z = b.js("document.documentElement.currentCSSZoom")
+        self.assertAlmostEqual(z, 1.147, places=3)
+        self.no_side_scroll("the phone at 125%")
+        inner = f"document.querySelector('{ROW.format(self.many[-1])} .row-in')"
+        b.js(f"{inner}.scrollIntoView({{block: 'center'}})")
+        x, y, left0 = b.js(f"(r => [r.left + r.width / 2, r.top + r.height / 2, r.left])({inner}.getBoundingClientRect())")
+        b.call("Input.dispatchTouchEvent", type="touchStart", touchPoints=[{"x": x, "y": y}])
+        for dx in range(10, 70, 10):
+            b.call("Input.dispatchTouchEvent", type="touchMove", touchPoints=[{"x": x - dx, "y": y}])
+        b.wait_js(f"Math.abs({inner}.getBoundingClientRect().left - ({left0} - 60)) < 2", 3, "the row under the finger")
+        b.call("Input.dispatchTouchEvent", type="touchEnd", touchPoints=[])
+        b.wait_js(f"{inner}.style.transform === 'translateX(-88px)'", 3, "the row's Delete open")
+        b.wait_js(f"Math.abs({inner}.getBoundingClientRect().left - ({left0} - 88 * {z})) < 2", 3, "88 CSS px open, after the slide")
 
     def test_z_phone_tap_targets(self):
         """On a phone every control, in every state, takes a 44 x 44 px tap that reaches it."""

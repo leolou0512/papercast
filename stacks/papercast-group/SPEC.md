@@ -46,6 +46,7 @@ stacks/papercast-group/
   hub/static/signin.* setpw.*   the sign-in and set-password pages
   hub/contrib.py                CLI API: lookup, claims, bundle upload, server-side checks (A3)
   hub/voiceq.py                 voice queue API + fairness              (A3)
+  hub/customvoice.py            custom voices: previews, use, their turns in the voice queue
   hub/web.py                    browser API: library, listened, positions, prefs, admin, audio, explainer, SSE (A4)
   hub/static/index.html app.js app.css icon.svg    the page             (A4)
   hub/graph.py                  links, graphs, edit log, revert         (A5)
@@ -280,6 +281,21 @@ audio meanwhile, and the new MP3 replaces it with its timings; `voice.rev` (each
 library) goes up, and the page asks `/audio/<id>.mp3?v=<rev>`. Browser routes: `GET /api/voices`,
 `PUT /api/voices/mine`, `GET /api/voices/<id>/sample.mp3`, `GET|PUT|DELETE /api/episodes/<id>/voice`,
 `GET /api/episodes/<id>/timings` (timings.json plus `rev`, the audio revision they are for).
+
+Custom voices (hub/customvoice.py; voices.py for where they are used). Each person may describe
+one narrator in Breeze's words (at most 500 characters, control characters removed), preview it
+(`POST /api/voices/custom/preview {"description","another"}`; `another`: a new seed) and use a
+finished preview (`PUT /api/voices/custom {"preview": id}`): it is then their custom voice
+("custom", chosen like a preset for new versions and for voicing their own versions again) and
+their voice. Its spec: `{"engine": "breeze", "voice": "custom-<user id>-<12 hex>", "id": "custom",
+"instruction": <description> + " Narrating a science podcast for a curious listener.", "seed"}`.
+An episode keeps the spec it was voiced in. A preview is the samples' paragraph, voiced through
+this queue: the claim hands it out as an episode-shaped job with `"episode_id": "vp-<user id>"`
+and `"preview": true`, and the worker's status, timings (ignored), audio and failure for that id
+go to the preview. Previews take turns with episodes (a preview first unless the last claim was
+one); one per person waiting or being made, five an hour; a failed one is not retried. Clips:
+`GET /api/voices/custom/preview.mp3` (mine), `GET /api/voices/custom/<user id>/sample.mp3` (the
+voice in use; its owner or an admin). The page hears `voice` events (a person's own).
 
 ## 10. Prompt (A9) and preferences
 

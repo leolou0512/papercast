@@ -10,7 +10,7 @@
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
+  :root:not([data-theme]) {
     --bg: #0E0E0E; --surface: #1A1A1A; --hover: #181818;
     --text: #F2F2F2; --text-2: #9E9E9E; --hairline: #262626; --input-line: #333333;
     --accent: #FF7A45; --on-accent: #0E0E0E; --alive: #4CC273; --warn: #F0B458; --danger: #FF8A80;
@@ -29,7 +29,7 @@ html, body { margin: 0; min-height: 100%; }
 body {
   background: var(--bg); color: var(--text); font: 16px/1.5 var(--sans);
   -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
-  display: grid; place-items: center; min-height: 100vh; min-height: 100dvh; padding: 24px 16px;
+  display: grid; place-items: center; min-height: calc(100vh / var(--pcg-zoom, 1)); min-height: calc(100dvh / var(--pcg-zoom, 1)); padding: 24px 16px;
 }
 [hidden] { display: none !important; }
 button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
@@ -79,10 +79,10 @@ a { color: var(--accent); }
 .link-btn { display: inline-flex; align-items: center; text-decoration: none; }
 .field[readonly] { background: var(--surface); box-shadow: none; color: var(--text-2); }
 
-/* the sign-in page: the Virtual Atoms logo (its dark letters turned light on a dark page) and "Remember me" */
+/* the sign-in page: the Virtual Atoms logo (its dark letters turned light on a dark page: any
+   theme of the dark family, theme.js's data-scheme) and "Remember me" */
 .brand { display: block; width: 180px; height: auto; margin: 0 0 24px; }
-@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .brand { filter: invert(1) hue-rotate(180deg); } }
-:root[data-theme="dark"] .brand { filter: invert(1) hue-rotate(180deg); }
+:root[data-scheme="dark"] .brand { filter: invert(1) hue-rotate(180deg); }
 .check { display: flex; align-items: center; gap: 0; min-height: 44px; margin-top: 4px; font-size: 14px; cursor: pointer; user-select: none; }
 /* the box is drawn at 18 px inside a 44 px tap area; the negative margins line it up with the fields */
 .check input { -webkit-appearance: none; appearance: none; width: 44px; height: 44px; margin: 0 0 0 -13px; display: grid; place-items: center;
@@ -98,9 +98,5 @@ a { color: var(--accent); }
   display: grid; place-items: center; border-radius: 50%; color: var(--text-2); }
 .theme-btn:hover { background: var(--hover); color: var(--text); }
 .theme-btn .i-sun { display: none; }
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) .theme-btn .i-sun { display: block; }
-  :root:not([data-theme="light"]) .theme-btn .i-moon { display: none; }
-}
-:root[data-theme="dark"] .theme-btn .i-sun { display: block; }
-:root[data-theme="dark"] .theme-btn .i-moon { display: none; }
+:root[data-scheme="dark"] .theme-btn .i-sun { display: block; }
+:root[data-scheme="dark"] .theme-btn .i-moon { display: none; }

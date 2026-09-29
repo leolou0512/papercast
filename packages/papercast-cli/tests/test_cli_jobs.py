@@ -49,7 +49,8 @@ class JobsTest(CliTestCase):
         self.assertIn("parallel 5", r.stdout)
         pdfs = [self.pdf(f"q{i}.pdf", sleep=2.0, title=f"Paper Q{i}") for i in range(6)]
         r = self.add(*pdfs)
-        self.assertIn("at most 5 at once", r.stdout)
+        self.assertIn("5 at a time", r.stdout)
+        self.assertNotIn("Tip:", r.stdout)            # the tip is for the default only
         self.wait_for(lambda: self.all_done(6), 60, "all six done")
         self.assertEqual(overlap([self.span(j["id"]) for j in self.jobs()]), 5)
         self.wait_worker_gone()
@@ -58,7 +59,9 @@ class JobsTest(CliTestCase):
     def test_two_run_at_once_and_a_third_waits(self):
         pdfs = [self.pdf(f"p{i}.pdf", sleep=1.5, title=f"Paper {i}") for i in range(3)]
         r = self.add(*pdfs)
-        self.assertEqual(r.stdout.count("queued"), 3, r.stdout)
+        self.assertEqual(r.stdout.count("\n") - r.stdout.count("Tip:") - 1, 3, r.stdout)   # a line per paper
+        self.assertIn("2 at a time", r.stdout)
+        self.assertIn("Tip: more at once with papercast config --parallel 10", r.stdout)
         self.assertIn("papercast status", r.stdout)
         # While two run, the third says why it waits.
         self.wait_for(lambda: sum(j["state"] == "running" for j in self.jobs()) == 2, 20,

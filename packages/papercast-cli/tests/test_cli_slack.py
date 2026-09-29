@@ -119,7 +119,7 @@ class AddQuestionTest(CliTestCase):
             os.close(master)
         self.assertEqual(p.returncode, 0, err)
         self.assertIn(QUESTION, out)
-        self.assertLess(out.index(QUESTION), out.index("queued"))
+        self.assertLess(out.index(QUESTION), out.index("Writing in the background"))
         self.assertEqual(self.jobs()[0]["announce"], {"slack": True})
 
     def test_a_hub_without_slack_asks_nothing(self):

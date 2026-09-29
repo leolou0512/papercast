@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
 
 from . import __version__
+from . import usage
 from . import config
 from . import jobs
 from . import login as login_mod
@@ -232,14 +234,59 @@ def cmd_add(args) -> int:
         job = jobs.create(inp, version_of=version_of, model=args.model,
                           yes=args.yes or bool(version_of), announce=announce)
         made.append(job)
-        print(f"{job['id']}  queued  {jobs.label(job)}"
-              + (f"  (your own version of {version_of})" if version_of else ""))
+        print(f"{_c('32;1', _mark())} {_c('2', job['id'])}  {jobs.label(job)}"
+              + (_c("2", f"  (your own version of {version_of})") if version_of else ""))
     if made:
         jobs.ensure_worker()
-        print(f"Working on {'it' if len(made) == 1 else 'them'} in the background (at most "
-              f"{jobs.max_parallel()} at once); closing this terminal is fine. "
-              "Follow with: papercast status")
+        cap = jobs.max_parallel()
+        print(f"Writing in the background, {cap} at a time · follow with {_c('36;1', 'papercast status')}")
+        line = _usage_line(len(made))
+        if line:
+            print(line)
+        if cap == config.PARALLEL_DEFAULT:
+            print(f"{_c('33', 'Tip:')} more at once with {_c('36;1', 'papercast config --parallel 10')}")
     return 1 if problems else 0
+
+
+def _pct(x: float) -> str:
+    v = 100 * x
+    return f"{v:.1f}%" if v < 10 else f"{v:.0f}%"
+
+
+def _usage_line(n: int) -> str | None:
+    """Claude usage: this person's share of the five-hour limit per paper, from their own
+    finished papers (usage.py), and where the window stands now."""
+    try:
+        e = usage.estimate()
+    except Exception:                           # noqa: BLE001  (a hint only: never fail the add)
+        return None
+    if not e:
+        return None
+    each = f"~{_pct(e['per_paper'])} of your 5-hour Claude limit per paper"
+    if n > 1:
+        each += f", ~{_pct(e['per_paper'] * n)} for these {n}"
+    now = f"{_pct(e['now'])} used"
+    if e.get("resets"):
+        now += " · resets " + time.strftime("%H:%M", time.localtime(e["resets"]))
+    return f"{_c('35', 'Usage:')} {each} · {_c('2', now)}"
+
+
+def _color() -> bool:
+    """ANSI colours only on a terminal, and never with NO_COLOR (no-color.org) or TERM=dumb."""
+    return sys.stdout.isatty() and "NO_COLOR" not in os.environ and os.environ.get("TERM") != "dumb"
+
+
+def _c(code: str, text: str) -> str:
+    return f"\033[{code}m{text}\033[0m" if _color() else text
+
+
+def _mark() -> str:
+    """A check mark where the terminal's encoding has one."""
+    try:
+        "✓".encode(sys.stdout.encoding or "ascii")
+        return "✓"
+    except (UnicodeEncodeError, LookupError):
+        return "+"
 
 
 # --------------------------------------------------------------------------- status

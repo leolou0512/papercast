@@ -34,6 +34,7 @@ import json
 import os
 import random
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -170,7 +171,7 @@ class S2:
         elif status != 200:
             what = {0: "nothing", 429: "429 (rate limited)"}.get(status, status)
             raise OSError(f"Semantic Scholar answered {what} for {path}")
-        tmp = cp + ".tmp"
+        tmp = f"{cp}.{os.getpid()}.{threading.get_ident()}.tmp"     # several threads may share the cache
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump({"url": url, "data": data}, fh)
         os.replace(tmp, cp)
@@ -296,11 +297,13 @@ VIA_RANK = {"arxiv": 0, "doi": 1, "title": 2}
 
 
 def candidates(paper: dict, lib: Library, s2: S2 | None, text: str | None, exclude: set,
-               mentions: list | None = None) -> tuple[list[dict], dict]:
+               mentions: list | None = None, named: dict | None = None) -> tuple[list[dict], dict]:
     """[{"other": library id, "direction", "source": "s2" | "text" | "both", "influential",
     "via"}], info. Both ways from Semantic Scholar, the paper's own text (what it names) and
     `mentions` (the hub's answer: library papers whose text names this one), merged; a
-    Semantic Scholar that fails in any part leaves the rest standing (info["s2_error"])."""
+    Semantic Scholar that fails in any part leaves the rest standing (info["s2_error"]).
+    `named` ({library id: "arxiv" | "doi" | "title"}): what the paper's own text names, found
+    elsewhere (papercast relink: the hub's text index), taken as `text`'s findings are."""
     info: dict = {"s2_id": None, "resolved_via": None, "refs": 0, "cits": 0}
     exclude = set(exclude)
     versions = lib.versions_of(paper) - exclude
@@ -352,12 +355,15 @@ def candidates(paper: dict, lib: Library, s2: S2 | None, text: str | None, exclu
                     add(other, kind, "s2", bool(row.get("isInfluential")), "s2")
     if errors:
         info["s2_error"] = "; ".join(errors)
-    if text:
-        named = lib.mentioned_in(text, exclude)
-        info["text_names"] = len(named)
-        for other, field in named.items():
-            if not later("builds_on", other, None):
-                add(other, "builds_on", "text", via="text:" + field)
+    found = dict(lib.mentioned_in(text, exclude)) if text else {}
+    for other, field in (named or {}).items():
+        if other in lib.by_id and other not in exclude:
+            found.setdefault(other, field)
+    if text or named is not None:
+        info["text_names"] = len(found)
+    for other, field in found.items():
+        if not later("builds_on", other, None):
+            add(other, "builds_on", "text", via="text:" + field)
     if mentions is not None:
         n = 0
         for m in mentions:
@@ -393,11 +399,17 @@ def batches(cands: list[dict], this_id: str) -> list[list[tuple]]:
     paper is the child of every builds_on candidate and the parent of every built_on_by one."""
     rows = [((this_id, c["other"]) if c["direction"] == "builds_on" else (c["other"], this_id)) + (c,)
             for c in cands]
+    return pack(rows, first=this_id)
+
+
+def pack(rows: list[tuple], first: str | None = None) -> list[list[tuple]]:
+    """Rows (child, parent, cand) in batches of at most BATCH, each child's rows together (a
+    child with more than BATCH is split), children in id order (`first` first)."""
     by_child: dict[str, list] = {}
     for r in rows:
         by_child.setdefault(r[0], []).append(r)
     out, cur = [], []
-    for child in sorted(by_child, key=lambda c: (c != this_id, c)):
+    for child in sorted(by_child, key=lambda c: (c != first, c)):
         es = by_child[child]
         if cur and len(cur) + len(es) > BATCH:
             out.append(cur)
@@ -442,21 +454,16 @@ def parse(answer: str, n: int) -> dict[int, str]:
     return ans
 
 
-def grade_all(cands: list[dict], this: dict, lib: Library, grade, cache_dir: str,
-              progress=None) -> tuple[list[dict], dict]:
-    """(links as the bundle carries them, info). `grade(prompt) -> answer text` is one tool-free
-    haiku call; GradeError from it is tried again (TRIES), then the batch is skipped. Any other
-    exception (the usage limit) goes to the caller; finished batches stay cached."""
+def grade_batches(bs: list[list[tuple]], info: dict, grade, cache_dir: str,
+                  progress=None) -> tuple[list[tuple], dict]:
+    """Grade batches of rows (child, parent, cand); `info`: id -> {"title", "year", "claims"}.
+    -> ([(row, "essential" | "strong" | "weak" | "none")] for every row graded, stats). A batch
+    whose answers stay unusable after TRIES is skipped (stats["skipped"], ["errors"]); any other
+    exception from `grade` goes to the caller. Every graded batch is cached in cache_dir under
+    its prompt's hash."""
     os.makedirs(cache_dir, exist_ok=True)
-    this_id = "this"
-    info = {this_id: {"title": this.get("title") or "", "year": this.get("year"),
-                      "claims": this.get("claims") or []}}
-    for c in cands:
-        p = lib.by_id[c["other"]]
-        info[c["other"]] = {"title": p.get("title") or "", "year": p.get("year"), "claims": []}
-    links, stats = [], {g: 0 for g in GRADES}
+    graded, stats = [], {g: 0 for g in GRADES}
     stats.update(batches=0, skipped=0)
-    bs = batches(cands, this_id)
     for bi, batch in enumerate(bs):
         body = prompt(batch, info)
         key = hashlib.sha256(body.encode()).hexdigest()[:16]
@@ -477,19 +484,33 @@ def grade_all(cands: list[dict], this: dict, lib: Library, grade, cache_dir: str
                 stats["skipped"] += 1
                 stats.setdefault("errors", []).append(str(err))
                 continue
-            tmp = path + ".tmp"
+            tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump({"model": GRADER_MODEL, "answers": ans}, fh)
             os.replace(tmp, path)
         stats["batches"] += 1
-        for k, (_, _, c) in enumerate(batch, 1):
-            g = ans[k]
-            stats[g] += 1
-            if g in SHORT:
-                links.append({"other": {"paper_id": c["other"]}, "direction": c["direction"],
-                              "grade": SHORT[g], "source": c["source"]})
+        for k, row in enumerate(batch, 1):
+            stats[ans[k]] += 1
+            graded.append((row, ans[k]))
         if progress:
             progress(bi + 1, len(bs))
+    return graded, stats
+
+
+def grade_all(cands: list[dict], this: dict, lib: Library, grade, cache_dir: str,
+              progress=None) -> tuple[list[dict], dict]:
+    """(links as the bundle carries them, info). `grade(prompt) -> answer text` is one tool-free
+    haiku call; GradeError from it is tried again (TRIES), then the batch is skipped. Any other
+    exception (the usage limit) goes to the caller; finished batches stay cached."""
+    this_id = "this"
+    info = {this_id: {"title": this.get("title") or "", "year": this.get("year"),
+                      "claims": this.get("claims") or []}}
+    for c in cands:
+        p = lib.by_id[c["other"]]
+        info[c["other"]] = {"title": p.get("title") or "", "year": p.get("year"), "claims": []}
+    graded, stats = grade_batches(batches(cands, this_id), info, grade, cache_dir, progress)
+    links = [{"other": {"paper_id": c["other"]}, "direction": c["direction"], "grade": SHORT[g],
+              "source": c["source"]} for (_, _, c), g in graded if g in SHORT]
     return links, stats
 
 

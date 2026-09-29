@@ -7,6 +7,7 @@
   papercast prefs [--maths ...]       your listening preferences (stored on the hub), and
                   [--slack on|off]    whether add's Slack question defaults to yes
   papercast cancel|retry <job>        stop a job, or run it again
+  papercast relink [--dry-run]        find the links between the library's papers again
   papercast whoami | logout | worker
 """
 from __future__ import annotations
@@ -446,6 +447,33 @@ def cmd_prefs(args) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------- relink
+
+def cmd_relink(args) -> int:
+    from . import relink
+    cfg = config.require_login()
+    if not 1 <= args.parallel <= relink.PARALLEL_MAX:
+        raise PapercastError(f"--parallel is 1 to {relink.PARALLEL_MAX}")
+    api = Api.from_config(cfg, retries=2, timeout=60)
+    me = api.me()
+    if isinstance(me, dict) and me.get("role") == "viewer":
+        raise PapercastError(f"Relinking needs the contributor role on {cfg['server']}; yours is "
+                             "viewer. Ask an admin of the group.")
+    jobs.check_claude(warn=_err)
+    res = relink.run(api, ids=args.papers or None, dry_run=args.dry_run, parallel=args.parallel,
+                     refresh=args.refresh, log=lambda m: print(m, file=sys.stderr, flush=True))
+    if args.json:
+        print(json.dumps(res, indent=1, ensure_ascii=False))
+    else:
+        print(relink.report(res), end="")
+    if res.get("limit"):
+        at = res["limit"].get("resume_at")
+        _err("Claude's usage limit stopped the grading" + (f" (resets about {util.local_hhmm(at)})" if at else "")
+             + ": what was graded was sent; run papercast relink again after the reset for the rest.")
+        return 1
+    return 1 if res.get("errors") else 0
+
+
 # --------------------------------------------------------------------------- cancel, retry, worker
 
 def cmd_cancel(args) -> int:
@@ -545,6 +573,18 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--slack", choices=("on", "off"),
                    help="add's default answer to \"Post to the Slack channel when it's ready?\"")
     s.set_defaults(func=cmd_prefs)
+
+    s = sub.add_parser("relink", help="find the links between the library's papers again "
+                                      "(both ways, graded by haiku) and send them to the hub")
+    s.add_argument("papers", nargs="*", metavar="PAPER_ID", help="only these papers (default: every "
+                                                                 "paper on the map)")
+    s.add_argument("--dry-run", action="store_true", help="only say what would change")
+    s.add_argument("--parallel", type=int, default=3, metavar="N",
+                   help="papers and grading calls at once (1 to 8; default 3)")
+    s.add_argument("--refresh", action="store_true",
+                   help="ask Semantic Scholar again instead of its cached answers")
+    s.add_argument("--json", action="store_true", help="machine-readable")
+    s.set_defaults(func=cmd_relink)
 
     s = sub.add_parser("cancel", help="stop a job for good")
     s.add_argument("job", help="its id (or the start of it), from papercast status")

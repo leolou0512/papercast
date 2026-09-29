@@ -574,5 +574,299 @@ class MentionsTest(unittest.TestCase):
         self.assertEqual((code, out["error"]), (400, "no_keys"))
 
 
+class RelinkTest(unittest.TestCase):
+    """GET /api/cli/relink and POST /api/cli/papers/<id>/links (`papercast relink`): the library's
+    links found again, applied as the agent acting for the caller. New links both ways; a link a
+    person made, changed, removed or dismissed never touched; the agent's own links regraded or
+    removed at "none"; every change one log row the map's Undo reverts; dry run; suggest only;
+    locked graphs. A fresh hub per test."""
+
+    def setUp(self):
+        self.h = H.Hub()
+        graph.ensure_schema()
+        self.leo = self.h.user("Leo", "admin")
+        self.ann = self.h.user("Ann", "contributor")
+        self.vic = self.h.user("Vic", "viewer")
+
+    def tearDown(self):
+        self.h.close()
+
+    # -- data straight into the database, and a person's edits through the map's own API
+    def paper(self, title, year, tags=(), claims=(), text=False, state="ready"):
+        pid, eid, at = db.new_id("p_"), db.new_id("e_"), db.now()
+        with db.transaction() as c:
+            c.execute("INSERT INTO papers(id, title, title_norm, authors, year, tags, created_at) "
+                      "VALUES (?, ?, ?, '[]', ?, ?, ?)", (pid, title, db.norm_title(title), year, json.dumps(list(tags)), at))
+            c.execute("INSERT INTO episodes(id, paper_id, made_by, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                      (eid, pid, self.ann["id"], state, at, at))
+        d = self.h.cfg.episodes / eid
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "claims.md").write_text("---\ntitle: " + title + "\n---\n" + "".join(f"- {x}\n" for x in claims))
+        if text:
+            (d / "paper.txt").write_text(text if isinstance(text, str) else "the paper's own text")
+        return pid
+
+    def agent(self, src, dst, grade="s", who=None):
+        """An upload's link, as contrib hands it to the graph."""
+        out = graph.apply_agent_links("e_x", dst, (who or self.ann)["id"],
+                                      [{"other": {"paper_id": src}, "direction": "builds_on", "grade": grade}])
+        self.assertEqual(out["added"], 1, out)
+        return self.row(src, dst)["id"]
+
+    def browser(self, method, path, body=None, who=None):
+        return self.h.request(method, path, body if body is not None else {}, headers={
+            "X-Test-User": (who or self.ann)["email"], "X-PCG": "1"})
+
+    def row(self, src, dst):
+        return db.conn().execute("SELECT * FROM links WHERE src = ? AND dst = ?", (src, dst)).fetchone()
+
+    def log_rows(self, after=0):
+        return db.conn().execute("SELECT * FROM graph_log WHERE id > ? ORDER BY id", (after,)).fetchall()
+
+    def log_max(self):
+        return db.conn().execute("SELECT coalesce(max(id), 0) FROM graph_log").fetchone()[0]
+
+    def relink(self, pid, items, who=None, dry_run=False, code=200):
+        """items: (other, direction, grade)."""
+        body = {"links": [{"other": {"paper_id": o}, "direction": d, "grade": g, "source": "s2"} for o, d, g in items],
+                "dry_run": dry_run}
+        st, out = self.h.request("POST", f"/api/cli/papers/{pid}/links", body, user=who or self.leo)
+        self.assertEqual(st, code, out)
+        return out
+
+    def ops(self, out):
+        return {(ch["op"], ch["src"], ch["dst"], ch["grade"]) for ch in out["changes"]}
+
+    def reasons(self, out):
+        return sorted(s["reason"] for s in out["skipped"])
+
+    # -- the tests
+    def test_levels_and_arguments(self):
+        a = self.paper("Alpha paper about scores", 2019)
+        self.assertEqual(self.h.request("GET", "/api/cli/relink")[0], 401)
+        self.assertEqual(self.h.request("GET", "/api/cli/relink", user=self.vic)[0], 403)      # contributor and up
+        self.assertEqual(self.h.request("GET", "/api/cli/relink", user=self.ann)[0], 200)
+        self.assertEqual(self.h.request("GET", "/api/cli/relink?since=x", user=self.ann)[0], 400)
+        body = {"links": []}
+        self.assertEqual(self.h.request("POST", f"/api/cli/papers/{a}/links", body, user=self.vic)[0], 403)
+        st, _ = self.h.request("POST", f"/api/cli/papers/{a}/links", body,
+                               headers={"X-Test-User": self.leo["email"], "X-PCG": "1"})
+        self.assertEqual(st, 401)                                   # a browser's login is not the CLI's
+        st, out = self.h.request("POST", "/api/cli/papers/p_nothere/links", body, user=self.ann)
+        self.assertEqual((st, out["error"]), (404, "no_such_paper"))
+        st, out = self.h.request("POST", f"/api/cli/papers/{a}/links", {"links": "all"}, user=self.ann)
+        self.assertEqual((st, out["error"]), (400, "bad_links"))
+        b, later = self.paper("Beta paper about scores", 2020), self.paper("A later paper about scores", 2023)
+        out = self.relink(b, [(a, "builds_on", "great"), (a, "sideways", "s"), ("p_nothere", "builds_on", "s"),
+                              (b, "builds_on", "s"), (later, "builds_on", "s"), (a, "builds_on", "s"),
+                              (a, "builds_on", "e")], who=self.ann)
+        self.assertEqual(self.reasons(out), ["bad direction or grade", "bad direction or grade", "order", "self",
+                                             "twice", "unknown paper"])
+        self.assertEqual(self.ops(out), {("add", a, b, "s")})
+
+    def test_state(self):
+        a = self.paper("Alpha paper about scores", 2019, tags=["diffusion"], claims=["One", "Two", "Three", "Four"], text=True)
+        b = self.paper("Beta paper about scores", 2020, tags=["diffusion"])
+        gone = self.paper("A paper whose only episode was rejected", 2021, state="rejected")
+        lid = self.agent(a, b, "w")
+        st, out = self.h.request("GET", "/api/cli/relink", user=self.ann)
+        self.assertEqual(st, 200, out)
+        ps = {p["id"]: p for p in out["papers"]}
+        self.assertEqual((ps[a]["claims"], ps[a]["text"], ps[a]["visible"]), (["One", "Two", "Three"], True, True))
+        self.assertEqual((ps[b]["claims"], ps[b]["text"]), ([], False))
+        self.assertFalse(ps[gone]["visible"])
+        self.assertTrue(set(ps[a]) >= {"title", "year", "arxiv_id", "doi", "s2_id"})
+        self.assertEqual([(l["id"], l["origin"], l["state"], l["person"]) for l in out["links"]],
+                         [(lid, "agent", "active", False)])
+        self.assertEqual(out["agent_links"], "auto")
+        diff = {g["name"]: g for g in out["graphs"]}["Diffusion and generative models"]
+        self.assertEqual((diff["n"], diff["links"], set(diff["layout"])), (2, 1, {"rev", "updated_at", "current"}))
+        m = out["log_max"]
+        self.assertEqual(self.browser("PUT", f"/api/links/{lid}", {"grade": "e"})[0], 200)     # a person regrades it
+        st, out = self.h.request("GET", f"/api/cli/relink?since={m}", user=self.ann)
+        self.assertEqual(out["links"][0]["person"], True)
+        self.assertEqual(out["log_since"], {"since": m, "rows": {"link.grade human": 1}})
+
+    def test_adds_both_ways_one_log_row_each_and_undoable(self):
+        a, b, c = (self.paper("Alpha paper about scores", 2019), self.paper("Beta paper about scores", 2020),
+                   self.paper("Gamma paper about scores", 2021))
+        m = self.log_max()
+        out = self.relink(b, [(a, "builds_on", "s"), (c, "built_on_by", "essential")])
+        self.assertEqual(self.ops(out), {("add", a, b, "s"), ("add", b, c, "e")})
+        for src, dst, g in ((a, b, "s"), (b, c, "e")):
+            r = self.row(src, dst)
+            self.assertEqual((r["grade"], r["origin"], r["state"], r["created_by"]), (g, "agent", "active", self.leo["id"]))
+        rows = self.log_rows(m)
+        self.assertEqual([(r["op"], r["actor"], r["user_id"]) for r in rows], [("link.add", "agent", self.leo["id"])] * 2)
+        self.assertEqual(out["log_ids"], [r["id"] for r in rows])
+        # the map's Undo (anyone's last) reverts the newest; "mine" is only a person's own edits
+        st, log = self.browser("GET", "/api/graph-log", who=self.leo)
+        self.assertIsNone(log["undo"]["mine"])
+        self.assertEqual(log["undo"]["any"]["id"], rows[-1]["id"])
+        st, js = self.browser("POST", "/api/graph-log/revert", {"scope": "any", "expect": rows[-1]["id"]}, who=self.leo)
+        self.assertEqual(st, 200, js)
+        self.assertEqual(self.row(b, c)["state"], "removed")
+        # undone by a person, so a later relink leaves it removed
+        out = self.relink(b, [(a, "builds_on", "s"), (c, "built_on_by", "e")])
+        self.assertEqual((out["changes"], out["unchanged"], self.reasons(out)), ([], 1, ["removed by a person"]))
+
+    def test_a_persons_links_are_never_touched(self):
+        p = [self.paper(f"Paper number {i} about scores", 2010 + i) for i in range(8)]
+        st, js = self.browser("POST", "/api/links", {"src": p[0], "dst": p[1], "grade": "w"})     # a person's link
+        self.assertEqual(st, 201, js)
+        regraded = self.agent(p[2], p[3], "w")
+        self.assertEqual(self.browser("PUT", f"/api/links/{regraded}", {"grade": "s"})[0], 200)   # a person's regrade
+        removed = self.agent(p[4], p[5], "s")
+        self.assertEqual(self.browser("DELETE", f"/api/links/{removed}")[0], 200)                # a person's removal
+        same = [self.paper("Same year paper one", 2030), self.paper("Same year paper two", 2030)]
+        st, js = self.browser("POST", "/api/links", {"src": same[0], "dst": same[1], "grade": "s"})
+        self.assertEqual(self.browser("DELETE", f"/api/links/{js['link']['id']}")[0], 200)
+        # a suggestion dismissed while links from uploads were suggestions only, then automatic again
+        self.assertEqual(self.browser("PUT", "/api/graph-settings", {"agent_links": "suggest"}, who=self.leo)[0], 200)
+        graph.apply_agent_links("e_x", p[7], self.ann["id"], [{"other": {"paper_id": p[6]}, "direction": "builds_on", "grade": "s"}])
+        sid = db.conn().execute("SELECT id FROM link_suggestions").fetchone()[0]
+        self.assertEqual(self.browser("POST", f"/api/link-suggestions/{sid}/dismiss")[0], 200)
+        self.assertEqual(self.browser("PUT", "/api/graph-settings", {"agent_links": "auto"}, who=self.leo)[0], 200)
+        before = [dict(r) for r in db.conn().execute("SELECT * FROM links ORDER BY id")]
+        m = self.log_max()
+        for g in ("e", "none"):
+            outs = [self.relink(p[1], [(p[0], "builds_on", g)]), self.relink(p[3], [(p[2], "builds_on", g)]),
+                    self.relink(p[5], [(p[4], "builds_on", g)]), self.relink(same[0], [(same[1], "builds_on", g)]),
+                    self.relink(p[7], [(p[6], "builds_on", g)])]
+            self.assertEqual([o["changes"] for o in outs], [[]] * 5)
+        self.assertEqual([self.reasons(o) for o in outs[:3]], [["a person's link"], ["a person's link"], ["removed by a person"]])
+        out = self.relink(same[0], [(same[1], "builds_on", "e")])
+        self.assertEqual(self.reasons(out), ["removed by a person (the other way)"])
+        self.assertEqual(self.reasons(self.relink(p[7], [(p[6], "builds_on", "s")])), ["dismissed by a person"])
+        self.assertEqual([dict(r) for r in db.conn().execute("SELECT * FROM links ORDER BY id")], before)
+        self.assertEqual(self.log_max(), m)
+
+    def test_the_agents_own_links_are_regraded_or_removed_and_undoable(self):
+        a, b, c = (self.paper("Alpha paper about scores", 2019), self.paper("Beta paper about scores", 2020),
+                   self.paper("Gamma paper about scores", 2021))
+        ab, ac = self.agent(a, b, "w"), self.agent(a, c, "s")
+        m = self.log_max()
+        out = self.relink(a, [(b, "built_on_by", "e"), (c, "built_on_by", "none")])
+        self.assertEqual(sorted((ch["op"], ch["was"], ch["grade"], ch["link_id"]) for ch in out["changes"]),
+                         [("regrade", "w", "e", ab), ("remove", "s", "none", ac)])
+        r = self.row(a, b)
+        self.assertEqual((r["grade"], r["origin"], r["state"], r["created_by"]), ("e", "agent", "active", self.ann["id"]))
+        self.assertEqual(self.row(a, c)["state"], "removed")
+        rows = self.log_rows(m)
+        self.assertEqual(sorted((r["op"], r["actor"], r["user_id"], r["target"]) for r in rows),
+                         sorted([("link.grade", "agent", self.leo["id"], str(ab)), ("link.remove", "agent", self.leo["id"], str(ac))]))
+        grade_row = next(r for r in rows if r["op"] == "link.grade")
+        self.assertEqual((json.loads(grade_row["before"])["grade"], json.loads(grade_row["after"])["grade"]), ("w", "e"))
+        st, log = self.browser("GET", "/api/graph-log", who=self.leo)
+        self.assertEqual({e["text"] for e in log["log"][:2]}, {"regraded Alpha paper about → Beta paper about from weak to essential",
+                                                             "removed Alpha paper about → Gamma paper about"})
+        # each is undone from the map, newest first; a person's undo makes the link theirs
+        for _ in rows:
+            st, log = self.browser("GET", "/api/graph-log", who=self.leo)
+            st, js = self.browser("POST", "/api/graph-log/revert", {"scope": "any", "expect": log["undo"]["any"]["id"]}, who=self.leo)
+            self.assertEqual(st, 200, js)
+        self.assertEqual((self.row(a, b)["grade"], self.row(a, c)["state"]), ("w", "active"))
+        out = self.relink(a, [(b, "built_on_by", "e"), (c, "built_on_by", "none")])
+        self.assertEqual((out["changes"], self.reasons(out)), ([], ["a person's link", "a person's link"]))
+
+    def test_dry_run_changes_nothing_and_a_second_run_nothing_more(self):
+        a, b, c, d = (self.paper("Alpha paper about scores", 2019, ["diffusion"]), self.paper("Beta paper about scores", 2020, ["diffusion"]),
+                      self.paper("Gamma paper about scores", 2021, ["diffusion"]), self.paper("Delta paper about scores", 2022, ["diffusion"]))
+        self.agent(a, b, "w")
+        self.agent(a, c, "s")
+        items = [(a, "builds_on", "s"), (c, "built_on_by", "w")]
+
+        def snap():
+            c_ = db.conn()
+            return ([dict(r) for r in c_.execute("SELECT * FROM links ORDER BY id")], self.log_max(),
+                    [dict(r) for r in c_.execute("SELECT * FROM graph_rev ORDER BY graph_id")],
+                    c_.execute("SELECT count(*) FROM link_suggestions").fetchone()[0])
+        s0 = snap()
+        dry = self.relink(b, items, dry_run=True)
+        self.assertEqual(snap(), s0)
+        self.assertEqual((dry["dry_run"], dry["log_ids"]), (True, []))
+        self.assertEqual(self.ops(dry), {("add", b, c, "w"), ("regrade", a, b, "s")})
+        dry2 = self.relink(a, [(c, "built_on_by", "none"), (d, "built_on_by", "e")], dry_run=True)
+        self.assertEqual(self.ops(dry2), {("add", a, d, "e"), ("remove", a, c, "none")})
+        self.assertEqual(snap(), s0)
+        real = self.relink(b, items)
+        real2 = self.relink(a, [(c, "built_on_by", "none"), (d, "built_on_by", "e")])
+        self.assertEqual((self.ops(real), self.ops(real2)), (self.ops(dry), self.ops(dry2)))
+        self.assertNotEqual(snap()[2], s0[2])                     # the graphs went up a revision
+        m = self.log_max()
+        again = self.relink(b, items)
+        again2 = self.relink(a, [(c, "built_on_by", "none"), (d, "built_on_by", "e")])
+        self.assertEqual((again["changes"], again2["changes"], self.log_max()), ([], [], m))
+        self.assertEqual((again["unchanged"], self.reasons(again2)), (2, ["removed"]))    # the agent's removal stays
+
+    def test_suggest_only(self):
+        a, b, c = (self.paper("Alpha paper about scores", 2019), self.paper("Beta paper about scores", 2020),
+                   self.paper("Gamma paper about scores", 2021))
+        self.agent(a, b, "w")
+        self.assertEqual(self.browser("PUT", "/api/graph-settings", {"agent_links": "suggest"}, who=self.leo)[0], 200)
+        m = self.log_max()
+        out = self.relink(c, [(a, "builds_on", "s"), (b, "builds_on", "e")])
+        out2 = self.relink(b, [(a, "builds_on", "e")])
+        self.assertEqual((out["mode"], self.ops(out)), ("suggest", {("suggest", a, c, "s"), ("suggest", b, c, "e")}))
+        self.assertEqual((out2["changes"], self.reasons(out2)), ([], ["suggest only"]))
+        self.assertEqual((self.log_max(), self.row(a, b)["grade"]), (m, "w"))
+        self.assertIsNone(self.row(a, c))
+        self.assertEqual(db.conn().execute("SELECT count(*) FROM link_suggestions WHERE state = 'open'").fetchone()[0], 2)
+        out = self.relink(c, [(a, "builds_on", "s")])
+        self.assertEqual((out["changes"], self.reasons(out)), ([], ["suggested already"]))
+
+    def test_the_cli_against_this_hub(self):
+        """papercast relink (the CLI's own module) against this hub: the text index both ways, the
+        dry run, the real run, a second run that asks nothing."""
+        from papercast_cli import relink as R
+        from papercast_cli.api import Api
+        filler = "Filler about sampling, noise levels and the rest of the method. " * 30
+        a = self.paper("Alpha Particle Scattering in Thin Gold Foils", 2019, text=filler)
+        b = self.paper("Beta Decay Spectra of Heavy Nuclei Measured Again", 2020, claims=["Beta spectra are continuous."],
+                       text=filler + "[1] E. Rutherford. Alpha particle scatter-\ning in thin gold foils. 1911.\n" + filler)
+        c = self.paper("Gamma Ray Bursts from Distant Galaxies Observed", 2021, text=filler)
+        self.agent(a, c, "w")                                   # no evidence for it now: left as it is
+        from hub import search
+        search.idle(self.h.cfg)
+        api = Api(f"http://127.0.0.1:{self.h.port}", self.leo["token"], retries=0)
+        asked = []
+
+        def grade(prompt):
+            asked.append(prompt)
+            n = prompt.count("\n  [")
+            return json.dumps({"answers": [{"i": i, "g": "strong"} for i in range(1, n + 1)]})
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            m = self.log_max()
+            dry = R.run(api, dry_run=True, fetch=None, grade=grade, root=tmp)
+            self.assertEqual([(x["op"], x["src"], x["dst"], x["grade"], x["evidence"]) for x in dry["changes"]],
+                             [("add", a, b, "s", ["text:title"])])
+            self.assertIsNone(self.row(a, b))
+            self.assertEqual(self.log_max(), m)
+            self.assertIn("Beta spectra are continuous.", asked[0])            # the child's claims from the hub
+            real = R.run(api, fetch=None, grade=grade, root=tmp)
+            self.assertEqual(len(asked), 1)                                  # graded once
+            self.assertEqual([(x["op"], x["src"], x["dst"]) for x in real["changes"]], [("add", a, b)])
+            r = self.row(a, b)
+            self.assertEqual((r["origin"], r["grade"], r["created_by"]), ("agent", "s", self.leo["id"]))
+            self.assertEqual(real["log_ids"], [x["id"] for x in self.log_rows(m)])
+            self.assertEqual(real["unsupported_agent_links"], 1)
+            again = R.run(api, fetch=None, grade=grade, root=tmp)
+            self.assertEqual((again["changes"], len(asked), self.log_max()), ([], 1, real["log_ids"][-1]))
+            self.assertIn("Changes: none", R.report(again))
+
+    def test_locked_graph(self):
+        a, b, c = (self.paper("Alpha paper about scores", 2019, ["lk"]), self.paper("Beta paper about scores", 2020, ["lk"]),
+                   self.paper("Gamma paper about scores", 2021, ["lk"]))
+        st, js = self.browser("POST", "/api/graphs", {"name": "Locked one", "tags": ["lk"]}, who=self.leo)
+        self.assertEqual(st, 201, js)
+        self.assertEqual(self.browser("PUT", f"/api/graphs/{js['graph']['id']}", {"locked": True}, who=self.leo)[0], 200)
+        self.agent(a, b, "w")
+        out = self.relink(b, [(a, "builds_on", "e"), (c, "built_on_by", "s")], who=self.ann)
+        self.assertEqual((self.ops(out), self.reasons(out)), ({("add", b, c, "s")}, ["locked"]))   # agents still add
+        out = self.relink(b, [(a, "builds_on", "e")], who=self.leo)
+        self.assertEqual(self.ops(out), {("regrade", a, b, "e")})
+
+
 if __name__ == "__main__":
     unittest.main()

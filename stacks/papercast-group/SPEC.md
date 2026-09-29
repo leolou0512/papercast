@@ -142,6 +142,17 @@ note)`, `base_prompt(version=None)`, `add_base_prompt(text, wording_json, by)`.
 - `GET /api/cli/mentions?title=&arxiv=&doi=&exclude=<paper ids>` → `{"mentions": [{"paper_id",
   "field": "arxiv"|"doi"|"title", "fields", "snippet"}], "info"}`: the library papers whose own
   text (paper.txt) names this paper, never the paper itself or a version of it (for links).
+- `GET /api/cli/relink[?since=<graph_log id>]` (cli-contributor) → `{"papers": [{...as library,
+  "visible", "text", "claims"}], "links": [{"id","src","dst","grade","origin","state","person"}],
+  "suggestions", "agent_links": "auto"|"suggest", "graphs": [{"id","name","n","links",
+  "suggestions","layout": {"rev","updated_at","current"}}], "log_max", "log_since"?}`: what
+  `papercast relink` works from (`person`: a person made or changed that link).
+- `POST /api/cli/papers/<id>/links` (cli-contributor) `{"links": [{"other": {"paper_id"},
+  "direction", "grade": "e"|"s"|"w"|"none", "source"}], "dry_run": bool}` → `{"changes": [{"op":
+  "add"|"suggest"|"regrade"|"remove", "src","dst","grade","was"?}], "skipped": [{"reason"}],
+  "unchanged", "log_ids"}`: a relink's links for a library paper, applied as the agent acting for
+  the caller (section 8's rules for an upload's links; also an agent's own link regraded, or
+  removed at "none"; a link a person made or changed never touched); a dry run keeps nothing.
 - `GET /api/cli/lookup?arxiv_id=&doi=&sha256=&title=` → `{"paper": null | {"id","title",
   "episodes": [{"id","made_by":{"id","name"},"prefs_summary","state"}]}, "claim": null | {"by",
   "since"}}`.
@@ -340,6 +351,10 @@ voice in use; its owner or an admin). The page hears `voice` events (a person's 
   text names it (`GET /api/cli/mentions`), graded by `claude -p --model claude-haiku-4-5` with no tools;
   (7) bundle and `POST /api/cli/episodes`. Claude usage limit: detect as Leo's runner's
   `limits.py` does, pause until the reset time, resume.
+- `relink [PAPER_ID...] [--dry-run]`: the links between papers already in the library found
+  again with the same two-way filter (Semantic Scholar, the hub's text index both ways), each pair
+  graded once by haiku (cached), and sent to `POST /api/cli/papers/<id>/links`; `--dry-run`
+  prints what would change. A second run changes nothing.
 - Tests use a fake `claude` on PATH (a script that writes the expected files), never the real one.
 
 ## 12. Rules for every agent

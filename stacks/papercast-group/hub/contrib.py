@@ -1,4 +1,4 @@
-"""The CLI API: lookup, claims, bundle upload, checks on the hub (SPEC.md sections 4-6). Owner: A3.
+"""The CLI API: lookup, claims, bundle upload, checks on the hub, relink (SPEC.md sections 4-6). Owner: A3.
 
 An upload is streamed to $PCG_DATA/tmp, unpacked by hand (regular files and directories only:
 no links, devices, absolute paths or `..`; at most 200 members and 60 MB unpacked), its manifest
@@ -626,6 +626,61 @@ def mentions(req):
     req.send_json(200, search.mentions(req.cfg, title=title, arxiv=arxiv, doi=doi, exclude=exclude))
 
 
+# ---- relink: the library's links found again (`papercast relink`)
+
+CLAIMS_MAX = 3                  # claims per paper for the grader, as the pipeline's parse_claims
+CLAIM_CHARS = 500
+
+
+def _claims_of(f: Path) -> list:
+    """The claims of a claims.md (its "- " lines after the front matter), for the link grader."""
+    try:
+        if f.is_symlink() or not f.is_file():
+            return []
+        t = f.read_bytes()[:65536].decode("utf-8", "replace")
+    except OSError:
+        return []
+    m = re.match(r"^---\s*\n.*?\n---\s*\n?(.*)$", t, re.S)
+    body = m.group(1) if m else t
+    return [l.strip()[2:].strip()[:CLAIM_CHARS] for l in body.splitlines() if l.strip().startswith("- ")][:CLAIMS_MAX]
+
+
+def relink_state(req):
+    """GET /api/cli/relink[?since=<log id>]: what `papercast relink` works from. The library's papers
+    (as /api/cli/library, with `visible`: on a map at all; `claims`: its newest live version's, for
+    the grader; `text`: the hub's search has its own text), every link with `person` (a person
+    made or changed it), the suggestions, the setting for links from uploads, the graphs with
+    their counts and layout state, and the newest graph_log id (with `since`: the rows after it)."""
+    since = req.arg("since")
+    try:
+        since = int(since) if since not in (None, "") else None
+    except ValueError:
+        raise HTTPError(400, "bad_arg", "since is a graph_log id")
+    out = graph.relink_state(since)
+    c = db.conn()
+    live, texts = {}, set()
+    for r in c.execute("SELECT id, paper_id FROM episodes WHERE deleted_at IS NULL AND state <> 'rejected' "
+                       "ORDER BY created_at, rowid"):
+        live[r["paper_id"]] = r["id"]
+        f = req.cfg.episodes / r["id"] / "paper.txt"
+        if f.is_file() and not f.is_symlink():
+            texts.add(r["paper_id"])
+    visible = out.pop("visible")
+    papers = []
+    for r in c.execute("SELECT id, title, year, arxiv_id, doi, s2_id FROM papers ORDER BY created_at, rowid"):
+        eid = live.get(r["id"])
+        papers.append(dict(r, visible=visible.get(r["id"], True), text=r["id"] in texts,
+                           claims=_claims_of(req.cfg.episodes / eid / "claims.md") if eid else []))
+    req.send_json(200, {"papers": papers, **out})
+
+
+def relink_links(req, pid):
+    """POST /api/cli/papers/<id>/links {"links": [{"other": {"paper_id"}, "direction", "grade":
+    e|s|w|none, "source"}], "dry_run": bool}: graph.relink, as the agent acting for the caller."""
+    b = req.json()
+    req.send_json(200, graph.relink(pid, req.user, b.get("links"), dry_run=b.get("dry_run") is True))
+
+
 # ---- routes: lookup and claims
 
 def _keys_from(d) -> dict:
@@ -923,6 +978,8 @@ ROUTES = [
     ("GET", r"^/api/cli/library$", library, "cli"),
     ("GET", r"^/api/cli/lookup$", lookup, "cli"),
     ("GET", r"^/api/cli/mentions$", mentions, "cli"),
+    ("GET", r"^/api/cli/relink$", relink_state, "cli-contributor"),
+    ("POST", rf"^/api/cli/papers/{_ID}/links$", relink_links, "cli-contributor"),
     ("POST", r"^/api/cli/claims$", post_claim, "cli-contributor"),
     ("PUT", rf"^/api/cli/claims/{_ID}$", put_claim, "cli-contributor"),
     ("DELETE", rf"^/api/cli/claims/{_ID}$", delete_claim, "cli-contributor"),

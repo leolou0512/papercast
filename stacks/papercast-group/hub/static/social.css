@@ -6,6 +6,10 @@
 .row-sub .nc { flex: none; margin-left: -5px; }
 
 /* ---------- the board ---------- */
+/* a paper's title on the board: regular weight, a muted shade of the accent (Leo, 2026-09-28) */
+:root { --bd-title: #8A4B36; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bd-title: #D6A591; } }
+:root[data-theme="dark"] { --bd-title: #D6A591; }
 .board { padding: 0 16px 8px; }
 .bd-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; }
 .bd-toggle {
@@ -32,7 +36,7 @@
 a.bd-link:hover, button.bd-link:hover { background: var(--sel); }
 .bd-link.bd-plain { cursor: default; }
 .bd-item.unread .bd-link::before { content: ""; position: absolute; left: 5px; top: 11px; }
-.bd-t { color: var(--text); font-weight: 500; }
+.bd-t { color: var(--bd-title); font-weight: 400; }
 .bd-item.unread .bd-text { color: var(--text); }
 .bd-when { white-space: nowrap; }
 .bd-none { font-size: 14px; line-height: 19px; color: var(--text-2); padding: 4px 0 8px; }
@@ -94,3 +98,8 @@ a.bd-link:hover, button.bd-link:hover { background: var(--sel); }
   .comments { padding: 0 16px 32px; }
   .board { padding: 0 16px 4px; }
 }
+
+/* profile pictures next to the names (avatar.js): no taller than the line they sit on */
+.c-meta .av { margin: -4px 6px -2px 0; }
+.bd-link .av { margin: -2px 6px -1px 0; }
+.bd-nmeta .av { margin: 0 -2px 0 0; }

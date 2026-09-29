@@ -69,10 +69,10 @@ class TestSamples(unittest.TestCase):
         self.assertEqual(rc, 1, out)
         self.assertIn("warm-male: not made: gpu_oom", out)
         self.assertFalse((self.data / "voices" / "warm-male.mp3").exists())
-        rc, out = self.run_tool("--only", "calm-male", ignore_voice=1)
+        rc, out = self.run_tool("--only", "british-female", ignore_voice=1)
         self.assertEqual(rc, 1, out)
         self.assertIn("not kept: it came out in the voice 'described-narrator-a-seed42'", out)
-        self.assertFalse((self.data / "voices" / "calm-male.mp3").exists())
+        self.assertFalse((self.data / "voices" / "british-female.mp3").exists())
 
 
 if __name__ == "__main__":

@@ -63,7 +63,8 @@
   async function api(method, path, body, more) {
     const opt = { method, headers: { "X-PCG": "1" }, credentials: "same-origin" };
     if (more && more.keepalive) opt.keepalive = true;
-    if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
+    if (body instanceof Blob) { opt.headers["Content-Type"] = body.type || "application/octet-stream"; opt.body = body; }     // a picture
+    else if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
     let r;
     try { r = await fetch(path, opt); } catch (e) {
       const err = new Error("The hub did not answer (or the sign-in expired: reload the page).");
@@ -671,7 +672,7 @@
     if (m && m.more && !m.asked) { m.asked = true; S.snipWant.add(p.id); }
     const hit = m && m.lead ? [m.lead, m.parts || []] : null;
     // Everything the row shows, in one string: when the row shows it already, it is left as it is.
-    const sig = JSON.stringify([title, p.added_at, rg, sub, by, nv, ptags, ptags.includes(S.f.tag) ? S.f.tag : null, audio, !!p.listened, canDel,
+    const sig = JSON.stringify([title, p.added_at, rg, sub, by, c && c.made_by ? c.made_by.id : null, nv, ptags, ptags.includes(S.f.tag) ? S.f.tag : null, audio, !!p.listened, canDel,
       hasMenu, nc, m ? m.title : null, hit]);
     if (r.sig === sig) return;
     r.sig = sig;
@@ -682,7 +683,7 @@
     const line = el("div", { class: `row-sub t${sub.cls ? ` ${sub.cls}` : ""}` }, el("span", { class: "st", text: sub.text }),
       nv ? el("span", { class: "nv", text: `· ${nv}` }) : null,
       nc ? el("span", { class: "nc", text: `· ${nc} comment${nc === 1 ? "" : "s"}` }) : null);
-    const byl = by ? el("div", { class: "row-by" }, el("span", { text: by })) : null;
+    const byl = by ? el("div", { class: "row-by" }, avatarNode(c.made_by), el("span", { text: by })) : null;
     const open = S.menu && S.menu.for === `row:${p.id}`;
     const more = hasMenu ? el("button", { type: "button", class: "more", "aria-label": "More", "aria-haspopup": "menu",
       "aria-expanded": open ? "true" : "false", html: I.more,
@@ -741,7 +742,7 @@
     if (!items.length && S.loaded) {
       if (!empty) ul.append(empty = el("li", { class: "empty-list" }));
       empty.textContent = typed() ? "No matches." : filtering() ? "No papers match these filters."
-        : "No episodes yet. They appear here as people add papers with papercast add.";
+        : "No episodes yet.";
     } else if (empty) empty.remove();
     if (S.flash && S.rows.has(S.flash)) {
       const li = S.rows.get(S.flash).li;
@@ -1063,11 +1064,11 @@
       bar.firstChild.style.width = `${pct}%`;
       kids.push(big(`Speaking ${pct}%`), bar, detail("Recording the voice."));
     } else if (st === "waiting-for-gpu") {
-      kids.push(big("Waiting for GPU", "warn"), detail("In the voice queue. It starts by itself when the GPU has room."));
+      kids.push(big("Waiting for GPU", "warn"));
     } else if (st === "failed") {
       kids.push(big("Couldn't record the voice", "danger"), detail(c.state_detail || "The voice worker gave up on it."));
     } else if (st === "ready") {
-      kids.push(big("The audio is missing", "danger"), detail("The hub has no audio file for this version."));
+      kids.push(big("The audio is missing", "danger"));
     } else {
       kids.push(big("Checking…"), detail("The hub is checking the upload."));
     }
@@ -1831,7 +1832,7 @@
   // social.js (window.PaperSocial) draws them; this is what it may use of the page.
   function socialCtx() {
     return {
-      api, me: () => S.me, isAdmin, phone, toast, hms,
+      api, me: () => S.me, isAdmin, phone, toast, hms, avatar: avatarNode,
       typed: () => { S.typedAt = Date.now(); },
       openPaper: (pid) => openPaper(pid),
       rowChanged: (pid) => updateRow(pid),
@@ -1928,8 +1929,7 @@
   // Base prompt and Slack. Each tab reads the hub when opened.
   const TABS = [["prefs", "Preferences"], ["voice", "Voice", false, false, true], ["devices", "Devices"], ["account", "Account", false, true], ["users", "Users", true], ["base", "Base prompt", true], ["slack", "Slack", true]];
   const PREF_TEXT = {
-    maths: ["Maths", { words: "In words", "key-steps": "Key steps", full: "Full derivations" },
-      "In words only, the key steps, or the whole derivation walked through (the equations go on the explainer page)."],
+    maths: ["Maths", { words: "In words", "key-steps": "Key steps", full: "Full derivations" }, ""],
     emphasis: ["What gets more time", { balanced: "Balanced", theory: "Theory", method: "Method", practice: "Practice" }, ""],
     background: ["What the listener already knows", { newcomer: "New to the field", field: "Works in the field", specialist: "Specialist" }, ""],
   };
@@ -2017,7 +2017,6 @@
     });
     summary();
     body.replaceChildren(
-      el("p", { class: "intro", text: "How the versions you make with papercast add are written. They decide what gets more time; the rules every episode follows stay the same." }),
       ...groups,
       el("div", { class: "pref" }, el("p", { class: "pref-h", text: "Note" }), note, count),
       sumLine,
@@ -2048,7 +2047,6 @@
     draw();
     body.append(el("div", { class: "pref", "data-k": "slack", id: "pref-slack" },
       el("p", { class: "pref-h sec", text: `Post my new episodes to ${j.channel}` }), seg,
-      el("p", { class: "muted", text: "papercast add asks each time; this is the answer when you just press Enter, or when it runs without a terminal. Saved at once." }),
       msg));
   }
 
@@ -2077,10 +2075,10 @@
             el("div", { class: "it-s", text: [t.created_at ? `added ${day(t.created_at)}` : "", t.last_used_at ? `last used ${when(t.last_used_at)}` : "never used"].filter(Boolean).join(" · ") })),
           b);
       }));
-      if (!live.length) ul.replaceChildren(el("li", { class: "muted intro", text: "None yet. Run papercast login on your computer to add one." }));
+      if (!live.length) ul.replaceChildren(el("li", { class: "muted intro", text: "None yet." }));
     };
     draw();
-    body.replaceChildren(el("p", { class: "intro", text: "Computers where papercast is logged in as you. Revoke one you no longer use: it stops working at once." }), ul);
+    body.replaceChildren(ul);
   }
 
   async function usersTab(body) {
@@ -2108,12 +2106,14 @@
         show(to);
         put(u, { disabled: to }, () => show(!to));
       });
-      return el("li", { class: "item", "data-id": String(u.id) },
+      const pic = u.id !== S.me.id && hasPicture(u) ? el("button", { type: "button", class: "text-btn", text: "Remove picture",
+        "aria-label": `Remove the picture of ${u.name || u.email}`, onclick: (e) => { e.currentTarget.remove(); removePicture(u); } }) : null;
+      return el("li", { class: "item", "data-id": String(u.id) }, avatarNode(u, "m"),
         el("div", { class: "it-main" }, el("div", { class: "it-t", text: `${u.name || u.email}${u.id === S.me.id ? " (you)" : ""}` }),
           el("div", { class: "it-s", text: [u.email, u.created_at ? `since ${day(u.created_at)}` : ""].filter(Boolean).join(" · ") })),
-        el("div", { class: "it-ctl" }, role, dis));
+        el("div", { class: "it-ctl" }, role, dis, pic));
     }));
-    const kids = [el("p", { class: "intro", text: "Viewers listen and edit graphs; contributors also add papers with papercast; admins also manage people and the base prompt." }), ul];
+    const kids = [ul];
     // Invite links are the local sign-in's (with Cloudflare Access, people sign in by email).
     if (S.cfg && S.cfg.auth === "local") {
       const irole = el("select", { class: "pick", "aria-label": "Role for the invite" },
@@ -2133,6 +2133,16 @@
         el("p", { class: "muted", text: "One use, for 7 days." }));
     }
     body.replaceChildren(...kids);
+  }
+
+  // An admin takes someone's picture down (hub/avatars.py); the event redraws it everywhere.
+  async function removePicture(u) {
+    try {
+      await api("DELETE", `/api/admin/users/${encodeURIComponent(u.id)}/avatar`);
+      u.avatar = null;
+      if (window.PcgAvatar) window.PcgAvatar.set(u.id, null);
+      toast("Picture removed", null, 3000);
+    } catch (e) { toast(e.message); }
   }
 
   // Password sign-in (PCG_AUTH=password): this person's name, password and sessions.
@@ -2212,11 +2222,93 @@
     drawSize();
     body.replaceChildren(
       el("p", { class: "pref-h", text: "Name" }), el("div", { class: "invite first" }, name, nameSave), nameMsg,
+      ...pictureSection(),
       el("p", { class: "pref-h sec", text: "Appearance" }), look,
       el("p", { class: "pref-h sec", text: "Size" }), sizeSeg,
       el("p", { class: "pref-h sec", text: "Change password" }), form,
       el("p", { class: "pref-h sec", text: "Sign out" }),
       el("div", { class: "save-row" }, out, all));
+  }
+
+  // ------------------------------------------------------------------ profile pictures
+  // avatar.js draws them (the picture, or initials on a colour) and hub/avatars.py keeps them.
+  // The browser makes the picture that is sent: the middle square of the file, 256 x 256, a JPEG
+  // (quality 0.85), so the hub only ever gets a small JPEG and never opens an image itself.
+  const AV_SIDE = 256, AV_QUALITY = 0.85, AV_FILE_MAX = 10 * 1024 * 1024;
+  const avatarNode = (u, size) => (window.PcgAvatar && u ? window.PcgAvatar.node(u, size) : document.createTextNode(""));
+  const hasPicture = (u) => !!(window.PcgAvatar ? window.PcgAvatar.version(u) : u && u.avatar);
+  function avatarChanged(d) {
+    if (!d || d.user_id === undefined || d.user_id === null) return;
+    if (window.PcgAvatar) window.PcgAvatar.set(d.user_id, d.avatar || null);
+    if (S.me && S.me.id === d.user_id) { S.me.avatar = d.avatar || null; if (S.set.pic) S.set.pic(); }
+  }
+  function imageOf(f) {
+    const viaImg = () => new Promise((resolve, reject) => {          // a data: URL: the page's CSP allows no blob: images
+      const r = new FileReader();
+      r.onerror = () => reject(new Error("unreadable"));
+      r.onload = () => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error("undecodable"));
+        img.src = r.result;
+      };
+      r.readAsDataURL(f);
+    });
+    return window.createImageBitmap ? createImageBitmap(f, { imageOrientation: "from-image" }).catch(viaImg) : viaImg();
+  }
+  // Refused: a word or two, no sentences (Leo, 2026-09-29).
+  const AV_SAYS = { not_image: "Not an image", not_jpeg: "Not an image", bad_type: "Not an image", too_big: "Too big",
+    too_large: "Too big", bad_size: "Wrong size", not_square: "Wrong size", slow_down: "Wait a minute" };
+  const avRefusal = (code) => Object.assign(new Error(AV_SAYS[code] || "Failed"), { code });
+  async function makePicture(f) {
+    if (!f || !/^image\//i.test(f.type || "")) throw avRefusal("not_image");
+    if (f.size > AV_FILE_MAX) throw avRefusal("too_big");
+    let img;
+    try { img = await imageOf(f); } catch (e) { throw avRefusal("not_image"); }
+    const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height, side = Math.min(w, h);
+    if (!side) throw avRefusal("not_image");
+    const cv = el("canvas", { width: String(AV_SIDE), height: String(AV_SIDE) });
+    const g = cv.getContext("2d");
+    g.fillStyle = "#FFFFFF";                 // a transparent picture on white, not on black
+    g.fillRect(0, 0, AV_SIDE, AV_SIDE);
+    g.imageSmoothingEnabled = true; g.imageSmoothingQuality = "high";
+    g.drawImage(img, (w - side) / 2, (h - side) / 2, side, side, 0, 0, AV_SIDE, AV_SIDE);
+    if (img.close) img.close();
+    const blob = await new Promise((resolve) => cv.toBlob(resolve, "image/jpeg", AV_QUALITY));
+    if (!blob || blob.type !== "image/jpeg") throw avRefusal("failed");
+    return blob;
+  }
+  // Settings > Account: "Profile picture", the picture, Upload, Remove; nothing else to read.
+  function pictureSection() {
+    const pic = el("div", { class: "av-now", id: "acct-av" });
+    const file = el("input", { type: "file", accept: "image/*", id: "acct-av-file", hidden: true, "aria-label": "Profile picture" });
+    const up = el("button", { type: "button", class: "btn-accent", id: "acct-av-up", text: "Upload" });
+    const rm = el("button", { type: "button", class: "text-btn danger", id: "acct-av-rm", text: "Remove" });
+    const msg = el("span", { class: "err", id: "acct-av-msg", role: "status" });
+    const draw = () => {
+      if (!pic.isConnected && pic.firstChild) return;
+      pic.replaceChildren(avatarNode(S.me, "l"));
+      rm.hidden = !hasPicture(S.me);
+    };
+    const run = async (fn) => {
+      up.disabled = rm.disabled = true; msg.textContent = "";
+      try {
+        const v = await fn();
+        S.me.avatar = v;
+        if (window.PcgAvatar) window.PcgAvatar.set(S.me.id, v);
+      } catch (e) { msg.textContent = AV_SAYS[e.code] || "Failed"; }
+      up.disabled = rm.disabled = false; draw();
+    };
+    up.addEventListener("click", () => { file.value = ""; file.click(); });
+    file.addEventListener("change", () => {
+      const f = file.files && file.files[0];
+      if (f) run(async () => (await api("PUT", "/api/me/avatar", await makePicture(f))).avatar).then(() => { file.value = ""; });
+    });
+    rm.addEventListener("click", () => run(async () => { await api("DELETE", "/api/me/avatar"); return null; }));
+    S.set.pic = draw;
+    draw();
+    return [el("p", { class: "pref-h sec", text: "Profile picture" }),
+      el("div", { class: "av-edit" }, pic, el("div", { class: "av-btns" }, up, rm, msg)), file];
   }
 
   // Users with password sign-in: the group's list of Imperial addresses. Adding a short code
@@ -2232,13 +2324,15 @@
     role: "role changed", disabled: "disabled changed", welcome_sent: "welcome email sent", welcome_failed: "welcome email failed",
   };
   const CODE_RX = /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/;
-  function codeOf(v) {
-    const s = v.trim().toLowerCase();
+  const DOMAIN_RX = /^(?=.{3,190}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/;
+  // the short code and the domain after the @ (ic.ac.uk unless the admin changes it)
+  function codeOf(v, d) {
+    const s = v.trim().toLowerCase(), dom = d.trim().toLowerCase().replace(/^@/, "");
     if (!s) return { err: "" };
-    const m = /^(.*)@ic\.ac\.uk$/.exec(s);
-    if (s.includes("@") && !m) return { err: "Only @ic.ac.uk here: type the short code, like yl6719." };
-    const c = m ? m[1] : s;
-    return CODE_RX.test(c) && c.length <= 64 ? { code: c } : { err: "A short code is letters and digits, maybe with dots or hyphens, like yl6719." };
+    if (s.includes("@")) return { err: "Type only the part before the @ here; the part after it goes in the second box." };
+    if (!CODE_RX.test(s) || s.length > 64) return { err: "A short code is letters and digits, maybe with dots or hyphens, like yl6719." };
+    if (!DOMAIN_RX.test(dom)) return { err: dom ? `“${dom.slice(0, 40)}” is not an email domain, like ic.ac.uk.` : "Type the part after the @, like ic.ac.uk." };
+    return { code: s, email: `${s}@${dom}` };
   }
   async function peopleTab(body) {
     let j, lg;
@@ -2249,27 +2343,38 @@
     const again = () => { if (stillOn("users")) peopleTab(body); };
     const ROLES = ["viewer", "contributor", "admin"];
 
-    // add: the short code, with @ic.ac.uk fixed after it
+    // add: the short code @ the domain (ic.ac.uk, which the admin can change); a whole address
+    // pasted into the first box is split into the two
     const code = el("input", { class: "field", id: "add-code", autocomplete: "off", autocapitalize: "off", spellcheck: "false",
-      maxlength: "80", placeholder: "short code, like yl6719", "aria-label": "Short code", enterkeyhint: "done" });
+      maxlength: "80", placeholder: "short code, like yl6719", "aria-label": "Short code", enterkeyhint: "next" });
+    const dom = el("input", { class: "field dom", id: "add-domain", autocomplete: "off", autocapitalize: "off", spellcheck: "false",
+      maxlength: "190", "aria-label": "Email domain", enterkeyhint: "done" });
+    dom.value = "ic.ac.uk";
     const add = el("button", { type: "submit", class: "btn-accent", id: "add-go", text: "Add", disabled: true });
     const addMsg = el("p", { class: "muted", id: "add-msg", role: "status" });
-    code.addEventListener("input", () => {
-      const c = codeOf(code.value);
+    const check = () => {
+      const at = code.value.indexOf("@");
+      if (at >= 0) {                        // an "@" typed or pasted: the rest goes on in the domain box
+        dom.value = code.value.slice(at + 1).trim(); code.value = code.value.slice(0, at);
+        dom.focus(); dom.setSelectionRange(dom.value.length, dom.value.length);
+      }
+      const c = codeOf(code.value, dom.value);
       add.disabled = !c.code;
       addMsg.className = c.err ? "err" : "muted"; addMsg.textContent = c.err || "";
-    });
+    };
+    code.addEventListener("input", check);
+    dom.addEventListener("input", check);
     const addForm = el("form", { class: "invite first", id: "add-form", novalidate: true },
-      el("div", { class: "addr" }, code, el("span", { class: "suffix", "aria-hidden": "true", text: "@ic.ac.uk" })), add);
+      el("div", { class: "addr" }, code, el("span", { class: "suffix", "aria-hidden": "true", text: "@" }), dom), add);
     addForm.addEventListener("submit", async (e) => {
       e.preventDefault();
-      const c = codeOf(code.value);
+      const c = codeOf(code.value, dom.value);
       if (!c.code) return;
       add.disabled = true;
       try {
-        const r = await api("POST", "/api/admin/allowed", { email: c.code });
+        const r = await api("POST", "/api/admin/allowed", { email: c.email });
         S.set.added = r.state === "already" ? `${r.email} is already on the list.`
-          : r.welcome === "queued" ? `Added ${r.email}. The welcome email with their username and first password is on its way (tell them to look in junk too).`
+          : r.welcome === "queued" ? `Added ${r.email}. Welcome email sent.`
           : `Added ${r.email}. Tell them: username ${r.username}, first password ${r.username}${r.user && !r.user.must_change ? " (or the one they had)" : ""}.`;
         again();
       } catch (err) { addMsg.className = "err"; addMsg.textContent = err.message; add.disabled = false; }
@@ -2345,6 +2450,7 @@
         e.stopPropagation();
         openMenu(more, `user-${u.id}`, [mItem("Make a password link", () => linkFor(u, li))]
           .concat(!mine && u.default_password && !u.disabled && j && j.email ? [mItem("Send the welcome email again", () => welcomeAgain(u))] : [])
+          .concat(!mine && hasPicture(u) ? [mItem("Remove their picture", () => removePicture(u))] : [])
           .concat(mine ? [] : [mItem("Reset to the first password", () => resetDefault(u, li)), mItem("Remove…", () => remove(u, li), "danger")]));
       });
       const sub = [u.name && u.name !== u.username ? u.username : u.email,
@@ -2358,7 +2464,7 @@
         u.note && u.note !== "bootstrap" ? u.note : null].filter(Boolean);
       const s = el("div", { class: "it-s" });
       sub.forEach((x, i) => { if (i) s.append(" · "); s.append(x); });
-      li.append(el("div", { class: "it-main" }, el("div", { class: "it-t", text: `${u.name || u.username}${mine ? " (you)" : ""}` }), s),
+      li.append(avatarNode(u, "m"), el("div", { class: "it-main" }, el("div", { class: "it-t", text: `${u.name || u.username}${mine ? " (you)" : ""}` }), s),
         el("div", { class: "it-ctl" }, role, more));
       return li;
     }));
@@ -2371,9 +2477,7 @@
     }));
     if (!events.length) evs.append(el("li", { class: "muted", text: "Nothing yet." }));
     body.replaceChildren(...[
-      el("p", { class: "intro", text: "Only Imperial addresses on this list can sign in. Contributors also add papers with papercast; admins also manage people and the base prompt." }),
       el("p", { class: "pref-h", text: "Add someone" }), addForm, addMsg,
-      el("p", { class: "muted", text: `They sign in with the short code as username and as first password, and choose their own straight away. They start as contributors.${j && j.email ? " The hub emails them a welcome with both." : ""}` }),
       el("p", { class: "pref-h sec", text: `On the list (${listed.length})` }), ul,
       j && j.email === false ? el("p", { class: "muted", id: "no-email", text: "This hub cannot send email yet, so someone who forgets their password shows up here as “asked for a new password”: reset them to the first password, or make them a password link." }) : null,
       off.length ? el("p", { class: "muted", id: "off-list", text: `Not on the list, so they cannot sign in: ${off.map((u) => u.username || u.email).join(", ")}. Add one again to bring the account back.` }) : null,
@@ -2389,7 +2493,7 @@
     const draw = () => {
       if (!stillOn("base")) return;
       const newest = versions[0];
-      const kids = [el("p", { class: "intro", text: "The guideline every episode is written from, before each maker's preferences. A new version is used for episodes started after it; an episode keeps the version it was made with." })];
+      const kids = [];
       if (st.editing) {
         const g = el("textarea", { class: "field editor", id: "base-text", "aria-label": "Guideline", spellcheck: "false" });
         g.value = newest ? newest.guideline : "";
@@ -2435,7 +2539,7 @@
   // the hub records it again in the fair queue, this version plays on meanwhile, and when the
   // new audio lands this page moves to it at the same sentence. The audio's revision is in its
   // URL (?v=), so no browser plays a cached old one. Samples come from tools/make_voice_samples.py.
-  S.voices = null; S.vpick = null;
+  S.voices = null; S.vpick = null; S.vtab = null;
   const makesVersions = () => !!S.me && (S.me.role === "contributor" || S.me.role === "admin");
   function audioUrl(e) {
     const r = e && e.voice && e.voice.rev;
@@ -2486,12 +2590,12 @@
       b.innerHTML = playing ? I.pause(16) : I.play(16);
     }
   }
-  // The presets as radio rows, each with its sample (the Versions list's look).
+  // The voices as radio rows, each with its sample (the Versions list's look).
   function voiceRows(list, sel, pick) {
     return list.map((x) => el("div", { class: "vrow", "data-voice": x.id },
       el("button", { type: "button", class: "ver", role: "radio", "aria-checked": String(x.id === sel), onclick: () => pick(x.id) },
         el("span", { class: "mark", "aria-hidden": "true" }),
-        el("span", { class: "v-main" }, el("span", { class: "v-who", text: x.name }), x.about ? el("span", { class: "v-sum", text: x.about }) : null)),
+        el("span", { class: "v-main" }, el("span", { class: "v-who", text: x.name }))),
       x.sample
         ? el("button", { type: "button", class: "icon-btn vplay", "data-sample": x.id, "aria-pressed": "false", "aria-label": `Play the sample of ${x.name}`,
           html: I.play(16), onclick: () => playSample(x) })
@@ -2523,17 +2627,19 @@
     if (!S.vpick || S.vpick.eid !== c.id || pd || !v.can_change) { box.hidden = true; box.dataset.sig = ""; return; }
     voicesList().then((j) => {
       if (!S.vpick || S.vpick.eid !== c.id) return;
-      const bsig = JSON.stringify([c.id, S.vpick.id, v.id]);
+      const bsig = JSON.stringify([c.id, S.vpick.id, v.id, v.custom || null, !!v.custom_old]);
       box.hidden = false;
       if (box.dataset.sig === bsig) return;
       box.dataset.sig = bsig;
-      const to = j.voices.find((x) => x.id === S.vpick.id);
-      const go = el("button", { type: "button", class: "btn-accent", id: "voice-go", disabled: !to || S.vpick.id === v.id,
-        text: to && S.vpick.id !== v.id ? `Record it in ${to.name}` : "Pick a voice", onclick: () => askChange(c.id, S.vpick.id) });
+      // the presets, then its maker's custom voice (in an older version of it: recorded again)
+      const rows = j.voices.concat(v.custom ? [v.custom] : []);
+      const to = rows.find((x) => x.id === S.vpick.id);
+      const same = S.vpick.id === v.id && !(v.id === "custom" && v.custom_old);
+      const go = el("button", { type: "button", class: "btn-accent", id: "voice-go", disabled: !to || same,
+        text: to && !same ? `Record it in ${to.name}` : "Pick a voice", onclick: () => askChange(c.id, S.vpick.id) });
       box.replaceChildren(el("div", { class: "col" }, el("h3", { class: "sec-h", text: "Voice" }),
         el("div", { class: "vlist", role: "radiogroup", "aria-label": "Voice for this version" },
-          voiceRows(j.voices, S.vpick.id, (id) => { S.vpick.id = id; renderWin(); })),
-        el("p", { class: "vnote", text: "It is recorded again in that voice, in the same queue as new versions. This one plays until the new one is ready." }),
+          voiceRows(rows, S.vpick.id, (id) => { S.vpick.id = id; renderWin(); })),
         el("div", { class: "save-row" }, go, el("button", { type: "button", class: "text-btn", id: "voice-close", text: "Cancel", onclick: () => { S.vpick = null; stopSample(); renderWin(); } }))));
       drawSampleButtons();
     }).catch((e) => toast(e.message));
@@ -2582,15 +2688,19 @@
     if (d.kind === "episode" && d.data && d.data.voice_swap) voiceSwapped(d.data);
   });
 
-  // Settings, Voice: my voice for new versions, and every voice's sample.
+  // Settings, Voice: my voice for new versions (the presets, and my custom voice once I have
+  // one), every voice's sample, and Custom: a description in Breeze's words, previewed through
+  // the voice queue (customvoice.py; the page follows it live), then used.
+  const PREVIEW_STATE = { queued: "Waiting", working: "Making…", done: "Ready", failed: "Didn’t work: try other words" };
   async function voiceTab(body) {
     stopSample();
+    S.voices = null;                    // the custom voice and its preview change: read them afresh
     let j;
     try { j = await voicesList(); } catch (e) { if (stillOn("voice")) failed(body, e); return; }
     if (!stillOn("voice")) return;
     const msg = el("span", { class: "ok", id: "voice-msg", role: "status" });
     const list = el("div", { class: "vlist", id: "voice-list", role: "radiogroup", "aria-label": "My voice" });
-    const draw = () => { list.replaceChildren(...voiceRows(j.voices, j.mine, pick)); drawSampleButtons(); };
+    const draw = () => { list.replaceChildren(...voiceRows(j.voices.concat(j.custom ? [j.custom] : []), j.mine, pick)); drawSampleButtons(); };
     const pick = async (id) => {
       if (id === j.mine) return;
       const was = j.mine;
@@ -2601,12 +2711,82 @@
         j.mine = r.mine; msg.textContent = "Saved";
       } catch (e) { j.mine = was; draw(); msg.className = "err"; msg.textContent = e.message; }
     };
+    const custom = customVoice(j, draw, msg);
+    S.vtab = (d) => {                   // a live `voice` event (mine only), or a resync
+      if (!stillOn("voice")) return;
+      if (d === null) { api("GET", "/api/voices").then((x) => { Object.assign(j, x); draw(); custom.draw(); }).catch(() => {}); return; }
+      if ("preview" in d) j.preview = d.preview;
+      if (d.custom) j.custom = d.custom;
+      if (d.mine) j.mine = d.mine;
+      draw(); custom.draw();
+    };
     draw();
     body.replaceChildren(
-      el("p", { class: "intro", text: "The voice your new versions are recorded in. A version you made can be recorded again in another voice from its page." }),
       el("div", { class: "pref" }, el("p", { class: "pref-h", text: "My voice" }), list),
+      custom.el,
       el("div", { class: "save-row" }, msg));
   }
+  function customVoice(j, drawList, msg) {
+    const max = j.custom_max || 500;
+    const text = el("textarea", { class: "field note", id: "vc-text", maxlength: String(max), rows: "3",
+      placeholder: j.custom_example || "", "aria-label": "Custom voice" });
+    text.value = (j.preview && j.preview.description) || (j.custom && j.custom.description) || "";
+    const count = el("div", { class: "counter t", id: "vc-count" });
+    const prev = el("button", { type: "button", class: "btn-accent", id: "vc-preview", text: "Preview" });
+    const again = el("button", { type: "button", class: "text-btn", id: "vc-again", text: "Another take" });
+    const use = el("button", { type: "button", class: "text-btn", id: "vc-use", text: "Use this voice" });
+    const state = el("span", { class: "vc-state", id: "vc-state", role: "status" });
+    const play = el("button", { type: "button", class: "icon-btn vplay", id: "vc-play", "data-sample": "preview", "aria-pressed": "false",
+      "aria-label": "Play the preview", html: I.play(16) });
+    let asking = false;
+    const draw = () => {
+      const pv = j.preview, said = text.value.replace(/\s+/g, " ").trim();
+      const same = !!pv && pv.description === said, st = pv ? pv.state : null;
+      const inUse = same && st === "done" && j.mine === "custom" && !!j.custom && j.custom.key === pv.key;
+      count.textContent = `${text.value.length} / ${max}`;
+      prev.disabled = asking || !said || st === "working" || (same && (st === "queued" || st === "done"));
+      again.hidden = !(same && (st === "done" || st === "failed"));
+      again.disabled = asking;
+      use.hidden = !(same && st === "done");
+      use.disabled = asking || inUse;
+      use.textContent = inUse ? "In use" : "Use this voice";
+      const show = !!pv && (same || st === "queued" || st === "working");
+      state.textContent = show ? PREVIEW_STATE[st] || "" : "";
+      state.className = `vc-state${show && st === "failed" ? " err" : ""}`;
+      play.hidden = !(same && st === "done" && pv.sample);
+      drawSampleButtons();
+    };
+    const ask = async (another) => {
+      asking = true; draw();
+      msg.className = "ok"; msg.textContent = "";
+      try { j.preview = (await api("POST", "/api/voices/custom/preview", { description: text.value, another })).preview; }
+      catch (e) { msg.className = "err"; msg.textContent = e.message; }
+      asking = false; draw();
+    };
+    prev.addEventListener("click", () => ask(false));
+    again.addEventListener("click", () => ask(true));
+    use.addEventListener("click", async () => {
+      asking = true; draw();
+      msg.className = "ok"; msg.textContent = "";
+      try {
+        const r = await api("PUT", "/api/voices/custom", { preview: j.preview.id });
+        j.mine = r.mine; j.custom = r.custom; msg.textContent = "Saved";
+        drawList();
+      } catch (e) { msg.className = "err"; msg.textContent = e.message; }
+      asking = false; draw();
+    });
+    play.addEventListener("click", () => { if (j.preview && j.preview.sample) playSample({ id: "preview", sample: j.preview.sample }); });
+    text.addEventListener("input", draw);
+    draw();
+    return { draw, el: el("div", { class: "pref vcustom", id: "voice-custom" }, el("p", { class: "pref-h", text: "Custom" }), text, count,
+      el("div", { class: "save-row vc-row" }, prev, again, use, state, play)) };
+  }
+  window.addEventListener("papercast:event", (ev) => {
+    const d = ev.detail || {};
+    if (!S.vtab) return;
+    if (d.kind === "voice") S.vtab(d.data || {});
+    else if (d.kind === "resync") S.vtab(null);
+  });
 
   // Slack (admins): whether it is set up, where it posts, a test message, the last 20 posts.
   const SLACK_STATE = { posted: "posted", pending: "waiting", sending: "sending", retrying: "trying again", failed: "failed", skipped: "not posted" };
@@ -2635,7 +2815,6 @@
         p.detail ? el("div", { class: "it-s" }, el("span", { class: p.state === "skipped" ? "" : "warn", text: p.detail })) : null))));
     if (!posts.length) ul.replaceChildren(el("li", { class: "muted intro", text: "Nothing announced yet." }));
     body.replaceChildren(
-      el("p", { class: "intro", text: `papercast add asks each maker whether to post their episode to ${j.channel}; the hub posts it with its link once the audio is ready. The webhook address stays in a file on the hub (${j.setting} in hub.env).` }),
       status,
       el("div", { class: "save-row" }, test, res),
       el("p", { class: "pref-h sec", text: "Last 20" }), ul);
@@ -2671,7 +2850,11 @@
     on("episode", (d) => touched(d.paper_id || (d.paper && d.paper.id) || S.epPaper.get(d.episode_id || d.id)));
     on("graph", (d) => toMap("graph", d));
     on("log", (d) => toMap("log", d));
+    on("voice", () => {});               // my custom voice's preview (Settings, Voice): as papercast:event
     queueEvents(es);
+    // profile pictures: avatar.js redraws each one on the page; a resync reads them all again
+    on("avatar", avatarChanged);
+    on("resync", () => { api("GET", "/api/config").then((j) => { if (window.PcgAvatar && j) window.PcgAvatar.seed(j.avatars); }, () => {}); });
     // comments and the board (social.js); paper, episode and log events reach it as papercast:event
     on("comment", (d) => { if (S.social) S.social.event("comment", d); });
     on("board", (d) => { if (S.social) S.social.event("board", d); });
@@ -2686,6 +2869,7 @@
     $("sort-btn").innerHTML = I.sort;
     try { S.cfg = await api("GET", "/api/config"); } catch (e) { toast(e.message); return; }
     S.me = S.cfg.me || {};
+    if (window.PcgAvatar) window.PcgAvatar.seed(S.cfg.avatars);       // everyone's profile picture
     S.build = S.cfg.build || "";        // the build this page's code came with
     S.social = window.PaperSocial ? window.PaperSocial.mount(socialCtx()) : null;     // comments and the board
     wireList();

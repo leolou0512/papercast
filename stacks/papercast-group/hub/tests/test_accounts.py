@@ -206,10 +206,10 @@ class PasswordTest(unittest.TestCase):
         s, peek, _ = self.r("POST", "/api/auth/link", {"token": tok2, "peek": True})
         self.assertEqual((s, peek["username"], peek["email"], peek["first"]), (200, "yl6719", LEO, False))
         self.assertEqual(self.me(self.leo)[0], 200)
-        # only Imperial addresses
-        p = self.hub.run("bootstrap", "leo@gmail.com")
+        # an address, at a real-looking domain
+        p = self.hub.run("bootstrap", "leo@nodot")
         self.assertEqual(p.returncode, 2)
-        self.assertIn("Only Imperial addresses", p.stderr)
+        self.assertIn("is not an email domain", p.stderr)
 
     # ---------------------------------------------------------------- the ledger
     def test_the_add_box_short_code_full_address_and_bad_input(self):
@@ -222,12 +222,16 @@ class PasswordTest(unittest.TestCase):
         self.assertEqual(self.add("ef303@imperial.ac.uk")["username"], "ef303")
         again = self.r("POST", "/api/admin/allowed", {"email": "ab101"}, **self.leo)
         self.assertEqual((again[0], again[1]["state"]), (200, "already"))
-        for bad, err in (("ab101@gmail.com", "not_imperial"), ("x@ic.ac.uk.evil.com", "not_imperial"), ("yl 6719", "bad_code"),
+        for bad, err in (("ab101@nodot", "bad_domain"), ("x@-ic.ac.uk", "bad_domain"), ("x@ic..ac.uk", "bad_domain"), ("x@", "bad_domain"), ("yl 6719", "bad_code"),
                          ("a..b", "bad_code"), ("-ab", "bad_code"), ("ab_c", "bad_code"), ("é12", "bad_code"),
                          ("@ic.ac.uk", "bad_code"), ("", "bad_email"), ("x" * 65, "bad_code"), (None, "bad_email")):
             s, j, _ = self.r("POST", "/api/admin/allowed", {"email": bad}, **self.leo)
             self.assertEqual((s, j["error"]), (400, err), bad)
-        self.assertIn("Only Imperial addresses", self.r("POST", "/api/admin/allowed", {"email": "x@gmail.com"}, **self.leo)[1]["message"])
+        # another domain, when the admin types one: its local part is the username, the full address signs in too
+        s, j, _ = self.r("POST", "/api/admin/allowed", {"email": " Ext101@Uni.Example.org ", "welcome": False}, **self.leo)
+        self.assertEqual((s, j["email"], j["username"]), (201, "ext101@uni.example.org", "ext101"))
+        self.assertEqual(self.login("ext101@uni.example.org", "ext101")[0], 200)
+        self.assertEqual(self.login("ext101", "ext101")[0], 200)
         # one username, one person: the same short code at the other Imperial domain is refused
         s, j, _ = self.r("POST", "/api/admin/allowed", {"email": "ab101@imperial.ac.uk"}, **self.leo)
         self.assertEqual((s, j["error"]), (409, "username_taken"))
@@ -305,13 +309,13 @@ class PasswordTest(unittest.TestCase):
 
     def test_the_command_line_ledger(self):
         f = Path(self.hub.dir) / "group.txt"
-        f.write_text("# the group, one per line\nxy101@ic.ac.uk\n  XY102@IMPERIAL.AC.UK   # visiting\n\nxy103\nnot-imperial@gmail.com\n")
+        f.write_text("# the group, one per line\nxy101@ic.ac.uk\n  XY102@IMPERIAL.AC.UK   # visiting\n\nxy103\nnot-a-domain@nodot\n")
         p = self.hub.run("allow", "import", str(f), "--no-welcome")
         self.assertEqual(p.returncode, 1)                       # one line refused
         self.assertIn("added xy101@ic.ac.uk: username xy101, first password xy101", p.stdout)
         self.assertIn("added xy102@imperial.ac.uk", p.stdout)
         self.assertIn("added xy103@ic.ac.uk", p.stdout)
-        self.assertIn("refused not-imperial@gmail.com: Only Imperial addresses", p.stderr)
+        self.assertIn("refused not-a-domain@nodot: “nodot” is not an email domain", p.stderr)
         p = self.hub.run("allow", "add", "xy101@ic.ac.uk", "xy104", "--note", "summer student", "--no-welcome")
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("already on the list: xy101@ic.ac.uk", p.stdout)
@@ -1140,9 +1144,11 @@ class PasswordPagesTest(unittest.TestCase):
     def test_5_users_add_box_and_typed_delete(self):
         self.signed_in_as_leo("/#settings=users")
         self.wait("!!document.getElementById('add-code')", "the users tab")
-        self.assertEqual(self.js("document.querySelector('#add-form .suffix').textContent"), "@ic.ac.uk")
+        self.assertEqual(self.js("document.querySelector('#add-form .suffix').textContent"), "@")
+        self.assertEqual(self.js("document.getElementById('add-domain').value"), "ic.ac.uk")
+        self.assertNotIn("Only Imperial addresses", self.js("document.body.textContent"))
         self.assertTrue(self.js("document.getElementById('add-go').disabled"))
-        for bad, says in (("yl 67", "letters and digits"), ("x@gmail.com", "Only @ic.ac.uk"), ("a..b", "letters and digits")):
+        for bad, says in (("yl 67", "letters and digits"), ("a..b", "letters and digits")):
             self.typ("#add-code", bad)
             self.assertTrue(self.js("document.getElementById('add-go').disabled"), bad)
             self.assertIn(says, self.js("document.getElementById('add-msg').textContent"))
@@ -1151,12 +1157,17 @@ class PasswordPagesTest(unittest.TestCase):
         n = len(self.smtp.messages)
         self.click("#add-go")
         self.wait("document.getElementById('add-msg').textContent.startsWith('Added pg501@ic.ac.uk')", "added")
-        self.assertIn("welcome email with their username and first password is on its way", self.js("document.getElementById('add-msg').textContent"))
+        self.assertIn("Welcome email sent.", self.js("document.getElementById('add-msg').textContent"))
         self.assertTrue(accounts.mail_idle() and self.smtp.wait(n + 1))
         self.assertEqual(self.smtp.messages[n]["to"], ["pg501@ic.ac.uk"])
         self.typ("#add-code", "PG502@ic.ac.uk")
         self.click("#add-go")
         self.wait("document.getElementById('add-msg').textContent.startsWith('Added pg502@ic.ac.uk')", "a full address")
+        self.typ("#add-code", "pg503")
+        self.typ("#add-domain", "imperial.ac.uk")
+        self.click("#add-go")
+        self.wait("document.getElementById('add-msg').textContent.startsWith('Added pg503@imperial.ac.uk')", "another domain")
+        self.assertEqual(self.js("document.getElementById('add-domain').value"), "ic.ac.uk")      # back to the default
         uid = accounts.account(username="pg501")["id"]
         row = f"#users .item[data-id=\"{uid}\"]"
         self.assertIn("first password", self.js(f"document.querySelector('{row} .it-s').textContent"))

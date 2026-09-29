@@ -20,7 +20,12 @@ disk in chunks under a size limit instead of holding it in memory.
 A voice change (voices.py) puts an episode that has audio back in this queue: while it is made the
 episode stays ready with its old audio (claim, status and failures leave the episode row alone),
 the claim carries the voice, and the new MP3 replaces the old one. PUT /api/voice/<id>/timings
-takes the sentence timings of the audio being made (before its MP3), or of the audio there is."""
+takes the sentence timings of the audio being made (before its MP3), or of the audio there is.
+
+Voice previews (customvoice.py) share this queue: a claim may hand one out, under the id
+vp-<user id>, and every /api/voice/<id>/... route hands such an id to that module. They take
+turns with episodes (customvoice.merge): a preview goes first unless the last claim was one, so
+episodes never wait behind more than one short preview at a time. served_seq counts both."""
 from __future__ import annotations
 
 import json
@@ -33,7 +38,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import db, events, voices
+from . import customvoice, db, events, voices
 from .app import HTTPError
 
 log = logging.getLogger("pcg.voiceq")
@@ -185,16 +190,23 @@ def fair_order(jobs, served: dict) -> list:
 
 
 def queue_positions() -> dict:
-    """{episode_id: place in line (1 = next)} for everything waiting for the voice."""
+    """{episode_id: place in line (1 = next)} for everything waiting for the voice (the previews
+    taking their turns count as places, but have none here)."""
     c = db.conn()
     ensure_columns(c)
-    return {j["episode_id"]: i for i, j in enumerate(fair_order(_eligible(c), _last_served(c)), 1)}
+    order = customvoice.merge(c, fair_order(_eligible(c), _last_served(c)))
+    return {j["episode_id"]: i for i, (kind, j) in enumerate(order, 1) if kind == "episode"}
+
+
+def _next_seq(c) -> int:
+    return max(c.execute("SELECT MAX(served_seq) FROM voice_jobs").fetchone()[0] or 0, customvoice.max_seq(c)) + 1
 
 
 # ---- the sweeper: stale claims go back even when no worker is asking (a dead worker)
 
 _sweep_lock = threading.Lock()
 _sweep_started = False
+_cfg = None                     # the hub's, for the sweeper's notices (set by the first claim)
 
 
 def start_sweeper() -> None:
@@ -213,7 +225,10 @@ def _sweep() -> None:
             with db.transaction() as c:
                 ensure_columns(c)
                 ids = requeue_stale(c)
+                pv = customvoice.requeue_stale(c)
             _publish(db.conn(), ids)
+            if pv and _cfg is not None:
+                customvoice.notify(_cfg, pv)
         except Exception:
             log.exception("voice sweeper")
 
@@ -238,30 +253,41 @@ def _check_holder(req, job, body=None) -> None:
 
 
 def claim(req):
+    global _cfg
+    _cfg = req.cfg
     start_sweeper()
     body = req.json()
     worker = _worker_name(req, body)
     now = db.now()
+    pv = pv_body = None
     with db.transaction() as c:
         ensure_columns(c)
         stale = requeue_stale(c)
+        stale_pv = customvoice.requeue_stale(c)
         job = c.execute("SELECT * FROM voice_jobs WHERE state = 'claimed' AND worker = ? "
                         "ORDER BY claimed_at LIMIT 1", (worker,)).fetchone()
         resumed = job is not None
+        pv_resumed = False
         if resumed:                     # one claim per worker: give back the one it holds
             c.execute("UPDATE voice_jobs SET heartbeat_at = ? WHERE episode_id = ?", (now, job["episode_id"]))
+        elif (pv := customvoice.held(c, worker)) is not None:
+            pv_resumed = True           # ... a preview, likewise
+            customvoice.touch(c, pv, now)
         else:
-            order = fair_order(_eligible(c), _last_served(c))
-            if order:
-                eid = order[0]["episode_id"]
-                seq = (c.execute("SELECT MAX(served_seq) FROM voice_jobs").fetchone()[0] or 0) + 1
+            order = customvoice.merge(c, fair_order(_eligible(c), _last_served(c)))
+            if order and order[0][0] == "preview":
+                pv = customvoice.take(c, order[0][1], worker, now, _next_seq(c))
+            elif order:
+                eid = order[0][1]["episode_id"]
                 c.execute("UPDATE voice_jobs SET state = 'claimed', worker = ?, claimed_at = ?, heartbeat_at = ?, "
                           "finished_at = NULL, phase = 'claimed', progress = 0, attempts = attempts + 1, "
-                          "served_seq = ? WHERE episode_id = ?", (worker, now, now, seq, eid))
+                          "served_seq = ? WHERE episode_id = ?", (worker, now, now, _next_seq(c), eid))
                 if not voices.revoicing(c, eid):        # a voice change: the old audio plays on
                     c.execute("UPDATE episodes SET state = 'waiting-for-gpu', state_detail = 'with the voice', "
                               "updated_at = ? WHERE id = ?", (now, eid))
                 job = _job(c, eid)
+        if pv is not None:
+            pv_body = customvoice.claim_body(c, pv, pv_resumed)
         info = voice = None
         if job is not None:
             info = c.execute("SELECT e.id, e.paper_id, p.title, p.authors, p.year, u.name AS maker "
@@ -270,6 +296,10 @@ def claim(req):
             voice = voices.claim_voice(c, job["episode_id"])
     c = db.conn()
     _publish(c, stale + ([job["episode_id"]] if job is not None and not resumed else []))
+    customvoice.notify(req.cfg, stale_pv + ([pv["user_id"]] if pv is not None and not pv_resumed else []))
+    if pv_body is not None:
+        req.send_json(200, pv_body)
+        return
     if job is None:
         req.send(204, b"", "application/json")
         return
@@ -290,6 +320,8 @@ def claim(req):
 
 
 def script(req, eid):
+    if customvoice.is_preview(eid):
+        return customvoice.w_script(req, eid)
     c = db.conn()
     if _job(c, eid) is None:
         raise HTTPError(404, "no_such_job", f"no voice job for {eid}")
@@ -313,6 +345,8 @@ def _progress(v):
 
 
 def status(req, eid):
+    if customvoice.is_preview(eid):
+        return customvoice.w_status(req, eid)
     body = req.json()
     phase = body.get("phase")
     if not isinstance(phase, str) or not phase.strip() or len(phase) > 40:
@@ -355,6 +389,8 @@ def looks_like_mp3(head: bytes) -> bool:
 
 @streamed
 def audio(req, eid):
+    if customvoice.is_preview(eid):
+        return customvoice.w_audio(req, eid)
     ctype = (req.headers.get("Content-Type") or "").split(";")[0].strip().lower()
     if ctype != "audio/mpeg":
         raise HTTPError(415, "bad_type", "send the audio as audio/mpeg")
@@ -403,6 +439,8 @@ def audio(req, eid):
 
 
 def failed(req, eid):
+    if customvoice.is_preview(eid):
+        return customvoice.w_failed(req, eid)
     body = req.json()
     err = body.get("error")
     if isinstance(err, dict):
@@ -436,6 +474,8 @@ def failed(req, eid):
 def timings(req, eid):
     """The sentence timings (papercast-voice's out/timings.json): for the audio this claim is
     making, kept until its MP3 arrives; or, sent for an episode not being voiced, for its audio."""
+    if customvoice.is_preview(eid):
+        return customvoice.w_timings(req, eid)
     raw = req.body(voices.TIMINGS_MAX)
     try:
         doc = json.loads(raw or b"null")
@@ -461,11 +501,14 @@ def queue(req):
     ensure_columns(c)
     held = c.execute("SELECT episode_id, worker, phase, progress, claimed_at, heartbeat_at, attempts "
                      "FROM voice_jobs WHERE state = 'claimed' ORDER BY claimed_at").fetchall()
-    order = fair_order(_eligible(c), _last_served(c))
-    req.send_json(200, {"claimed": [dict(r) for r in held],
+    order = customvoice.merge(c, fair_order(_eligible(c), _last_served(c)))
+    req.send_json(200, {"claimed": [dict(r) for r in held] + customvoice.held_rows(c),
                         "queued": [{"episode_id": j["episode_id"], "user_id": j["user_id"],
                                     "queued_at": j["queued_at"], "attempts": j["attempts"],
-                                    "retry": j["state"] == "failed"} for j in order]})
+                                    "retry": j["state"] == "failed"} if kind == "episode" else
+                                   {"episode_id": customvoice.job_id(j["user_id"]), "user_id": j["user_id"],
+                                    "queued_at": j["queued_at"], "attempts": j["attempts"], "retry": False,
+                                    "preview": True} for kind, j in order]})
 
 
 _ID = r"([A-Za-z0-9_-]{1,64})"

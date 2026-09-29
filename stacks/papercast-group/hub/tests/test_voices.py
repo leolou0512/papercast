@@ -2,7 +2,10 @@
 timings the worker uploads and where the hub keeps them, changing an episode's voice (its maker
 or an admin, nobody else; at most two waiting per person), the fair queue carrying the change,
 the old audio playing on until the new one lands, and the swap: new audio, new timings, a new
-revision, positions carried to the same sentence."""
+revision, positions carried to the same sentence. Custom voices (hub/customvoice.py): the
+description cleaned and checked, previews through the queue (taking turns with episodes, one per
+person at a time, a few an hour), "use", the claim's spec, an episode keeping the spec it was
+voiced in, the names people see, and the fallbacks."""
 from __future__ import annotations
 
 import json
@@ -27,7 +30,7 @@ def timings(n: int, per: float = 4.0, lead: float = 0.46, texts=None) -> dict:
                           "text": t} for i, t in enumerate(texts)]}
 
 
-class Voices(unittest.TestCase):
+class VoicesBase(unittest.TestCase):
     def setUp(self):
         self.h = H.Hub()
         self.n = 0
@@ -91,13 +94,15 @@ class Voices(unittest.TestCase):
         return {n: json.loads((d / n).read_text()) for n in ("timings.json", "timings.next.json", "timings.prev.json")
                 if (d / n).is_file()}
 
+
+class Voices(VoicesBase):
     # -- the presets
     def test_presets_and_samples(self):
         v = self.h.user("Viv", "viewer")
         code, j = self.web("GET", "/api/voices", v)
         self.assertEqual(code, 200, j)
         ids = [x["id"] for x in j["voices"]]
-        self.assertTrue(4 <= len(ids) <= 6, ids)
+        self.assertTrue(4 <= len(ids) <= 8, ids)
         self.assertEqual(j["default"], "clear-female")
         self.assertEqual([x["id"] for x in j["voices"] if x["default"]], ["clear-female"])
         self.assertEqual(sum(1 for x in j["voices"] if x["cpu"]), 1)
@@ -121,7 +126,7 @@ class Voices(unittest.TestCase):
         self.assertRegex(url, r"^/api/voices/warm-male/sample\.mp3\?v=\d+$")
         code, body = self.web("GET", url, v)
         self.assertEqual((code, body), (200, MP3))
-        self.assertEqual(self.web("GET", "/api/voices/calm-male/sample.mp3", v)[0], 404)
+        self.assertEqual(self.web("GET", "/api/voices/british-female/sample.mp3", v)[0], 404)
         self.assertEqual(self.web("GET", "/api/voices/nope/sample.mp3", v)[0], 404)
         self.assertEqual(self.h.request("GET", "/api/voices")[0], 401)
 
@@ -213,7 +218,7 @@ class Voices(unittest.TestCase):
         self.assertTrue(e["has_audio"], "the old audio plays on")
         self.assertEqual(e["voice"]["pending"]["id"], "warm-male")
         # an admin may change anyone's; an episode without audio yet cannot be changed
-        self.assertEqual(self.web("PUT", f"/api/episodes/{eid2}/voice", admin, {"voice": "calm-male"})[0], 200)
+        self.assertEqual(self.web("PUT", f"/api/episodes/{eid2}/voice", admin, {"voice": "warm-male"})[0], 200)
         self.assertEqual(self.ep_view(eid2, maker)["pending"]["by"], admin["id"])
         eid3 = self.episode(maker)
         code, out = self.web("PUT", f"/api/episodes/{eid3}/voice", maker, {"voice": "warm-male"})
@@ -248,7 +253,7 @@ class Voices(unittest.TestCase):
         self.assertEqual(self.worker("PUT", f"/api/voice/{eid}/timings", new)[1]["stored"], "next")
         self.assertEqual(self.files(eid)["timings.json"]["segments"], old["segments"])
         # a change is refused while it is being made
-        code, out = self.web("PUT", f"/api/episodes/{eid}/voice", maker, {"voice": "calm-male"})
+        code, out = self.web("PUT", f"/api/episodes/{eid}/voice", maker, {"voice": "warm-male"})
         self.assertEqual((code, out["error"]), (409, "busy"))
         # the new MP3 lands
         sub = events.subscribe(listener["id"])
@@ -310,8 +315,8 @@ class Voices(unittest.TestCase):
         for eid in (e1, e2):
             self.assertEqual(self.web("PUT", f"/api/episodes/{eid}/voice", maker, {"voice": "warm-male"})[0], 200)
         # another voice for one already waiting is not a third
-        self.assertEqual(self.web("PUT", f"/api/episodes/{e2}/voice", maker, {"voice": "calm-male"})[0], 200)
-        self.assertEqual(self.ep_view(e2, maker)["pending"]["id"], "calm-male")
+        self.assertEqual(self.web("PUT", f"/api/episodes/{e2}/voice", maker, {"voice": "warm-male"})[0], 200)
+        self.assertEqual(self.ep_view(e2, maker)["pending"]["id"], "warm-male")
         code, out = self.web("PUT", f"/api/episodes/{e3}/voice", maker, {"voice": "warm-male"})
         self.assertEqual((code, out["error"]), (429, "too_many"))
         # someone else's count is their own
@@ -405,9 +410,9 @@ class Voices(unittest.TestCase):
             c.execute("DELETE FROM episode_voice WHERE episode_id = ?", (eid,))
         vdir = self.h.cfg.episodes / eid / "voice"
         vdir.mkdir()
-        (vdir / "status.json").write_text(json.dumps({"phase": "done", "output": {"voice": "preset-calm-male-s42"}}))
+        (vdir / "status.json").write_text(json.dumps({"phase": "done", "output": {"voice": "preset-warm-male-s42"}}))
         voices.start(self.h.cfg)
-        self.assertEqual(self.ep_view(eid, a)["id"], "calm-male")
+        self.assertEqual(self.ep_view(eid, a)["id"], "warm-male")
 
     def test_remap(self):
         o = timings(3, per=4.0, texts=["a.", "b.", "c."])
@@ -417,6 +422,398 @@ class Voices(unittest.TestCase):
         self.assertEqual(voices.remap(13.0, o, n, 13.46, 25.46), 25.5, "finished stays finished")
         self.assertEqual(voices.remap(5.0, o, timings(2), 10.0, 20.0), 10.0, "other sentences: by length")
         self.assertEqual(voices.remap(5.0, None, None, 10.0, 20.0), 10.0)
+
+
+IRISH = "Young adult female, mid-20s, Irish accent. Warm, clear voice, mid-range pitch. Relaxed, natural delivery, steady pace."
+SCOT = "Adult male, 40s, soft Scottish accent. Deep, calm voice, slow pace."
+
+
+class CustomVoices(VoicesBase):
+    """The custom voice: previews, use, claims, episodes that keep their spec, names, limits."""
+
+    def preview(self, who, text, another=False, want=200):
+        code, out = self.web("POST", "/api/voices/custom/preview", who, {"description": text, "another": another})
+        self.assertEqual(code, want, out)
+        return out.get("preview") if want == 200 else out
+
+    def make_preview(self, who, text, another=False, key=True) -> dict:
+        """Preview `text`, and the worker makes it: claimed, spoken, its MP3 uploaded."""
+        pv = self.preview(who, text, another)
+        job = self.claim(f"vp-{who['id']}")
+        self.assertTrue(job["preview"])
+        self.assertEqual(self.worker("PUT", f"/api/voice/vp-{who['id']}/status", {"phase": "speaking", "progress": 0.5})[0], 200)
+        code, out = self.upload(f"vp-{who['id']}", data=MP3_2, dur="21.3", key=job["voice"]["spec"]["voice"] if key else None)
+        self.assertEqual(code, 200, out)
+        return dict(pv, key=job["voice"]["spec"]["voice"])
+
+    def use(self, who, text, another=False) -> dict:
+        pv = self.make_preview(who, text, another)
+        code, out = self.web("PUT", "/api/voices/custom", who, {"preview": pv["id"]})
+        self.assertEqual(code, 200, out)
+        return out["custom"]
+
+    def voices_page(self, who) -> dict:
+        code, j = self.web("GET", "/api/voices", who)
+        self.assertEqual(code, 200, j)
+        return j
+
+    def claim_nothing(self):
+        return self.worker("POST", "/api/voice/claim", {"worker": "w1"})[0]
+
+    def test_describe_and_preview(self):
+        a, viewer = self.h.user("Ada"), self.h.user("Viv", "viewer")
+        j = self.voices_page(a)
+        self.assertEqual((j["custom"], j["preview"], j["custom_max"], j["previews_per_hour"]), (None, None, 500, 5))
+        self.assertTrue(j["custom_example"])
+        self.assertEqual([x["id"] for x in j["voices"]], [p["id"] for p in voices.PRESETS], "presets only")
+        # who may, and what the description must be
+        self.assertEqual(self.preview(viewer, IRISH, want=403)["error"], "forbidden", "a viewer makes no versions")
+        self.assertEqual(self.web("POST", "/api/voices/custom/preview", a, {"description": IRISH}, pcg=False)[0], 403)
+        for bad, err in ((None, "bad_description"), (42, "bad_description"), (" \n\t​ ", "empty"),
+                         ("x" * 501, "too_long")):
+            with self.subTest(bad=bad):
+                self.assertEqual(self.preview(a, bad, want=400)["error"], err)
+        self.assertEqual(db.conn().execute("SELECT COUNT(*) FROM voice_previews").fetchone()[0], 0)
+        # control characters out, whitespace runs one space; 500 characters is fine
+        pv = self.preview(a, "Young\x00adult‮ female,\n\n  mid-20s\x7f,\tIrish accent.")
+        self.assertEqual((pv["description"], pv["seed"], pv["state"], pv["sample"]),
+                         ("Young adult female, mid-20s , Irish accent.", 42, "queued", None))
+        self.assertEqual(self.preview(a, "y" * 500)["description"], "y" * 500, "the waiting one says this instead")
+        # one at a time: asking again while it waits changes that one, in its place in line
+        pv2 = self.preview(a, IRISH)
+        self.assertEqual((pv2["id"], pv2["description"], pv2["state"]), (pv["id"], IRISH, "queued"))
+        self.assertEqual(db.conn().execute("SELECT COUNT(*) FROM voice_previews").fetchone()[0], 1)
+        self.assertEqual(self.voices_page(a)["preview"]["id"], pv["id"])
+        self.assertIsNone(self.voices_page(self.h.user("Bea"))["preview"], "each person's own")
+        # the worker gets it as an episode-shaped job in the custom voice
+        job = self.claim(f"vp-{a['id']}")
+        want = voices.custom_spec(a["id"], IRISH, 42)
+        self.assertEqual(job["voice"], {"id": "custom", "name": "Custom voice", "cpu": False, "spec": {
+            "engine": "breeze", "voice": want["key"], "id": "custom", "seed": 42,
+            "instruction": IRISH + " Narrating a science podcast for a curious listener."}})
+        self.assertRegex(want["key"], rf"^custom-{a['id']}-[0-9a-f]{{12}}$")
+        self.assertEqual((job["script_url"], job["title"], job["preview"], job["resumed"]),
+                         (f"/api/voice/vp-{a['id']}/script", "Voice preview", True, False))
+        code, body = self.worker("GET", job["script_url"])
+        self.assertEqual((code, body.decode()), (200, voices.SAMPLE_TEXT + "\n"))
+        self.assertEqual(self.claim(f"vp-{a['id']}")["resumed"], True, "the worker asking again gets the one it holds")
+        # being made: another text waits for it; the same words are that one
+        self.assertEqual(self.preview(a, SCOT, want=409)["error"], "busy")
+        self.assertEqual(self.preview(a, IRISH)["state"], "working")
+        code, out = self.worker("PUT", f"/api/voice/vp-{a['id']}/status", {"phase": "speaking", "progress": 0.3})
+        self.assertEqual((code, out["state"]), (200, "working"))
+        code, out = self.worker("PUT", f"/api/voice/vp-{a['id']}/status", {"phase": "speaking"}, headers={"X-Worker": "w9"})
+        self.assertEqual((code, out["error"]), (409, "claimed_by_other"))
+        self.assertEqual(self.worker("PUT", f"/api/voice/vp-{a['id']}/timings", timings(3))[1]["stored"], "none")
+        # its MP3 lands: my latest preview, to play
+        sub = events.subscribe(a["id"])
+        try:
+            self.assertEqual(self.upload(f"vp-{a['id']}", data=MP3_2, dur="21.3", key=want["key"])[0], 200)
+            got = []
+            while not sub.q.empty():
+                got.append(sub.q.get_nowait())
+        finally:
+            events.unsubscribe(sub)
+        self.assertEqual([d["preview"]["state"] for _i, kind, d in got if kind == "voice"], ["done"])
+        pv = self.voices_page(a)["preview"]
+        self.assertEqual((pv["state"], pv["duration_s"], pv["error"]), ("done", 21.3, None))
+        code, body = self.web("GET", pv["sample"], a)
+        self.assertEqual((code, body), (200, MP3_2))
+        self.assertEqual((self.h.cfg.data / "voices" / "custom" / f"{a['id']}.mp3").read_bytes(), MP3_2)
+        self.assertEqual(self.web("GET", "/api/voices/custom/preview.mp3", self.h.user("Cal"))[0], 404, "not theirs")
+        self.assertEqual(self.claim_nothing(), 204)
+        # the same words and take again: nothing new to make
+        self.assertEqual(self.preview(a, IRISH)["id"], pv["id"])
+        self.assertEqual(self.claim_nothing(), 204)
+
+    def test_use_it_and_limits(self):
+        a, b, admin = self.h.user("Uma"), self.h.user("Val"), self.h.user("Ari", "admin")
+        self.assertEqual(self.web("PUT", "/api/voices/mine", a, {"voice": "custom"})[1]["error"], "no_custom_voice")
+        pv = self.make_preview(a, IRISH)
+        # use: not a preview that is not mine, not finished, or not the latest
+        self.assertEqual(self.web("PUT", "/api/voices/custom", a, {"preview": True})[0], 400)
+        self.assertEqual(self.web("PUT", "/api/voices/custom", b, {"preview": pv["id"]})[1]["error"], "not_ready")
+        code, out = self.web("PUT", "/api/voices/custom", a, {"preview": pv["id"]})
+        self.assertEqual(code, 200, out)
+        self.assertEqual((out["mine"], out["name"], out["custom"]["description"], out["custom"]["seed"],
+                          out["custom"]["key"]), ("custom", "Custom voice", IRISH, 42, pv["key"]))
+        j = self.voices_page(a)
+        self.assertEqual((j["mine"], j["custom"]["name"], j["custom"]["key"]), ("custom", "Custom voice", pv["key"]))
+        # its clip: its owner and admins
+        url = j["custom"]["sample"]
+        self.assertRegex(url, rf"^/api/voices/custom/{a['id']}/sample\.mp3\?v=\d+$")
+        self.assertEqual(self.web("GET", url, a)[1], MP3_2)
+        self.assertEqual(self.web("GET", url, admin)[0], 200)
+        self.assertEqual(self.web("GET", url, b)[0], 404)
+        # a preset, then back to it like one
+        self.assertEqual(self.web("PUT", "/api/voices/mine", a, {"voice": "warm-male"})[1]["mine"], "warm-male")
+        self.assertEqual(self.web("PUT", "/api/voices/mine", a, {"voice": "custom"})[1],
+                         {"mine": "custom", "name": "Custom voice"})
+        # another take: a new seed, another key; the preview and its clip are replaced, the voice
+        # in use is not (until used)
+        pv2 = self.make_preview(a, IRISH, another=True)
+        self.assertNotEqual((pv2["seed"], pv2["key"]), (42, pv["key"]))
+        self.assertEqual(self.voices_page(a)["custom"]["key"], pv["key"])
+        self.assertEqual(self.web("PUT", "/api/voices/custom", a, {"preview": pv["id"]})[1]["error"], "not_ready",
+                         "only the latest preview")
+        # a few an hour (the two made count)
+        for i in range(3):
+            self.preview(a, f"{SCOT} Take {'abc'[i]}.")
+            self.claim(f"vp-{a['id']}")
+            self.assertEqual(self.worker("POST", f"/api/voice/vp-{a['id']}/failed", {"error": "encode_failed: x"})[0], 200)
+        code, out = self.web("POST", "/api/voices/custom/preview", a, {"description": SCOT})
+        self.assertEqual((code, out["error"]), (429, "too_many"))
+        self.preview(b, SCOT)                                   # someone else's are their own
+        with db.transaction() as c:
+            c.execute("UPDATE voice_previews SET queued_at = '2020-01-01T00:00:00Z' WHERE user_id = ?", (a["id"],))
+        self.assertEqual(self.preview(a, SCOT)["state"], "queued", "an hour later")
+        self.assertEqual(db.conn().execute("SELECT COUNT(*) FROM voice_previews WHERE user_id = ?", (a["id"],)).fetchone()[0],
+                         1, "a day's old previews go (the latest stays)")
+
+    def test_failures_are_plain_and_not_retried(self):
+        a = self.h.user("Ray")
+        pid = f"vp-{a['id']}"
+        self.assertEqual(self.worker("PUT", f"/api/voice/{pid}/status", {"phase": "speaking"})[0], 404)
+        self.preview(a, IRISH)
+        self.assertEqual(self.worker("PUT", f"/api/voice/{pid}/status", {"phase": "speaking"})[1]["error"], "not_claimed")
+        self.claim(pid)
+        code, out = self.worker("POST", f"/api/voice/{pid}/failed",
+                                {"error": "encode_failed: loudness -18.0 LUFS, target -16"})
+        self.assertEqual((code, out["retry"]), (200, False))
+        pv = self.voices_page(a)["preview"]
+        self.assertEqual((pv["state"], pv["sample"]), ("failed", None))
+        self.assertIn("loudness", pv["error"])
+        self.assertEqual(self.claim_nothing(), 204, "the same words fail the same way: not tried again")
+        # the same words again are the person's to ask for
+        self.assertEqual(self.preview(a, IRISH)["state"], "queued")
+        # a clip in another voice (the CPU fallback) is refused, and the preview fails
+        self.claim(pid)
+        code, out = self.upload(pid, data=MP3_2, dur="20", key="af_heart")
+        self.assertEqual((code, out["error"]), (422, "wrong_voice"))
+        pv = self.voices_page(a)["preview"]
+        self.assertEqual(pv["state"], "failed")
+        self.assertIn("another voice", pv["error"])
+        self.assertFalse((self.h.cfg.data / "voices" / "custom" / f"{a['id']}.mp3").exists())
+        self.assertEqual(self.worker("POST", f"/api/voice/{pid}/failed", {"error": "upload_refused"})[0], 409)
+        # a worker gone silent: back in the queue, then failed after three claims
+        self.preview(a, SCOT)
+        for attempt in (1, 2, 3):
+            self.assertEqual(self.claim(pid)["attempt"], attempt)
+            with db.transaction() as c:
+                c.execute("UPDATE voice_previews SET heartbeat_at = '2020-01-01T00:00:00Z' WHERE state = 'claimed'")
+        self.assertEqual(self.claim_nothing(), 204)
+        pv = self.voices_page(a)["preview"]
+        self.assertEqual((pv["state"], pv["error"]), ("failed", "the voice stopped answering"))
+
+    def test_previews_take_turns_with_episodes(self):
+        a, b, c_, d = self.h.user("Ann"), self.h.user("Bob"), self.h.user("Cyd"), self.h.user("Dee")
+        e1, e2, e3 = self.episode(a), self.episode(a), self.episode(b)
+        self.preview(c_, IRISH)
+        self.preview(d, SCOT)
+        code, q = self.worker("GET", "/api/voice/queue")
+        order = [j["episode_id"] for j in q["queued"]]
+        self.assertEqual([j.get("preview", False) for j in q["queued"]], [True, False, True, False, False])
+        self.assertEqual((order[0], order[2]), (f"vp-{c_['id']}", f"vp-{d['id']}"), "previews oldest first")
+        # the page's places in line count the previews ahead
+        from hub import voiceq
+        self.assertEqual(sorted(voiceq.queue_positions().values()), [2, 4, 5])
+        got = []
+        for _ in range(5):
+            job = self.claim()
+            got.append(job["episode_id"])
+            key = job["voice"]["spec"]["voice"] if job["voice"] else DEFAULT_KEY
+            self.assertEqual(self.upload(job["episode_id"], data=MP3_2, dur="20", key=key)[0], 200)
+        self.assertEqual(got, order, "claimed in the order the queue showed")
+        self.assertEqual(set(got[1::2] + got[4:]), {e1, e2, e3})
+        # a preview right after a preview, when no episode waits; else an episode's turn
+        self.preview(c_, SCOT)
+        self.assertEqual(self.claim()["episode_id"], f"vp-{c_['id']}")
+        self.upload(f"vp-{c_['id']}", data=MP3_2, dur="20", key=None)
+        e4 = self.episode(b)
+        self.preview(d, IRISH)
+        self.assertEqual(self.claim()["episode_id"], e4, "the last was a preview: an episode's turn")
+
+    def test_episodes_in_the_custom_voice_keep_their_spec(self):
+        maker, other, admin = self.h.user("Uma"), self.h.user("Oli"), self.h.user("Ari", "admin")
+        first = self.use(maker, IRISH)
+        # a new version is voiced in it, and keeps what it was voiced in
+        eid = self.episode(maker)
+        job = self.claim(eid)
+        self.assertEqual((job["voice"]["id"], job["voice"]["spec"]["voice"], job["voice"]["spec"]["seed"]),
+                         ("custom", first["key"], 42))
+        self.assertEqual(voices.load_spec(voices._row(db.conn(), eid)["claim_spec"])["key"], first["key"])
+        self.assertEqual(self.upload(eid, key=first["key"])[0], 200)
+        row = voices._row(db.conn(), eid)
+        self.assertEqual((row["voice"], json.loads(row["spec"])["description"], row["claim_spec"]), ("custom", IRISH, None))
+        v = self.ep_view(eid, maker)
+        self.assertEqual((v["id"], v["name"], v["custom_old"], v["custom"]["name"]),
+                         ("custom", "Custom voice", False, "Custom voice"))
+        self.assertEqual(self.ep_view(eid, other)["name"], "Uma’s custom voice")
+        self.assertNotIn("custom", self.ep_view(eid, other), "only who may change it is offered it")
+        self.assertEqual(self.ep_view(eid, admin)["custom"]["name"], "Uma’s custom voice")
+        e = self.lib_voice(eid, other)["voice"]
+        self.assertEqual((e["id"], e["name"]), ("custom", "Uma’s custom voice"))
+        self.assertEqual(self.lib_voice(eid, maker)["voice"]["name"], "Custom voice")
+        # the same custom voice again is no change
+        self.assertIsNone(self.web("PUT", f"/api/episodes/{eid}/voice", maker, {"voice": "custom"})[1]["pending"])
+        # the description is edited: the episode keeps its spec; only later voicing changes
+        second = self.use(maker, SCOT)
+        self.assertNotEqual(second["key"], first["key"])
+        row = voices._row(db.conn(), eid)
+        self.assertEqual(json.loads(row["spec"])["description"], IRISH)
+        v = self.ep_view(eid, maker)
+        self.assertEqual((v["name"], v["custom_old"]), ("Custom voice", True))
+        # voiced again in it: the new description, recorded when claimed and kept when it lands
+        code, v = self.web("PUT", f"/api/episodes/{eid}/voice", admin, {"voice": "custom"})
+        self.assertEqual((code, v["pending"]["id"], v["pending"]["name"]), (200, "custom", "Uma’s custom voice"))
+        self.assertEqual(self.ep_view(eid, maker)["pending"]["name"], "Custom voice")
+        job = self.claim(eid)
+        self.assertEqual((job["voice"]["spec"]["voice"], job["voice"]["spec"]["instruction"]),
+                         (second["key"], SCOT + " Narrating a science podcast for a curious listener."))
+        sub = events.subscribe(other["id"])
+        try:
+            self.assertEqual(self.upload(eid, data=MP3_2, dur="30", key=None)[0], 200, "no X-Voice: the claim's")
+            got = []
+            while not sub.q.empty():
+                got.append(sub.q.get_nowait())
+        finally:
+            events.unsubscribe(sub)
+        (swap,) = [d["voice_swap"] for _i, kind, d in got if kind == "episode" and d.get("voice_swap")]
+        self.assertEqual((swap["voice"], swap["name"], swap["owner"], swap["rev"]),
+                         ("custom", "Uma’s custom voice", maker["id"], 2))
+        row = voices._row(db.conn(), eid)
+        self.assertEqual((json.loads(row["spec"])["key"], row["claim_spec"]), (second["key"], None))
+        self.assertFalse(self.ep_view(eid, maker)["custom_old"])
+        # to a preset and back: the preset's key names it, no spec kept
+        self.web("PUT", f"/api/episodes/{eid}/voice", maker, {"voice": "warm-male"})
+        job = self.claim(eid)
+        self.assertEqual(job["voice"]["id"], "warm-male")
+        self.upload(eid, key="preset-warm-male-s42")
+        row = voices._row(db.conn(), eid)
+        self.assertEqual((row["voice"], row["spec"], row["claim_spec"]), ("warm-male", None, None))
+        # someone with no custom voice: none to change to
+        e2 = self.voiced(other)
+        code, out = self.web("PUT", f"/api/episodes/{e2}/voice", other, {"voice": "custom"})
+        self.assertEqual((code, out["error"]), (400, "no_such_voice"))
+        self.assertNotIn("custom", self.ep_view(e2, other))
+        # a clip in a custom voice the claim did not ask for is in no known voice
+        e3 = self.episode(maker)
+        self.claim(e3)
+        self.upload(e3, key=f"custom-{maker['id']}-000000000000")
+        self.assertEqual(self.ep_view(e3, maker)["id"], None)
+
+    def test_fallbacks(self):
+        a = self.h.user("Fay")
+        # "custom" chosen but no custom voice (a row gone): the default, nothing to pass
+        with db.transaction() as c:
+            c.execute("INSERT INTO user_voice (user_id, voice, updated_at) VALUES (?, 'custom', ?)", (a["id"], db.now()))
+        self.assertEqual(self.voices_page(a)["mine"], "clear-female")
+        eid = self.episode(a)
+        self.assertIsNone(self.claim(eid)["voice"])
+        self.upload(eid)
+        # a spec that cannot be read: still named by its maker
+        with db.transaction() as c:
+            c.execute("UPDATE episode_voice SET voice = 'custom', spec = 'not json' WHERE episode_id = ?", (eid,))
+        v = self.ep_view(eid, a)
+        self.assertEqual((v["id"], v["name"], v["custom_old"]), ("custom", "Custom voice", True))
+        # a table made before the spec columns gets them
+        c = db.conn()
+        c.execute("ALTER TABLE episode_voice DROP COLUMN claim_spec")
+        c.execute("ALTER TABLE episode_voice DROP COLUMN spec")
+        voices._ready.clear()
+        voices.ensure_schema()
+        self.assertTrue({"spec", "claim_spec"} <= {r[1] for r in c.execute("PRAGMA table_info(episode_voice)")})
+        # the instruction: the description, a full stop, the presets' closing line
+        self.assertEqual(voices.custom_instruction("Deep voice"), "Deep voice. Narrating a science podcast for a curious listener.")
+        self.assertEqual(voices.custom_instruction("Deep voice!"), "Deep voice! Narrating a science podcast for a curious listener.")
+        k = voices.custom_spec(3, "Deep voice", 7)["key"]
+        self.assertEqual(k, voices.custom_spec(3, "Deep voice", 7)["key"])
+        self.assertNotEqual(k, voices.custom_spec(3, "Deep voice", 8)["key"])
+        self.assertNotEqual(k, voices.custom_spec(4, "Deep voice", 7)["key"])
+        # papercast-voice takes the spec a claim carries, at the longest description and largest
+        # seed (its job.py's rules, read from its source: importing it needs its audio packages)
+        import ast
+        import re
+        tree = ast.parse((H.REPO / "stacks" / "papercast" / "voice" / "papercast_voice" / "job.py").read_text())
+        found = {t.id: n.value for n in tree.body if isinstance(n, ast.Assign) for t in n.targets
+                 if isinstance(t, ast.Name) and t.id in ("VOICE_KEYS", "VOICE_RE")}
+        keys, rx = ast.literal_eval(found["VOICE_KEYS"]), re.compile(found["VOICE_RE"].args[0].value)
+        spec = voices.for_claim(voices.custom_preset(voices.custom_spec(3, "x" * 500, 2 ** 31 - 1)))["spec"]
+        self.assertTrue(rx.match(spec["voice"]))
+        self.assertLessEqual(set(spec) - {"engine", "id"}, keys)
+        self.assertLessEqual(len(spec["instruction"]), 2000)
+        self.assertTrue(0 <= spec["seed"] < 2 ** 31)
+
+
+class PreviewThroughTheWorker(CustomVoices):
+    """A preview made by the real voice worker (deploy/voice_worker.py, unchanged by previews) with
+    a fake papercast-voice (deploy/tests/fake_papercast_voice.py), its job directory where perov
+    keeps them ($PCG_DATA/episodes): the clip lands, another take starts afresh, a description
+    the voice cannot make fails plainly, and an episode after it is voiced in the voice used."""
+
+    test_describe_and_preview = test_use_it_and_limits = test_failures_are_plain_and_not_retried = None
+    test_previews_take_turns_with_episodes = test_episodes_in_the_custom_voice_keep_their_spec = None
+    test_fallbacks = None
+
+    def run_worker(self, **knobs) -> str:
+        import os
+        import subprocess
+        deploy = H.ROOT / "deploy"
+        sys.path.insert(0, str(deploy / "tests"))
+        import fake_papercast_voice as fv
+        tmp = self.h.tmp
+        (tmp / "worker.token").write_text(H.WORKER_TOKEN + "\n")
+        voice = fv.write_wrapper(str(tmp / "papercast-voice"), seconds=2, chunk_s=0.01, **knobs)
+        env = {"HOME": str(tmp), "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "USER": os.environ.get("USER", "leo"),
+               "PCG_HUB_URL": f"http://127.0.0.1:{self.h.port}", "PCG_WORKER_TOKEN_FILE": str(tmp / "worker.token"),
+               "PAPERCAST_VOICE_CMD": voice, "PCG_VOICE_JOBS": str(self.h.cfg.episodes),
+               "PCG_WORKER_STATE": str(tmp / "worker"), "PCG_POLL_S": "0.1", "PCG_HEARTBEAT_S": "0.5",
+               "PCG_MONITOR_S": "0.05", "PCG_BACKOFF_MAX_S": "0.2", "PCG_WORKER_NAME": "perov-test"}
+        with open(tmp / "worker.log", "ab") as log:
+            p = subprocess.run(["nice", "-n", "10", sys.executable, str(deploy / "voice_worker.py"), "--exit-when-idle"],
+                               env=env, stdout=log, stderr=subprocess.STDOUT, timeout=120)
+        out = (tmp / "worker.log").read_text()
+        self.assertEqual(p.returncode, 0, out[-3000:])
+        return out
+
+    def test_preview_through_the_real_worker(self):
+        a = self.h.user("Ada")
+        pv = self.preview(a, IRISH)
+        log = self.run_worker()
+        got = self.voices_page(a)["preview"]
+        self.assertEqual((got["id"], got["state"], got["error"]), (pv["id"], "done", None), log[-2000:])
+        clip = self.h.cfg.data / "voices" / "custom" / f"{a['id']}.mp3"
+        self.assertEqual(self.web("GET", got["sample"], a)[1], clip.read_bytes())
+        vdir = self.h.cfg.episodes / f"vp-{a['id']}" / "voice"
+        job = json.loads((vdir / "job.json").read_text())
+        self.assertEqual(job["voice"]["voice"], voices.custom_spec(a["id"], IRISH, 42)["key"])
+        self.assertEqual((vdir / "script.md").read_text(), voices.SAMPLE_TEXT + "\n")
+        self.assertIn(f"vp-{a['id']}: ready", log)
+        # the library is not bothered by the preview's job directory among the episodes'
+        self.assertEqual(self.web("GET", "/api/library?q=", a)[0], 200)
+        # another take: a new seed, the job directory started afresh
+        take = self.preview(a, IRISH, another=True)
+        log = self.run_worker()
+        self.assertIn("another voice; its job directory starts afresh", log)
+        self.assertEqual(self.voices_page(a)["preview"]["state"], "done")
+        self.assertEqual(json.loads((vdir / "job.json").read_text())["voice"]["seed"], take["seed"])
+        # used, then an episode: voiced in it, and it keeps it
+        code, out = self.web("PUT", "/api/voices/custom", a, {"preview": take["id"]})
+        self.assertEqual(code, 200, out)
+        eid = self.episode(a)
+        self.run_worker()
+        row = voices._row(db.conn(), eid)
+        self.assertEqual((row["voice"], json.loads(row["spec"])["seed"]), ("custom", take["seed"]))
+        self.assertEqual(self.ep_view(eid, a)["name"], "Custom voice")
+        # a description the voice cannot make: failed, and the clip there stays the last good one
+        before = clip.read_bytes()
+        self.preview(a, SCOT)
+        self.run_worker(fail="encode_failed")
+        got = self.voices_page(a)["preview"]
+        self.assertEqual(got["state"], "failed")
+        self.assertIn("encode_failed", got["error"])
+        self.assertEqual(clip.read_bytes(), before)
+        self.assertEqual(self.claim_nothing(), 204, "not tried again")
 
 
 if __name__ == "__main__":

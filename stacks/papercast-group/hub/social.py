@@ -39,7 +39,7 @@ import unicodedata
 from collections import deque
 from datetime import datetime, timedelta, timezone
 
-from . import db, events
+from . import avatars, db, events
 from .app import HTTPError
 
 log = logging.getLogger("pcg.social")
@@ -207,12 +207,13 @@ COMMENT_SQL = """SELECT c.id, c.paper_id, c.episode_id, c.parent_id, c.user_id, 
                  FROM comments c LEFT JOIN users u ON u.id = c.user_id"""
 
 
-def view(r) -> dict:
+def view(r, av: dict | None = None) -> dict:
     """A comment as everyone sees it (the page works out what this person may do with it). A
-    deleted one keeps only its place: no text, no name."""
+    deleted one keeps only its place: no text, no name. `av`: avatars.versions(), when known."""
     gone = r["deleted_at"] is not None
+    pic = None if gone else av.get(r["user_id"]) if av is not None else avatars.version_of(r["user_id"])
     return {"id": r["id"], "paper_id": r["paper_id"], "episode_id": r["episode_id"], "parent_id": r["parent_id"],
-            "user": None if gone else {"id": r["user_id"], "name": r["name"] or "someone"},
+            "user": None if gone else {"id": r["user_id"], "name": r["name"] or "someone", "avatar": pic},
             "body": "" if gone else r["body"], "created_at": r["created_at"],
             "edited_at": None if gone else r["edited_at"], "deleted": gone}
 
@@ -231,7 +232,8 @@ def comments_of(pid: str, c=None) -> list:
     c = c or db.conn()
     rows = c.execute(COMMENT_SQL + " WHERE c.paper_id = ? ORDER BY c.id", (pid,)).fetchall()
     live_under = {r["parent_id"] for r in rows if r["parent_id"] is not None and r["deleted_at"] is None}
-    return [view(r) for r in rows
+    av = avatars.versions(c)
+    return [view(r, av) for r in rows
             if r["deleted_at"] is None or (r["parent_id"] is None and r["id"] in live_under)]
 
 
@@ -509,6 +511,7 @@ def board(cfg, limit: int = 5) -> dict:
     items = (_episode_items(c, names) + _comment_items(c, names) + _graph_items(c, names)
              + _join_items(c, cfg, names))
     items.sort(key=lambda it: (_t(it["at"]), it["key"]), reverse=True)
+    avatars.decorate([it["user"] for it in items[:limit]], avatars.versions(c))     # each person's picture
     return {"items": items[:limit], "more": len(items) > limit}
 
 
@@ -518,7 +521,8 @@ def _notice(c):
                      WHERE n.unpinned_at IS NULL ORDER BY n.id DESC LIMIT 1""").fetchone()
     if r is None:
         return None
-    return {"id": r["id"], "body": r["body"], "user": {"id": r["user_id"], "name": r["name"] or "someone"},
+    return {"id": r["id"], "body": r["body"],
+            "user": {"id": r["user_id"], "name": r["name"] or "someone", "avatar": avatars.version_of(r["user_id"], c)},
             "created_at": r["created_at"]}
 
 

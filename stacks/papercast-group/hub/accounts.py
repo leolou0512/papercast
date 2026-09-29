@@ -3,8 +3,8 @@ the sign-in log and the two emails the hub sends (Leo's decisions, 2026-09-28: a
 Imperial addresses, no Google, no Cloudflare Access; email for "forgot password", and a welcome
 from papercast.virtualatoms@gmail.com to each person an admin adds).
 
-Who has an account: exactly the emails on the ledger (allowed_emails), @ic.ac.uk or
-@imperial.ac.uk. Adding one makes the account at once: username = the email's local part
+Who has an account: exactly the emails on the ledger (allowed_emails): @ic.ac.uk by default, any
+domain an admin types (2026-09-29). Adding one makes the account at once: username = the email's local part
 (yl6719@ic.ac.uk is yl6719, fixed), role contributor, and the first password is the username
 (users.pw_hash NULL means that). A session signed in with it can do one thing, choose a new
 password: every other API answers 403 must_change_password (auth.authenticate), and the pages
@@ -63,7 +63,8 @@ from .app import HTTPError
 log = logging.getLogger("pcg.accounts")
 
 IMPERIAL = ("ic.ac.uk", "imperial.ac.uk")
-PANEL_DOMAIN = "ic.ac.uk"                   # the panel's box is "<short code>@ic.ac.uk"
+PANEL_DOMAIN = "ic.ac.uk"                   # the panel's box is "<short code>@ic.ac.uk" unless the admin changes it
+DOMAIN_RX = re.compile(r"^(?=.{3,190}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$")
 # A short code (the email's local part, and so the username): letters, digits, dots, hyphens.
 CODE_RX = re.compile(r"^[a-z0-9]+(?:[.-][a-z0-9]+)*$")
 CODE_MAX = 64
@@ -145,21 +146,23 @@ def client_addr(req) -> str:
 
 
 def ledger_email(v, short_ok: bool = True) -> str:
-    """An address the ledger takes: lowercased, @ic.ac.uk or @imperial.ac.uk, its local part a
-    plausible short code. `short_ok`: a bare short code means <code>@ic.ac.uk (the panel's box)."""
+    """An address the ledger takes: lowercased, any domain (Leo, 2026-09-29: the panel's @ic.ac.uk
+    can be changed), its local part a plausible short code, which becomes the username.
+    `short_ok`: a bare short code means <code>@ic.ac.uk (the panel's default)."""
     s = v.strip().lower() if isinstance(v, str) else ""
     if not s:
-        raise HTTPError(400, "bad_email", "Type a short code, like yl6719." if short_ok else "Type an Imperial email address.")
+        raise HTTPError(400, "bad_email", "Type a short code, like yl6719." if short_ok else "Type an email address.")
     if "@" not in s:
         if not short_ok:
             raise HTTPError(400, "bad_email", f"“{s[:40]}” is not an email address.")
         s += "@" + PANEL_DOMAIN
     local, _, domain = s.rpartition("@")
-    if domain not in IMPERIAL:
-        raise HTTPError(400, "not_imperial", "Only Imperial addresses (@ic.ac.uk or @imperial.ac.uk) can be on the list.")
+    if not DOMAIN_RX.match(domain):
+        raise HTTPError(400, "bad_domain", f"“{domain[:40]}” is not an email domain, like ic.ac.uk." if domain
+                        else "Type the part after the @, like ic.ac.uk.")
     if not local or len(local) > CODE_MAX or not CODE_RX.match(local):
         shown = local if local and len(local) <= 40 else (local[:40] + "…" if local else "")
-        raise HTTPError(400, "bad_code", f"“{shown}” does not look like an Imperial short code: letters, digits, dots and hyphens only."
+        raise HTTPError(400, "bad_code", f"“{shown}” does not look like a short code: letters, digits, dots and hyphens only."
                         if shown else "Type a short code, like yl6719.")
     return s
 
@@ -646,7 +649,7 @@ def mail_idle(timeout: float = 10.0) -> bool:
 
 EMAIL_DIR = Path(__file__).resolve().parent / "email"
 WELCOME_SUBJECT = "Welcome to Virtual Atoms Lab Papercast"
-WELCOME_KEYS = ("name", "username", "signin_url", "site_url", "github_url")
+WELCOME_KEYS = ("name", "username", "login_email", "signin_url", "site_url", "github_url")
 GITHUB_URL = "https://github.com/leolou0512/papercast"
 WELCOME_PER_HOUR = 3                            # from the Users panel, per account: the add and two more
 WELCOMES = Limiter(WELCOME_PER_HOUR, 3600)
@@ -664,7 +667,11 @@ def _fill(template: str, values: dict, escape: bool) -> str:
 def welcome_email(cfg, row) -> tuple:
     """(subject, plain text, HTML): Leo's text in hub/email/, for an account on its first password."""
     name = row["username"]
-    values = {"name": row["name"] or name, "username": name, "signin_url": f"{cfg.public_url}/signin?u={quote(name)}",
+    dom = row["email"].rpartition("@")[2]
+    values = {"name": row["name"] or name, "username": name,
+              # the short Imperial email (either domain signs in); another domain's, as it is
+              "login_email": f"{name}@{PANEL_DOMAIN}" if dom in IMPERIAL else row["email"],
+              "signin_url": f"{cfg.public_url}/signin?u={quote(name)}",
               "site_url": cfg.public_url, "github_url": GITHUB_URL}
     text = _fill((EMAIL_DIR / "welcome.txt").read_text(encoding="utf-8"), values, False)
     page = _fill((EMAIL_DIR / "welcome.html").read_text(encoding="utf-8"), values, True)
@@ -934,7 +941,7 @@ def signout_all(req):
 # ---------------------------------------------------------------- routes: admin
 
 def admin_allowed(req):
-    req.send_json(200, {"emails": ledger(), "email": email_ready(req.cfg), "domains": list(IMPERIAL)})
+    req.send_json(200, {"emails": ledger(), "email": email_ready(req.cfg), "domains": list(IMPERIAL), "default_domain": PANEL_DOMAIN})
 
 
 def admin_allow(req):

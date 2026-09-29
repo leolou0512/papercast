@@ -436,12 +436,12 @@ class LiveMap(unittest.TestCase):
             x.js("document.querySelector('#map .pm-ib[aria-label=\"Graph settings\"]').click()")
             x.wait_js("!!document.querySelector('#map .pm-setsite h2')", 3, "the setting")
         self.assertEqual(b.js("document.querySelectorAll('#map .pm-setsite button').length"), 0, "Bob may change the setting")
-        self.assertEqual(b.js("document.querySelector('#map .pm-setsite .pm-note').textContent"), "Automatic: an upload’s links are drawn at once.")
+        self.assertEqual(b.js("document.querySelector('#map .pm-setsite .pm-note').textContent"), "Links from uploads: Automatic")
         # Alice (an admin) switches to suggestions: saved, and Bob's panel says so
         self.press(a, "[data-panel=set] .pm-modes", "Suggest only")
         a.wait_js("(m => !m.hidden && m.textContent.startsWith('Links from uploads are suggestions'))(document.querySelector('#map .pm-msg'))", 3, "saved")
         self.assertEqual(self.api("GET", "/api/graph-settings")["agent_links"], "suggest")
-        self.shows(b, "document.querySelector('#map .pm-setsite .pm-note').textContent.startsWith('Suggest only')", "Bob's panel")
+        self.shows(b, "document.querySelector('#map .pm-setsite .pm-note').textContent === 'Links from uploads: Suggest only'", "Bob's panel")
         # an upload finds two links: suggestions on both pages, not links
         out = self.upload(p[4], [(p[0], "s"), (p[2], "w")])
         self.assertEqual((out["added"], out["suggested"]), (0, 2))

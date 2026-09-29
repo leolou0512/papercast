@@ -40,7 +40,7 @@ EMAIL_DIR = GROUP / "hub" / "email"
 STATIC_EMAIL = GROUP / "hub" / "static" / "email"
 PUBLIC_EMAIL = "https://papercast.virtualatoms.org/email/"
 SUBJECT = "Welcome to Virtual Atoms Lab Papercast"
-KEYS = ("name", "username", "signin_url", "site_url", "github_url")
+KEYS = ("name", "username", "login_email", "signin_url", "site_url", "github_url")
 GMAIL_CLIP = 102 * 1024
 
 
@@ -225,7 +225,7 @@ def main(argv=None) -> int:
     ap.add_argument("--shots", metavar="PREFIX", help="also render PREFIX-<variant>.png in headless Chrome")
     a = ap.parse_args(argv)
 
-    values = {"name": a.name, "username": a.username, "signin_url": a.signin_url,
+    values = {"name": a.name, "username": a.username, "login_email": f"{a.username}@ic.ac.uk", "signin_url": a.signin_url,
               "site_url": a.site_url, "github_url": a.github_url}
     page, text = render(values)
     out = Path(a.out)

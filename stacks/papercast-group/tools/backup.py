@@ -1,13 +1,13 @@
 """Back up a hub data dir while the hub runs: hub.db through SQLite's online backup API (one
-consistent snapshot, whatever the hub writes meanwhile) and episodes/ as an rsync --link-dest
-style copy (a file unchanged since the previous backup is a hard link to that backup's copy,
+consistent snapshot, whatever the hub writes meanwhile) and episodes/ and avatars/ (the profile
+pictures, hub/avatars.py) as an rsync --link-dest style copy (a file unchanged since the previous backup is a hard link to that backup's copy,
 anything else is copied), into <dest>/<YYYY-MM-DDTHHMMSSZ>/, keeping the newest --keep (14).
 
     python3 tools/backup.py --data $PCG_DATA --dest ~/papercast-group/backups [--keep 14]
 
 Every backup is complete on its own (delete any of them, the others stay whole) and costs only
 what changed. hub.db goes first, then the files, so every episode in the database snapshot has
-its files. Left out: each episode's voice/ job dir (the voice worker's scratch, remade from
+its files (a picture replaced in between is missing from that backup: the page shows initials). Left out: each episode's voice/ job dir (the voice worker's scratch, remade from
 script.md; --with-voice keeps it) and hub.db-wal / -shm (the snapshot already holds their pages).
 A backup is written into .partial-<name>/ and renamed only when whole, so a folder with a date
 name is always a complete backup; backup.json in it says what it holds. One backup at a time
@@ -20,6 +20,7 @@ Restore (the hub stopped, so nothing writes the data dir meanwhile):
     mkdir -p "$PCG_DATA"
     cp -a <dest>/<name>/hub.db "$PCG_DATA/hub.db"
     cp -a <dest>/<name>/episodes "$PCG_DATA/episodes"
+    [ -d <dest>/<name>/avatars ] && cp -a <dest>/<name>/avatars "$PCG_DATA/avatars"
     python3 -m hub.db migrate --data "$PCG_DATA"              # a backup from older code catches up
     systemctl --user start <the hub's unit>
 
@@ -127,8 +128,9 @@ def backup(data: Path, dest: Path, keep: int = 14, with_voice: bool = False, whe
     data, dest = Path(data).resolve(), Path(dest).resolve()
     if not (data / "hub.db").is_file():
         raise SystemExit(f"{data}: no hub.db here")
-    if dest == data or dest.is_relative_to(data / "episodes") or data.is_relative_to(dest):
-        raise SystemExit(f"--dest {dest} must not be the data dir, inside its episodes/, or above it")
+    if dest == data or dest.is_relative_to(data / "episodes") or dest.is_relative_to(data / "avatars") \
+            or data.is_relative_to(dest):
+        raise SystemExit(f"--dest {dest} must not be the data dir, inside its episodes/ or avatars/, or above it")
     if keep < 1:
         raise SystemExit("--keep must be at least 1")
     dest.mkdir(parents=True, exist_ok=True)
@@ -153,10 +155,11 @@ def backup(data: Path, dest: Path, keep: int = 14, with_voice: bool = False, whe
         t0 = time.monotonic()
         version = _snapshot_db(data / "hub.db", part / "hub.db")
         files = _copy_tree(data / "episodes", part / "episodes", prev / "episodes" if prev else None, with_voice)
+        pics = _copy_tree(data / "avatars", part / "avatars", prev / "avatars" if prev else None, False)
         report = {"name": name, "at": when.strftime("%Y-%m-%dT%H:%M:%SZ"), "data": str(data),
                   "schema_version": version, "db_bytes": (part / "hub.db").stat().st_size,
                   "previous": prev.name if prev else None, "with_voice": with_voice,
-                  "seconds": round(time.monotonic() - t0, 2), **files}
+                  "seconds": round(time.monotonic() - t0, 2), **files, "avatars": pics}
         (part / "backup.json").write_text(json.dumps(report, indent=1) + "\n")
         os.rename(part, dest / name)
         removed = []
@@ -187,8 +190,8 @@ def main(argv=None) -> int:
     r = backup(Path(a.data), Path(a.dest), a.keep, a.with_voice)
     mb = lambda b: f"{b / 1e6:.1f} MB"  # noqa: E731
     print(f"{r['path']}: hub.db {mb(r['db_bytes'])} (schema {r['schema_version']}), {r['files']} files "
-          f"({r['linked']} linked, {r['copied']} copied, {mb(r['bytes_copied'])} new of {mb(r['bytes_total'])}) "
-          f"in {r['seconds']} s" + (f"; removed {', '.join(r['removed'])}" if r["removed"] else ""))
+          f"({r['linked']} linked, {r['copied']} copied, {mb(r['bytes_copied'])} new of {mb(r['bytes_total'])}), "
+          f"{r['avatars']['files']} profile pictures in {r['seconds']} s" + (f"; removed {', '.join(r['removed'])}" if r["removed"] else ""))
     return 0
 
 

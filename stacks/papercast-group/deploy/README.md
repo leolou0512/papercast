@@ -34,7 +34,7 @@ admin later runs with sudo.
 | `src/` | root | the tree the release came from (the three trees below, committed files only; `src/.revision`) |
 | `bin/` | root | `uv` 0.11.33, `ffmpeg` 7.0.2, `cloudflared` 2026.8.2, `papercastctl` (`/usr/local/bin/papercastctl` links here) |
 | `etc/` | root dir, files papercast 0600 | `hub.env`, `worker.env`, `worker.token` (the hub keeps only its sha256), `tunnel.token`, `smtp.password` when email is set up |
-| `data/` | papercast, group-readable | `hub.db` and `episodes/<episode_id>/` (the voice job is `episodes/<id>/voice/`); `search.db`, the search index (rebuilt from those at the hub's start if deleted; the backup leaves it out) |
+| `data/` | papercast, group-readable | `hub.db`, `episodes/<episode_id>/` (the voice job is `episodes/<id>/voice/`) and `avatars/` (profile pictures, `<user id>-<version>.jpg`); `search.db`, the search index (rebuilt from those at the hub's start if deleted; the backup leaves it out) |
 | `backups/` | papercast | nightly, `tools/backup.py`, the newest 14; one more before each update |
 | `voice/` | papercast | papercast-voice with Breeze TTS 2 and Kokoro (14 GB), `voice/voice.json`, its compiler caches |
 | `python/` | papercast | the uv-managed CPython 3.11.15 the voice's venvs run on (perov's own is 3.10) |
@@ -243,6 +243,10 @@ copy of the MP3 (the hub has it). A failure is `POST /api/voice/<id>/failed {"er
   says which voice it is in (`X-Voice`). Both need the group's papercast-voice with job.json
   `voice` (from this commit on): after syncing, `bash stacks/papercast-group/deploy/install.sh
   --voice` when no episode is being voiced.
+- **Custom voice previews** (hub/customvoice.py, SPEC section 9) come to this worker as ordinary
+  claims (`vp-<user id>`, the custom voice as the claim's `voice`), so nothing here changes for
+  them; their job directories are `episodes/vp-<user id>/voice/`, one per person, reused for each
+  preview.
 - **The voice samples** for the page's lists: `python3 stacks/papercast-group/tools/make_voice_samples.py`
   (one clip per preset through papercast-voice, about two minutes each on the A4000 once it has
   the GPU; into `data/voices/`). **Timings for episodes voiced before**:

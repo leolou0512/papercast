@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """The voice parts of the page (hub/static/app.js "voices") in a real headless Chrome: Settings >
 Voice (every voice listed with its sample, disabled until tools/make_voice_samples.py made it;
-a sample plays; choosing "My voice"), the window's "Voice: … Change" (its maker only), and the
-swap when a version's new audio lands while it is loaded (same sentence, new revision in the URL).
+a sample plays; choosing "My voice"), the custom voice (described, previewed with a stand-in for
+the worker's clip, played, used; a failed one; the chooser offering it), the window's "Voice: …
+Change" (its maker only), and the swap when a version's new audio lands while it is loaded (same
+sentence, new revision in the URL).
 
     python3 -m unittest discover -s stacks/papercast-group/hub/tests -p 'test_voice_page.py' -v
 
@@ -19,7 +21,7 @@ sys.path.insert(0, str(HERE))
 from test_page import SKIP, PageBase, B, C  # noqa: E402
 from web_rig import publish, silent_mp3  # noqa: E402
 
-from hub import db, voices  # noqa: E402
+from hub import customvoice, db, voices  # noqa: E402
 
 ROWS = "[...document.querySelectorAll('#voice-list .vrow')]"
 CHECKED = f"{ROWS}.filter(r => r.querySelector('.ver').getAttribute('aria-checked') === 'true').map(r => r.dataset.voice)"
@@ -107,6 +109,111 @@ class VoicePage(PageBase):
         finally:
             r.q("DELETE FROM user_voice")
             self.samples(False)
+
+    def test_settings_custom_voice(self):
+        """Custom: describe, Preview (waiting, making, ready: the clip plays), Use (my voice now, a row
+        in the list), a description that does not work, the text kept on reload, the chooser."""
+        b, r = self.b, self.r
+        st = "document.getElementById('vc-state').textContent"
+        shown = lambda i: f"!document.getElementById('{i}').hidden"          # noqa: E731
+        irish = "Young adult female, mid-20s, Irish accent. Warm, clear voice, steady pace."
+
+        def typed(text):
+            b.js("{ const t = document.getElementById('vc-text'); t.value = %s; t.dispatchEvent(new Event('input')); }"
+                 % json.dumps(text))
+
+        def worker(state, clip=None):
+            """What the worker's claim, status and MP3 do to the preview (customvoice.py)."""
+            if clip is not None:
+                d = r.cfg.data / "voices" / "custom"
+                d.mkdir(parents=True, exist_ok=True)
+                (d / f"{self.bob}.mp3").write_bytes(clip)
+            r.q("UPDATE voice_previews SET state = ?, error = ? WHERE id = (SELECT MAX(id) FROM voice_previews)",
+                state, "encode_failed: loudness -18.0 LUFS, target -16" if state == "failed" else None)
+            customvoice.notify(r.cfg, [self.bob])
+
+        try:
+            self.settings_voice(B)
+            self.assertEqual(b.js("document.getElementById('vc-text').placeholder"), customvoice.EXAMPLE)
+            self.assertEqual(b.js("document.getElementById('vc-text').maxLength"), 500)
+            self.assertTrue(b.js("document.getElementById('vc-preview').disabled"), "nothing described yet")
+            self.assertEqual(b.js(f"[{shown('vc-again')}, {shown('vc-use')}, {shown('vc-play')}]"), [False, False, False])
+            self.assertEqual(b.js(st), "")
+            self.assertEqual(b.js("document.querySelector('#voice-custom .intro, #voice-custom .muted, #voice-custom .vnote')"), None,
+                             "no explanations")
+            typed(irish)
+            self.assertEqual(b.js("document.getElementById('vc-count').textContent"), f"{len(irish)} / 500")
+            b.js("document.getElementById('vc-preview').click()")
+            b.wait_js(f"{st} === 'Waiting'", 5, "waiting")
+            self.assertEqual(r.q("SELECT description, seed, state FROM voice_previews WHERE user_id = ?", self.bob)[0][:],
+                             (irish, 42, "queued"))
+            self.assertTrue(b.js("document.getElementById('vc-preview').disabled"), "that one waits already")
+            # the worker takes it, then its clip lands: the page follows without a reload
+            worker("claimed")
+            b.wait_js(f"{st} === 'Making…'", 5, "making")
+            worker("done", silent_mp3(3.0))
+            b.wait_js(f"{st} === 'Ready' && {shown('vc-play')} && {shown('vc-use')} && {shown('vc-again')}", 5, "ready")
+            n = len(self.log.lines)
+            b.js("document.getElementById('vc-play').click()")
+            b.wait_js("document.getElementById('vc-play').getAttribute('aria-pressed') === 'true'", 5, "playing")
+            r.wait(lambda: any("GET /api/voices/custom/preview.mp3" in ln for ln in self.log.lines[n:]), 5, "the clip fetched")
+            b.js("document.getElementById('vc-play').click()")
+            self.shot("desktop-settings-custom-voice")
+            # use it: my voice now, a row after the presets
+            b.js("document.getElementById('vc-use').click()")
+            b.wait_js("document.getElementById('voice-msg').textContent === 'Saved'", 5, "used")
+            self.assertEqual(r.q("SELECT voice FROM user_voice WHERE user_id = ?", self.bob)[0][0], "custom")
+            self.assertEqual(r.q("SELECT description, seed FROM user_custom_voice WHERE user_id = ?", self.bob)[0][:], (irish, 42))
+            self.assertEqual(b.js(CHECKED), ["custom"])
+            self.assertEqual(b.js(f"{ROWS}.map(r => r.dataset.voice)"), [p["id"] for p in voices.PRESETS] + ["custom"])
+            self.assertEqual(b.js(f"{ROWS}.pop().querySelector('.v-who').textContent"), "Custom voice")
+            self.assertTrue(b.js("!!document.querySelector('#voice-list .vplay[data-sample=\"custom\"]')"), "its clip")
+            self.assertEqual(b.js("[document.getElementById('vc-use').textContent, document.getElementById('vc-use').disabled]"),
+                             ["In use", True])
+            # other words: nothing said about the old ones; they did not work
+            typed("Old man, whispering.")
+            self.assertEqual(b.js(f"[{st}, {shown('vc-use')}, {shown('vc-again')}, {shown('vc-play')}]"), ["", False, False, False])
+            b.js("document.getElementById('vc-preview').click()")
+            b.wait_js(f"{st} === 'Waiting'", 5, "waiting again")
+            worker("failed")
+            b.wait_js(f"{st} === 'Didn’t work: try other words' && document.getElementById('vc-state').classList.contains('err')",
+                      5, "failed")
+            self.assertTrue(b.js(shown("vc-again")))
+            self.assertFalse(b.js(shown("vc-use")))
+            self.assertEqual(b.js(CHECKED), ["custom"], "the voice in use stays")
+            # reloaded: the latest words and how they went
+            self.load("settings=voice")
+            b.wait_js(f"{ROWS}.length > 0 && !!document.getElementById('vc-text')", 5, "again")
+            self.assertEqual(b.js("document.getElementById('vc-text').value"), "Old man, whispering.")
+            self.assertEqual(b.js(st), "Didn’t work: try other words")
+            # the chooser under the player offers it for Bob's own version
+            self.open(self.paper)
+            b.wait_js("!!document.getElementById('voice-change')", 5, "Bob's voice line")
+            b.js("document.getElementById('voice-change').click()")
+            b.wait_js(f"!document.getElementById('vchoose').hidden && document.querySelectorAll('#vchoose .vrow').length === {len(voices.PRESETS) + 1}",
+                      5, "chooser with the custom voice")
+            self.assertEqual(b.js("document.querySelector('#vchoose .vnote')"), None)
+            self.assertEqual(b.js("document.querySelectorAll('#vchoose .v-sum').length"), 0, "names only")
+            b.js("[...document.querySelectorAll('#vchoose .vrow')].find(r => r.dataset.voice === 'custom').querySelector('.ver').click()")
+            b.wait_js("document.getElementById('voice-go').textContent === 'Record it in Custom voice'", 5, "picked")
+            b.js("document.getElementById('voice-close').click()")
+            # on a phone every control is a 44 px tap, nothing scrolls sideways
+            self.phone()
+            self.load("settings=voice")
+            b.wait_js("!!document.getElementById('vc-text')", 5, "phone voice tab")
+            typed("Old man, whispering.")
+            b.js("document.getElementById('toast').hidden = true")
+            b.pump(0.6)                         # the settings pane has slid in
+            self.assertTargets("the custom voice")
+            self.no_side_scroll("the custom voice")
+            self.shot("phone-settings-custom-voice")
+        finally:
+            self.b.call("Emulation.clearDeviceMetricsOverride")
+            self.b.viewport(1440, 900)
+            for t in ("voice_previews", "user_custom_voice", "user_voice"):
+                r.q(f"DELETE FROM {t}")
+            for f in (r.cfg.data / "voices" / "custom").glob("*"):
+                f.unlink()
 
     def test_window_change_voice(self):
         b, r = self.b, self.r

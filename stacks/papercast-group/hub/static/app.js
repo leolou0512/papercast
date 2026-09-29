@@ -2525,7 +2525,7 @@
   // the hub records it again in the fair queue, this version plays on meanwhile, and when the
   // new audio lands this page moves to it at the same sentence. The audio's revision is in its
   // URL (?v=), so no browser plays a cached old one. Samples come from tools/make_voice_samples.py.
-  S.voices = null; S.vpick = null;
+  S.voices = null; S.vpick = null; S.vtab = null;
   const makesVersions = () => !!S.me && (S.me.role === "contributor" || S.me.role === "admin");
   function audioUrl(e) {
     const r = e && e.voice && e.voice.rev;
@@ -2576,12 +2576,12 @@
       b.innerHTML = playing ? I.pause(16) : I.play(16);
     }
   }
-  // The presets as radio rows, each with its sample (the Versions list's look).
+  // The voices as radio rows, each with its sample (the Versions list's look).
   function voiceRows(list, sel, pick) {
     return list.map((x) => el("div", { class: "vrow", "data-voice": x.id },
       el("button", { type: "button", class: "ver", role: "radio", "aria-checked": String(x.id === sel), onclick: () => pick(x.id) },
         el("span", { class: "mark", "aria-hidden": "true" }),
-        el("span", { class: "v-main" }, el("span", { class: "v-who", text: x.name }), x.about ? el("span", { class: "v-sum", text: x.about }) : null)),
+        el("span", { class: "v-main" }, el("span", { class: "v-who", text: x.name }))),
       x.sample
         ? el("button", { type: "button", class: "icon-btn vplay", "data-sample": x.id, "aria-pressed": "false", "aria-label": `Play the sample of ${x.name}`,
           html: I.play(16), onclick: () => playSample(x) })
@@ -2613,17 +2613,19 @@
     if (!S.vpick || S.vpick.eid !== c.id || pd || !v.can_change) { box.hidden = true; box.dataset.sig = ""; return; }
     voicesList().then((j) => {
       if (!S.vpick || S.vpick.eid !== c.id) return;
-      const bsig = JSON.stringify([c.id, S.vpick.id, v.id]);
+      const bsig = JSON.stringify([c.id, S.vpick.id, v.id, v.custom || null, !!v.custom_old]);
       box.hidden = false;
       if (box.dataset.sig === bsig) return;
       box.dataset.sig = bsig;
-      const to = j.voices.find((x) => x.id === S.vpick.id);
-      const go = el("button", { type: "button", class: "btn-accent", id: "voice-go", disabled: !to || S.vpick.id === v.id,
-        text: to && S.vpick.id !== v.id ? `Record it in ${to.name}` : "Pick a voice", onclick: () => askChange(c.id, S.vpick.id) });
+      // the presets, then its maker's custom voice (in an older version of it: recorded again)
+      const rows = j.voices.concat(v.custom ? [v.custom] : []);
+      const to = rows.find((x) => x.id === S.vpick.id);
+      const same = S.vpick.id === v.id && !(v.id === "custom" && v.custom_old);
+      const go = el("button", { type: "button", class: "btn-accent", id: "voice-go", disabled: !to || same,
+        text: to && !same ? `Record it in ${to.name}` : "Pick a voice", onclick: () => askChange(c.id, S.vpick.id) });
       box.replaceChildren(el("div", { class: "col" }, el("h3", { class: "sec-h", text: "Voice" }),
         el("div", { class: "vlist", role: "radiogroup", "aria-label": "Voice for this version" },
-          voiceRows(j.voices, S.vpick.id, (id) => { S.vpick.id = id; renderWin(); })),
-        el("p", { class: "vnote", text: "It is recorded again in that voice, in the same queue as new versions. This one plays until the new one is ready." }),
+          voiceRows(rows, S.vpick.id, (id) => { S.vpick.id = id; renderWin(); })),
         el("div", { class: "save-row" }, go, el("button", { type: "button", class: "text-btn", id: "voice-close", text: "Cancel", onclick: () => { S.vpick = null; stopSample(); renderWin(); } }))));
       drawSampleButtons();
     }).catch((e) => toast(e.message));
@@ -2672,15 +2674,19 @@
     if (d.kind === "episode" && d.data && d.data.voice_swap) voiceSwapped(d.data);
   });
 
-  // Settings, Voice: my voice for new versions, and every voice's sample.
+  // Settings, Voice: my voice for new versions (the presets, and my custom voice once I have
+  // one), every voice's sample, and Custom: a description in Breeze's words, previewed through
+  // the voice queue (customvoice.py; the page follows it live), then used.
+  const PREVIEW_STATE = { queued: "Waiting", working: "Making…", done: "Ready", failed: "Didn’t work: try other words" };
   async function voiceTab(body) {
     stopSample();
+    S.voices = null;                    // the custom voice and its preview change: read them afresh
     let j;
     try { j = await voicesList(); } catch (e) { if (stillOn("voice")) failed(body, e); return; }
     if (!stillOn("voice")) return;
     const msg = el("span", { class: "ok", id: "voice-msg", role: "status" });
     const list = el("div", { class: "vlist", id: "voice-list", role: "radiogroup", "aria-label": "My voice" });
-    const draw = () => { list.replaceChildren(...voiceRows(j.voices, j.mine, pick)); drawSampleButtons(); };
+    const draw = () => { list.replaceChildren(...voiceRows(j.voices.concat(j.custom ? [j.custom] : []), j.mine, pick)); drawSampleButtons(); };
     const pick = async (id) => {
       if (id === j.mine) return;
       const was = j.mine;
@@ -2691,12 +2697,82 @@
         j.mine = r.mine; msg.textContent = "Saved";
       } catch (e) { j.mine = was; draw(); msg.className = "err"; msg.textContent = e.message; }
     };
+    const custom = customVoice(j, draw, msg);
+    S.vtab = (d) => {                   // a live `voice` event (mine only), or a resync
+      if (!stillOn("voice")) return;
+      if (d === null) { api("GET", "/api/voices").then((x) => { Object.assign(j, x); draw(); custom.draw(); }).catch(() => {}); return; }
+      if ("preview" in d) j.preview = d.preview;
+      if (d.custom) j.custom = d.custom;
+      if (d.mine) j.mine = d.mine;
+      draw(); custom.draw();
+    };
     draw();
     body.replaceChildren(
-      el("p", { class: "intro", text: "The voice your new versions are recorded in. A version you made can be recorded again in another voice from its page." }),
       el("div", { class: "pref" }, el("p", { class: "pref-h", text: "My voice" }), list),
+      custom.el,
       el("div", { class: "save-row" }, msg));
   }
+  function customVoice(j, drawList, msg) {
+    const max = j.custom_max || 500;
+    const text = el("textarea", { class: "field note", id: "vc-text", maxlength: String(max), rows: "3",
+      placeholder: j.custom_example || "", "aria-label": "Custom voice" });
+    text.value = (j.preview && j.preview.description) || (j.custom && j.custom.description) || "";
+    const count = el("div", { class: "counter t", id: "vc-count" });
+    const prev = el("button", { type: "button", class: "btn-accent", id: "vc-preview", text: "Preview" });
+    const again = el("button", { type: "button", class: "text-btn", id: "vc-again", text: "Another take" });
+    const use = el("button", { type: "button", class: "text-btn", id: "vc-use", text: "Use this voice" });
+    const state = el("span", { class: "vc-state", id: "vc-state", role: "status" });
+    const play = el("button", { type: "button", class: "icon-btn vplay", id: "vc-play", "data-sample": "preview", "aria-pressed": "false",
+      "aria-label": "Play the preview", html: I.play(16) });
+    let asking = false;
+    const draw = () => {
+      const pv = j.preview, said = text.value.replace(/\s+/g, " ").trim();
+      const same = !!pv && pv.description === said, st = pv ? pv.state : null;
+      const inUse = same && st === "done" && j.mine === "custom" && !!j.custom && j.custom.key === pv.key;
+      count.textContent = `${text.value.length} / ${max}`;
+      prev.disabled = asking || !said || st === "working" || (same && (st === "queued" || st === "done"));
+      again.hidden = !(same && (st === "done" || st === "failed"));
+      again.disabled = asking;
+      use.hidden = !(same && st === "done");
+      use.disabled = asking || inUse;
+      use.textContent = inUse ? "In use" : "Use this voice";
+      const show = !!pv && (same || st === "queued" || st === "working");
+      state.textContent = show ? PREVIEW_STATE[st] || "" : "";
+      state.className = `vc-state${show && st === "failed" ? " err" : ""}`;
+      play.hidden = !(same && st === "done" && pv.sample);
+      drawSampleButtons();
+    };
+    const ask = async (another) => {
+      asking = true; draw();
+      msg.className = "ok"; msg.textContent = "";
+      try { j.preview = (await api("POST", "/api/voices/custom/preview", { description: text.value, another })).preview; }
+      catch (e) { msg.className = "err"; msg.textContent = e.message; }
+      asking = false; draw();
+    };
+    prev.addEventListener("click", () => ask(false));
+    again.addEventListener("click", () => ask(true));
+    use.addEventListener("click", async () => {
+      asking = true; draw();
+      msg.className = "ok"; msg.textContent = "";
+      try {
+        const r = await api("PUT", "/api/voices/custom", { preview: j.preview.id });
+        j.mine = r.mine; j.custom = r.custom; msg.textContent = "Saved";
+        drawList();
+      } catch (e) { msg.className = "err"; msg.textContent = e.message; }
+      asking = false; draw();
+    });
+    play.addEventListener("click", () => { if (j.preview && j.preview.sample) playSample({ id: "preview", sample: j.preview.sample }); });
+    text.addEventListener("input", draw);
+    draw();
+    return { draw, el: el("div", { class: "pref vcustom", id: "voice-custom" }, el("p", { class: "pref-h", text: "Custom" }), text, count,
+      el("div", { class: "save-row vc-row" }, prev, again, use, state, play)) };
+  }
+  window.addEventListener("papercast:event", (ev) => {
+    const d = ev.detail || {};
+    if (!S.vtab) return;
+    if (d.kind === "voice") S.vtab(d.data || {});
+    else if (d.kind === "resync") S.vtab(null);
+  });
 
   // Slack (admins): whether it is set up, where it posts, a test message, the last 20 posts.
   const SLACK_STATE = { posted: "posted", pending: "waiting", sending: "sending", retrying: "trying again", failed: "failed", skipped: "not posted" };
@@ -2760,6 +2836,7 @@
     on("episode", (d) => touched(d.paper_id || (d.paper && d.paper.id) || S.epPaper.get(d.episode_id || d.id)));
     on("graph", (d) => toMap("graph", d));
     on("log", (d) => toMap("log", d));
+    on("voice", () => {});               // my custom voice's preview (Settings, Voice): as papercast:event
     queueEvents(es);
     // profile pictures: avatar.js redraws each one on the page; a resync reads them all again
     on("avatar", avatarChanged);

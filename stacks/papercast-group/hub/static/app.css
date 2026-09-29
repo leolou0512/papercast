@@ -570,7 +570,14 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; padding: 0 1
 .vrow .vplay { width: 44px; height: 44px; color: var(--text-2); }
 .vrow .vplay[aria-pressed="true"] { color: var(--accent); }
 .vrow .vnone { font-size: 13px; margin: 0; padding: 0 4px; white-space: nowrap; }
-.vnote { font-size: 13px; line-height: 18px; color: var(--text-2); margin: 8px 0 0; max-width: 60ch; }
+.vcustom .note, .vcustom .counter { max-width: 500px; }
+.vc-row { margin-top: 12px; gap: 8px 12px; }
+.vc-row .text-btn { margin: 0; padding: 0 10px; min-width: 44px; color: var(--accent); font-weight: 500; }
+.vc-row .text-btn:disabled { color: var(--text-2); }
+.vc-row .vplay { width: 44px; height: 44px; color: var(--text-2); }
+.vc-row .vplay[aria-pressed="true"] { color: var(--accent); }
+.vc-state { font-size: 14px; line-height: 20px; color: var(--text-2); }
+.vc-state.err { color: var(--danger); }
 
 /* ---------- profile pictures (avatar.js, hub/avatars.py) ---------- */
 /* A round picture, or the person's initials on one of eight colours (from their id). The

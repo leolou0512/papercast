@@ -243,6 +243,10 @@ copy of the MP3 (the hub has it). A failure is `POST /api/voice/<id>/failed {"er
   says which voice it is in (`X-Voice`). Both need the group's papercast-voice with job.json
   `voice` (from this commit on): after syncing, `bash stacks/papercast-group/deploy/install.sh
   --voice` when no episode is being voiced.
+- **Custom voice previews** (hub/customvoice.py, SPEC section 9) come to this worker as ordinary
+  claims (`vp-<user id>`, the custom voice as the claim's `voice`), so nothing here changes for
+  them; their job directories are `episodes/vp-<user id>/voice/`, one per person, reused for each
+  preview.
 - **The voice samples** for the page's lists: `python3 stacks/papercast-group/tools/make_voice_samples.py`
   (one clip per preset through papercast-voice, about two minutes each on the A4000 once it has
   the GPU; into `data/voices/`). **Timings for episodes voiced before**:

@@ -64,8 +64,10 @@ GEOM = r"""((t) => {
   const b = (e) => { const r = e.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; };
   const d = document.querySelector('#tour .tour-arrow path').getAttribute('d') || '';
   const m = /L(-?[\d.]+) (-?[\d.]+)$/.exec(d);
-  return JSON.stringify({r: b(t), h: b(document.querySelector('#tour .tour-hole')), c: b(document.getElementById('tour-card')),
-    tip: m ? [+m[1], +m[2]] : null, focus: !!(document.activeElement && document.activeElement.closest('#tour')),
+  // the page's zoom (theme.js's size): the arrow is drawn in CSS px, the boxes are the screen's
+  const z = document.documentElement.currentCSSZoom || 1;
+  return JSON.stringify({r: b(t), h: b(document.querySelector('#tour .tour-hole')), c: b(document.getElementById('tour-card')), z,
+    tip: m ? [m[1] * z, m[2] * z] : null, focus: !!(document.activeElement && document.activeElement.closest('#tour')),
     text: s.text, i: s.i, n: s.n, vw: innerWidth, vh: innerHeight,
     shown: !t.closest('[hidden]') && getComputedStyle(t).visibility === 'visible'});
 })(%s)"""
@@ -279,13 +281,14 @@ class PageBase(unittest.TestCase):
         return g
 
     def assertSpotlight(self, step, target=None, where=""):
-        """The hole round the real control, 6 px all round; the words clear of it; the arrow's tip at
-        the hole; the control on screen; the keyboard in the tour."""
+        """The hole round the real control, 6 CSS px all round (times the page's zoom on the screen);
+        the words clear of it; the arrow's tip at the hole; the control on screen; the keyboard in the
+        tour."""
         target = target or step
         time.sleep(0.05)
         g = self.geom(target)
-        r, h, c = g["r"], g["h"], g["c"]
-        for k, (got, want) in enumerate(zip(h, [r[0] - 6, r[1] - 6, r[2] + 6, r[3] + 6])):
+        r, h, c, pad = g["r"], g["h"], g["c"], 6 * g["z"]
+        for k, (got, want) in enumerate(zip(h, [r[0] - pad, r[1] - pad, r[2] + pad, r[3] + pad])):
             self.assertAlmostEqual(got, want, delta=1.01, msg=f"{where} {step}: hole edge {k} {h} against the control {r}")
         self.assertTrue(g["shown"], f"{where} {step}: the control is hidden")
         self.assertGreaterEqual(r[1], 0, f"{where} {step}: above the screen")
@@ -295,7 +298,7 @@ class PageBase(unittest.TestCase):
         self.assertIsNotNone(g["tip"], f"{where} {step}: no arrow")
         dx = max(h[0] - g["tip"][0], 0, g["tip"][0] - h[2])
         dy = max(h[1] - g["tip"][1], 0, g["tip"][1] - h[3])
-        self.assertLessEqual((dx * dx + dy * dy) ** 0.5, 9, f"{where} {step}: the arrow's tip {g['tip']} is not at the hole {h}")
+        self.assertLessEqual((dx * dx + dy * dy) ** 0.5, 9 * g["z"], f"{where} {step}: the arrow's tip {g['tip']} is not at the hole {h}")
         self.assertTrue(g["focus"], f"{where} {step}: the keyboard left the tour")
         return g
 

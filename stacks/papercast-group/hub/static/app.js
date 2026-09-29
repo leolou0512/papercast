@@ -23,6 +23,11 @@
   };
   const SPEEDS = [1, 1.25, 1.5, 1.75, 2, 0.75];
   const phone = () => window.matchMedia("(max-width: 720px)").matches;
+  // The page's zoom (theme.js's size): getBoundingClientRect, clientX and innerWidth are in the
+  // screen's px, style, scrollTop and offsetWidth in the page's CSS px, the screen's / zoom.
+  const zoom = () => document.documentElement.currentCSSZoom || 1;
+  const box = (e) => { const r = e.getBoundingClientRect(), z = zoom();
+    return { left: r.left / z, top: r.top / z, right: r.right / z, bottom: r.bottom / z, width: r.width / z, height: r.height / z }; };
   const isAdmin = () => S.me && S.me.role === "admin";
   const store = {
     get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
@@ -777,7 +782,7 @@
     });
     inner.addEventListener("pointermove", (e) => {
       if (x0 === null || e.pointerId !== pid) return;
-      const mx = e.clientX - x0, my = e.clientY - y0;
+      const mx = (e.clientX - x0) / zoom(), my = (e.clientY - y0) / zoom();
       if (!mode) {
         if (Math.abs(mx) > 8 && Math.abs(mx) > Math.abs(my)) {
           mode = "h";
@@ -1544,14 +1549,14 @@
     Q.dragging = true;
     li.classList.add("drag");
     const from = [...list.children].indexOf(li);
-    let y0 = ev.clientY;
+    let y0 = ev.clientY / zoom();
     // Past half of a neighbour, the row takes its place; it follows the pointer in between.
     const move = (e) => {
       if (e.pointerId !== ev.pointerId) return;
-      const prev = li.previousElementSibling, next = li.nextElementSibling, dy = e.clientY - y0;
+      const y = e.clientY / zoom(), prev = li.previousElementSibling, next = li.nextElementSibling, dy = y - y0;
       if (next && dy > next.offsetHeight / 2) { list.insertBefore(next, li); y0 += next.offsetHeight; }
       else if (prev && dy < -prev.offsetHeight / 2) { list.insertBefore(li, prev); y0 -= prev.offsetHeight; }
-      li.style.transform = `translateY(${e.clientY - y0}px)`;
+      li.style.transform = `translateY(${y - y0}px)`;
     };
     const done = (e) => {
       if (e.pointerId !== ev.pointerId) return;
@@ -1689,25 +1694,25 @@
   }
   // The part of the window a sentence is seen in: under the slim player bar when it shows.
   function trView() {
-    const r = $("win").getBoundingClientRect(), bar = $("strip").classList.contains("on") ? 56 : 0;
+    const r = box($("win")), bar = $("strip").classList.contains("on") ? 56 : 0;
     return { top: r.top + bar, bottom: r.bottom, h: Math.max(1, r.height - bar) };
   }
   function curVisible() {
     const els = curEls();
     if (!els.length || S.view !== "paper" || $("tr").hidden) return false;
-    const v = trView(), a = els[0].getBoundingClientRect(), b = els[els.length - 1].getBoundingClientRect();
+    const v = trView(), a = box(els[0]), b = box(els[els.length - 1]);
     return b.bottom > v.top + 8 && a.top < v.bottom - 8;
   }
   const motion = () => (window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth");
   function scrollWinTo(node, at) {
-    const w = $("win"), v = trView(), r = node.getBoundingClientRect();
+    const w = $("win"), v = trView(), r = box(node);
     T.autoUntil = Date.now() + 1000;        // this scroll is the page's own, not the person's
     w.scrollTo({ top: Math.max(0, w.scrollTop + r.top - (v.top + v.h * at)), behavior: motion() });
   }
   function keepInView(force) {
     const els = curEls();
     if (!els.length || S.view !== "paper" || $("tr").hidden) return;
-    const v = trView(), r = els[0].getBoundingClientRect();
+    const v = trView(), r = box(els[0]);
     if (!force && r.top >= v.top + v.h * 0.12 && r.bottom <= v.bottom - v.h * 0.2) return;
     scrollWinTo(els[0], 0.3);
   }
@@ -1753,7 +1758,7 @@
     if (!n) return;
     if (keep) { goHit(Math.max(0, Math.min(n - 1, was)), true); return; }
     // the first match at or under the top of what is on screen
-    const top = trView().top, i = T.hits.findIndex((mk) => mk.getBoundingClientRect().bottom > top);
+    const top = trView().top, i = T.hits.findIndex((mk) => box(mk).bottom > top);
     goHit(i < 0 ? 0 : i, !go);
   }
   function goHit(i, quiet) {
@@ -1765,7 +1770,7 @@
     T.hits[i].classList.add("on");
     $("tr-count").textContent = `${i + 1} of ${n}`;
     if (quiet) return;
-    const v = trView(), r = T.hits[i].getBoundingClientRect();
+    const v = trView(), r = box(T.hits[i]);
     if (r.top < v.top + 8 || r.bottom > v.bottom - 64) { T.follow = false; scrollWinTo(T.hits[i], 0.35); }
     trNowBtn();
   }
@@ -1886,10 +1891,10 @@
     anchor.setAttribute("aria-expanded", "true");
     const node = el("div", { class: "menu", role: "menu" }, items);
     document.body.append(node);
-    const r = anchor.getBoundingClientRect(), mw = node.offsetWidth, mh = node.offsetHeight;
-    const top = r.bottom + 4 + mh > window.innerHeight - 8 ? Math.max(8, r.top - 4 - mh) : r.bottom + 4;
+    const r = box(anchor), mw = node.offsetWidth, mh = node.offsetHeight, vw = window.innerWidth / zoom(), vh = window.innerHeight / zoom();
+    const top = r.bottom + 4 + mh > vh - 8 ? Math.max(8, r.top - 4 - mh) : r.bottom + 4;
     node.style.top = `${top}px`;
-    node.style.left = `${Math.max(8, Math.min(window.innerWidth - mw - 8, r.right - mw))}px`;
+    node.style.left = `${Math.max(8, Math.min(vw - mw - 8, r.right - mw))}px`;
     S.menu = { node, anchor, for: key };
     const first = node.querySelector("button, a");
     if (first) first.focus({ preventScroll: true });
@@ -2158,7 +2163,6 @@
     const pwMsg = el("p", { class: "err", id: "acct-pw-msg", role: "status" });
     const pwSave = el("button", { type: "submit", class: "btn-accent", id: "acct-pw-save", text: "Change password" });
     const form = el("form", { id: "acct-pw", novalidate: true }, user, curL, cur, newL, nw,
-      el("p", { class: "muted", text: "At least 10 characters, and not your username. Every other browser signed in as you is signed out." }),
       el("div", { class: "save-row" }, pwSave), pwMsg);
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
@@ -2184,24 +2188,34 @@
       all.disabled = true;
       try { await api("POST", "/api/auth/signout-all"); location.replace("/signin"); } catch (e) { all.disabled = false; toast(e.message); }
     });
-    // light or dark in this browser (theme.js); System follows the computer's setting
-    const look = el("div", { class: "seg", id: "acct-theme", role: "radiogroup", "aria-label": "Appearance" });
+    // the theme and the size in this browser (theme.js; the themes' colours in themes.css); System
+    // follows the computer's light or dark
+    const PT = window.pcgTheme;
+    const look = el("div", { class: "seg", id: "acct-theme", role: "radiogroup", "aria-label": "Theme" });
     const drawLook = () => {
-      const now = window.pcgTheme ? window.pcgTheme.saved() : "";
-      look.replaceChildren(...[["", "System"], ["light", "Light"], ["dark", "Dark"]].map(([v, t]) => el("button", {
+      const now = PT ? PT.saved() : "";
+      const all = [{ v: "", label: "System" }].concat(PT ? PT.themes : [{ v: "light", label: "Light" }, { v: "dark", label: "Dark" }]);
+      look.replaceChildren(...all.map(({ v, label }) => el("button", {
         type: "button", role: "radio", "aria-checked": String(now === v), "data-v": v || "system",
-        onclick: () => { if (window.pcgTheme) window.pcgTheme.set(v); drawLook(); },
-      }, t)));
+        onclick: () => { if (PT) PT.set(v); drawLook(); },
+      }, el("span", { class: "sw", "data-sw": v || "system", "aria-hidden": "true" }), label)));
     };
     drawLook();
+    const sizeSeg = el("div", { class: "seg", id: "acct-size", role: "radiogroup", "aria-label": "Size" });
+    const drawSize = () => {
+      const now = PT ? PT.size() : 100;
+      sizeSeg.replaceChildren(...(PT ? PT.sizes : [100]).map((v) => el("button", {
+        type: "button", role: "radio", "aria-checked": String(now === v), "data-v": String(v),
+        onclick: () => { if (PT) PT.setSize(v); drawSize(); },
+      }, `${v}%`)));
+    };
+    drawSize();
     body.replaceChildren(
-      el("p", { class: "intro", text: "Your name as the group sees it, your password, how the site looks, and where you are signed in." }),
       el("p", { class: "pref-h", text: "Name" }), el("div", { class: "invite first" }, name, nameSave), nameMsg,
       el("p", { class: "pref-h sec", text: "Appearance" }), look,
-      el("p", { class: "muted", text: "Light or dark in this browser. System follows your computer's setting." }),
+      el("p", { class: "pref-h sec", text: "Size" }), sizeSeg,
       el("p", { class: "pref-h sec", text: "Change password" }), form,
       el("p", { class: "pref-h sec", text: "Sign out" }),
-      el("p", { class: "muted", text: "Sign out everywhere ends every browser session of yours, this one too. papercast on your computers stays logged in: remove those under Devices." }),
       el("div", { class: "save-row" }, out, all));
   }
 

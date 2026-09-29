@@ -142,8 +142,8 @@ class LiveMap(unittest.TestCase):
         else:
             b.viewport(1440, 900)
         if hide_events:            # a page that hears nothing (its stream dropped): only the revision check helps it
-            b.call("Page.addScriptToEvaluateOnNewDocument",
-                   source="window.EventSource = function () { this.addEventListener = function () {}; this.close = function () {}; this.readyState = 1; };")
+            deaf = b.call("Page.addScriptToEvaluateOnNewDocument",
+                          source="window.EventSource = function () { this.addEventListener = function () {}; this.close = function () {}; this.readyState = 1; };")["identifier"]
         b.goto(self.r.base + "/")
         b.js("localStorage.clear(); sessionStorage.clear()")
         b.goto(self.r.base + "/")
@@ -153,7 +153,7 @@ class LiveMap(unittest.TestCase):
                   f" && {M}.cur()._s.nodes.length === 5 && {M}.state().rev != null)", 10, f"{who}'s map")
         b.wait_js("!document.querySelector('#map .pm-ib[aria-label=Undo]').disabled || true", 5)
         if hide_events:
-            b.call("Page.removeScriptToEvaluateOnNewDocument", identifier="1")
+            b.call("Page.removeScriptToEvaluateOnNewDocument", identifier=deaf)
 
     def shows(self, b, expr, what, secs=LIVE_S):
         """Within secs (the other page, live)."""
@@ -408,7 +408,8 @@ class LiveMap(unittest.TestCase):
             self.undo_api(A)
             a.wait_js("!document.querySelector('#map .pm-ib[aria-label=Redo]').disabled", 3, "Redo on")
             sizes = a.js("['Undo', 'Redo'].map(t => (r => [r.width, r.height])(document.querySelector(`#map .pm-ib[aria-label=${t}]`).getBoundingClientRect()))")
-            self.assertEqual(sizes, [[44, 44], [44, 44]])
+            z = a.js("document.documentElement.currentCSSZoom")         # 44 CSS px, times the page's zoom (theme.js's size)
+            self.assertEqual([[round(v / z) for v in s] for s in sizes], [[44, 44], [44, 44]])
             self.assertEqual(json.loads(a.js(TAP_TARGETS)), [], "the map")
             a.js("document.querySelector('#map .pm-ib[aria-label=Redo]').click()")
             a.wait_js("!!document.querySelector('#map [data-panel=redo] .pm-undo button')", 3, "the redo panel")

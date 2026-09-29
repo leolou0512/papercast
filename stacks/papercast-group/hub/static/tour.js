@@ -14,6 +14,13 @@
   const GAP = 44;           // between the hole and the words: the arrow's room
   const EDGE = 12;          // nothing closer than this to the screen's edge
   const reduced = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  // The page's zoom (theme.js's size): a box and the window in the page's CSS px, which the
+  // spotlight, the words and the arrow are placed in (getBoundingClientRect and innerWidth are the
+  // screen's px, the CSS px times the zoom).
+  const zoom = () => document.documentElement.currentCSSZoom || 1;
+  const box = (e) => { const r = e.getBoundingClientRect(), z = zoom();
+    return { left: r.left / z, top: r.top / z, right: r.right / z, bottom: r.bottom / z, width: r.width / z, height: r.height / z }; };
+  const view = () => ({ w: window.innerWidth / zoom(), h: window.innerHeight / zoom() });
   const store = {
     get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
     put(k, v) { try { if (v === null || v === undefined) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (e) { /* private mode */ } },
@@ -115,9 +122,9 @@
     }
     function placeHelp() {
       if (!H.node || H.node.hidden) return;
-      const r = helpBtn.getBoundingClientRect(), w = H.node.offsetWidth;
+      const r = box(helpBtn), w = H.node.offsetWidth;
       H.node.style.top = `${Math.round(Math.max(8, r.bottom + 6))}px`;
-      H.node.style.left = `${Math.round(clamp(r.right - w, 8, window.innerWidth - w - 8))}px`;
+      H.node.style.left = `${Math.round(clamp(r.right - w, 8, view().w - w - 8))}px`;
     }
     function openHelp() {
       if (!H.node) {
@@ -248,7 +255,7 @@
       N.block.addEventListener("wheel", (e) => e.preventDefault(), { passive: false });
       N.block.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
       // the spotlight opens from the middle of the screen
-      Object.assign(N.hole.style, { left: `${window.innerWidth / 2}px`, top: `${window.innerHeight / 2}px`, width: "0px", height: "0px" });
+      Object.assign(N.hole.style, { left: `${view().w / 2}px`, top: `${view().h / 2}px`, width: "0px", height: "0px" });
       document.body.append(N.root);
     }
     const inTour = (e) => !!(e && N.root && N.root.contains(e));
@@ -337,11 +344,11 @@
 
     // Wholly in view (and in its scrolling pane, clear of the window's slim player bar)?
     function inView(t) {
-      const r = t.getBoundingClientRect();
-      if (r.top < EDGE || r.bottom > window.innerHeight - EDGE || r.left < 0 || r.right > window.innerWidth) return false;
+      const r = box(t), v = view();
+      if (r.top < EDGE || r.bottom > v.h - EDGE || r.left < 0 || r.right > v.w) return false;
       for (let a = t.parentElement; a && a !== document.body; a = a.parentElement) {
         if (a.scrollHeight <= a.clientHeight || !/(auto|scroll)/.test(getComputedStyle(a).overflowY)) continue;
-        const ar = a.getBoundingClientRect(), top = a.id === "win" ? 64 : 8;
+        const ar = box(a), top = a.id === "win" ? 64 : 8;
         if (r.top < ar.top + top || r.bottom > ar.bottom - 8) return false;
       }
       return true;
@@ -392,14 +399,14 @@
         if (!again) return;
         t = T.target = again;
       }
-      const r = t.getBoundingClientRect();
-      const key = [r.left, r.top, r.width, r.height, window.innerWidth, window.innerHeight, N.card.offsetWidth, N.card.offsetHeight].join();
+      const r = box(t);
+      const key = [r.left, r.top, r.width, r.height, window.innerWidth, window.innerHeight, zoom(), N.card.offsetWidth, N.card.offsetHeight].join();
       if (key === T.key) return;
       T.key = key;
       place(r);
     }
     function place(r) {
-      const vw = window.innerWidth, vh = window.innerHeight;
+      const { w: vw, h: vh } = view();
       const h = { l: r.left - PAD, t: r.top - PAD, r: r.right + PAD, b: r.bottom + PAD };
       Object.assign(N.hole.style, { left: `${h.l}px`, top: `${h.t}px`, width: `${h.r - h.l}px`, height: `${h.b - h.t}px` });
       // the words: under the control, else over it, else beside it, else low on the screen
@@ -440,7 +447,7 @@
     }
     // Skip tour stays on the side, where the hole and the words leave room.
     function skipAt(h, c) {
-      const vw = window.innerWidth, vh = window.innerHeight, w = N.skip.offsetWidth, ht = N.skip.offsetHeight, m = 12;
+      const { w: vw, h: vh } = view(), w = N.skip.offsetWidth, ht = N.skip.offsetHeight, m = 12;
       const box = { l: h.l - 8, t: h.t - 8, r: h.r + 8, b: h.b + 8 }, mid = Math.round((vh - ht) / 2);
       const spots = { rm: { l: vw - m - w, t: mid }, br: { l: vw - m - w, t: vh - m - ht }, tr: { l: vw - m - w, t: m },
         lm: { l: m, t: mid }, bl: { l: m, t: vh - m - ht }, tl: { l: m, t: m } };

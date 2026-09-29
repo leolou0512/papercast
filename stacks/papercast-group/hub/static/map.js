@@ -71,7 +71,9 @@
     var API = opts.api || "", ME = opts.me || {}, ADMIN = ME.role === "admin", EDIT = opts.editable !== false;
     var papers = opts.papers || new Map();
     var S = Object.assign({}, DEFAULTS, load(SKEY) || {});
-    var C = {}, W = 0, H = 0, DPR = 1, FONT = "sans-serif";
+    // W, H and everything drawn are in the page's CSS px; under the page's zoom (theme.js's size, CSS
+    // zoom) the screen's px are Z of them: DPR is device px per CSS px, as with the browser's zoom
+    var C = {}, W = 0, H = 0, Z = 1, DPR = 1, FONT = "sans-serif";
     // graphs: {id, meta: {name, tags, locked, n, created_by}, data: the hub's answer, _s: what is drawn}
     var graphs = [], byId = {}, cur = null, listBusy = false, listAgain = false, listErr = null, listLoaded = false;
     var hoverI = null, hoverL = null, selId = null, selLink = null, linkFrom = null, draft = null, dragN = null, qset = null, want = null;
@@ -351,7 +353,7 @@
     /* ---------- drawing ---------- */
     function resize() {
       var r = root.getBoundingClientRect();
-      DPR = window.devicePixelRatio || 1; W = r.width; H = r.height;
+      Z = root.currentCSSZoom || 1; DPR = (window.devicePixelRatio || 1) * Z; W = r.width / Z; H = r.height / Z;
       if (!W || !H) return;
       cv.width = gv.width = Math.round(W * DPR); cv.height = gv.height = Math.round(H * DPR);
       if (cur && cur._s && !cur._s.fitted && cur._s.nodes.length) { fit(false); cur._s.fitted = true; }
@@ -638,7 +640,7 @@
     }
     function panelOpen() { for (var k in PANELS) if (!PANELS[k].hidden) return k; return null; }
     // where the bar over the map ends (CSS px from the top)
-    function chromeBottom() { var r = top.getBoundingClientRect(), o = root.getBoundingClientRect(); return r.height ? r.bottom - o.top : 0; }
+    function chromeBottom() { var r = top.getBoundingClientRect(), o = root.getBoundingClientRect(); return r.height ? (r.bottom - o.top) / Z : 0; }
     function fit(smooth) {
       if (!W || !cur || !cur._s || !cur._s.nodes.length) return;
       var N = cur._s.nodes, x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
@@ -659,7 +661,8 @@
       var v = cur._s.view, k = clampK(v.k * f); f = k / v.k;
       v.x = px - (px - v.x) * f; v.y = py - (py - v.y) * f; v.k = k; anim = null; userMoved = true; kick();
     }
-    function local(e) { var r = cv.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
+    function local(e) { var r = cv.getBoundingClientRect(); return { x: (e.clientX - r.left) / Z, y: (e.clientY - r.top) / Z }; }
+    function onScreen(x, y) { var r = cv.getBoundingClientRect(); return [r.left + x * Z, r.top + y * Z]; }       // local()'s inverse
     function toWorld(p) { var v = cur._s.view; return { x: (p.x - v.x) / v.k, y: (p.y - v.y) / v.k }; }
     function hit(p) {
       var w = toWorld(p), N = cur._s.nodes, best = null, bd = Infinity, slop = (phone() ? 12 : 5) / cur._s.view.k;
@@ -2129,6 +2132,7 @@
     var mq = window.matchMedia("(prefers-color-scheme: dark)");
     if (mq.addEventListener) mq.addEventListener("change", function () { readColors(); kick(); });
     document.addEventListener("pcg-theme", function () { readColors(); kick(); });   // theme.js: chosen on the page
+    document.addEventListener("pcg-size", function () { resize(); });                // theme.js: the page's zoom
     if (window.ResizeObserver) new ResizeObserver(function () { resize(); }).observe(root); else window.addEventListener("resize", resize);
     resize();
     renderTabs(); renderEmpty();
@@ -2162,14 +2166,16 @@
             rev: cur ? cur.rev : null, dialog: dlg.open ? dlgH.textContent : null, live: live.hidden ? null : live.textContent,
             sugg: { shown: showSugg, n: cur && cur._s ? cur._s.sugg.length : 0, sel: selSugg, mode: SETS.mode, open: SETS.open } };
         },
-        // a paper's place on the page, and a link's middle (CSS px)
-        pos: function (id) { var n = nodeOf(cur, id), v = cur._s.view; return n ? [n.x * v.k + v.x, n.y * v.k + v.y] : null; },
-        mid: function (lid) { var l = cur._s.lid[String(lid)], N = cur._s.nodes, v = cur._s.view; if (!l) return null; return [(N[l.s].x + N[l.t].x) / 2 * v.k + v.x, (N[l.s].y + N[l.t].y) / 2 * v.k + v.y]; },
+        // a paper's place on the screen, and a link's middle (the screen's px, where a click goes: the
+        // map's CSS px, which view() and the nodes are in, times zoom(), from the map's corner)
+        pos: function (id) { var n = nodeOf(cur, id), v = cur._s.view; return n ? onScreen(n.x * v.k + v.x, n.y * v.k + v.y) : null; },
+        mid: function (lid) { var l = cur._s.lid[String(lid)], N = cur._s.nodes, v = cur._s.view; if (!l) return null; return onScreen((N[l.s].x + N[l.t].x) / 2 * v.k + v.x, (N[l.s].y + N[l.t].y) / 2 * v.k + v.y); },
+        zoom: function () { return Z; },
         view: function (k, x, y) { var v = cur._s.view; if (k != null) { v.k = k; v.x = x; v.y = y; anim = null; userMoved = true; draw(); } return { k: v.k, x: v.x, y: v.y }; },
-        // the graph's colour at a point of the page (CSS px), read right after drawing
+        // the graph's colour at a point of the screen (as pos() gives it), read right after drawing
         pixel: function (x, y) {
           draw();
-          var X = Math.round(x * DPR), Y = Math.round(y * DPR);
+          var q = local({ clientX: x, clientY: y }), X = Math.round(q.x * DPR), Y = Math.round(q.y * DPR);
           if (gl) { var px = new Uint8Array(4); gl.readPixels(X, gv.height - 1 - Y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px); return [px[0], px[1], px[2]]; }
           return Array.prototype.slice.call(g2.getImageData(X, Y, 1, 1).data, 0, 3);
         } }

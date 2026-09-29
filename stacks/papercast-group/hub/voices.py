@@ -5,7 +5,16 @@ Presets (PRESETS): Breeze TTS 2 narrators, each described in words and generated
 seed (as stacks/papercast/voice/papercast_voice/config.py sets its own default), and one Kokoro
 voice on the CPU. `key` names the pair: papercast-voice caches chunks by it and names it in its
 output, which is how the hub knows what an upload is in. `clear-female` is papercast-voice's own
-default (config.py `voice`), so an episode voiced without a choice is in it.
+default (config.py `voice`), so an episode voiced without a choice is in it. A key names one
+narrator for good: a changed description gets a new key (a "-v2"), so no old chunk is reused.
+
+One narrator per voice (papercast-voice 1.2, its refs.py): Breeze designs each voice once, saying
+SAMPLE_TEXT from the description and seed, keeps that clip, and voices every chunk of every
+episode from it. Before, every chunk was designed on its own and came out a different speaker
+(Leo, 2026-09-29: "why it seem to switch voices every other sentence?"). Designing SAMPLE_TEXT is
+the same request a preset's sample and a custom voice's preview were made with, so the clip is
+the voice people heard and picked; papercast-voice's reference_text is SAMPLE_TEXT (a test pins
+the two).
 
 Each person's own voice (Settings, Voice): the preset their new versions are voiced in
 (user_voice; none chosen is the default). The claim of a new episode carries its maker's.
@@ -111,6 +120,33 @@ PRESETS = [
                      "Japanese anime heroine: high-pitched, bright, sweet and very cute voice. Bubbly and "
                      "wildly enthusiastic, dramatic and expressive delivery, excited rising intonation, "
                      "lively fast pace, as if every result is the most amazing thing ever. " + _PODCAST)},
+    # Leo, 2026-09-29: "I want 高冷御姐音, JF kennedy and Sean Bean". All three are made from these
+    # words alone, as every preset is (Breeze voice design); nothing is cloned from a recording
+    # of anyone. The two after this one are style voices, labelled so ("-style, for fun").
+    {"id": "cool-female", "name": "Cool, composed female", "engine": "breeze", "seed": 42,
+     "key": "preset-cool-female-v1-s42",
+     "about": "A poised, elegant woman in her thirties: low, smooth, unhurried and a little aloof (高冷御姐音).",
+     "instruction": ("Adult female, early 30s, neutral American accent with a polished, cultured edge. "
+                     "Low-to-mid pitch, smooth, velvety and resonant voice. Cool, poised and composed, "
+                     "elegant and self-assured, a little aloof and distant, never bubbly. Calm, unhurried, "
+                     "measured pace, precise articulation, understated and restrained delivery. " + _PODCAST)},
+    {"id": "jfk-style", "name": "JFK-style (for fun)", "engine": "breeze", "seed": 42,
+     "key": "preset-jfk-style-v1-s42",
+     "about": ("A 1960s Boston orator in the manner of JFK's speeches. A style voice made from a "
+               "description, not from any recording of him (Leo, 2026-09-29)."),
+     "instruction": ("Adult male, mid-40s, a 1960s Boston Brahmin accent in the manner of John F. "
+                     "Kennedy's speeches: non-rhotic, dropped r's, broad a, clipped New England vowels. "
+                     "Confident, bright, slightly nasal mid-range voice. Distinctive oratorical cadence: "
+                     "emphatic stress on key words, deliberate pauses, rising-and-falling presidential "
+                     "address delivery, measured pace, mid-century broadcast style. " + _PODCAST)},
+    {"id": "bean-style", "name": "Sean Bean-style (for fun)", "engine": "breeze", "seed": 42,
+     "key": "preset-bean-style-v1-s42",
+     "about": ("A deep, slightly gravelly Sheffield narrator in the manner of Sean Bean. A style voice "
+               "made from a description, not from any recording of him (Leo, 2026-09-29)."),
+     "instruction": ("Adult male, early 50s, a Sheffield Yorkshire accent in the manner of Sean Bean's "
+                     "narration: Northern English flat vowels, short a, dropped h's. Deep, slightly "
+                     "gravelly, warm and resonant voice, low pitch. Earnest, grounded and sincere, "
+                     "understated and plain-spoken, steady measured pace. " + _PODCAST)},
     {"id": "basic-female", "name": "Basic female (CPU)", "engine": "kokoro", "cpu": True,
      "key": "af_heart",
      "about": "Kokoro on the CPU: plainer, but made in minutes without waiting for the GPU."},
@@ -121,8 +157,10 @@ DEFAULT_ID = next(p["id"] for p in PRESETS if p.get("default"))
 CUSTOM = "custom"
 CUSTOM_NAME = "Custom voice"
 
-# The paragraph every sample and preview says (tools/make_voice_samples.py, customvoice.py).
-# Speakable as papercast-voice wants it (no digits, no symbols): about twenty seconds.
+# The paragraph every sample and preview says (tools/make_voice_samples.py, customvoice.py), and
+# the one papercast-voice designs each voice's reference clip on (its config.py reference_text:
+# change both together, which starts every voice afresh). Speakable as papercast-voice wants it
+# (no digits, no symbols): about twenty seconds.
 SAMPLE_TEXT = ("Here is the idea in one breath. A diffusion model learns to undo noise, one small step at "
                "a time. Start from pure static, ask the network which way the data lies, take a small step, "
                "and ask again. After a few hundred steps, what comes out looks like the pictures it was "

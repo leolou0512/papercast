@@ -153,9 +153,9 @@ job is SIGKILLed (it watches its parent; see RISKS for why not `PR_SET_PDEATHSIG
 
 **The GPU voice: Breeze TTS 2** (`engines/breeze_worker.py`, block `engines.breeze` in
 `config.py`). Set up exactly as clip A was made (`samples/gen_breeze.py`; a test reads that file
-and pins the two together): no reference audio, the narrator described in words ("A warm, clear
+and pins the two together): the narrator described in words ("A warm, clear
 woman in her thirties with a neutral American accent, narrating a science podcast …"),
-classifier-free guidance 4, seed 42 for every chunk, bf16, eager attention, and two of upstream's
+classifier-free guidance 4, seed 42, bf16, eager attention, and two of upstream's
 five fast stages as CUDA graphs (`depth_decoder`, `backbone_decode`: 0.83 × real time at 9.5 GiB,
 against 3.56 × all eager at 8.1 GiB; all five are quoted at 14.4 GiB, which leaves a shared card
 no room). The model runs inside the worker process: no server, no port. Each chunk's length is
@@ -164,6 +164,27 @@ is generated again with seed 43, then 44; if none passes, the nearest is kept an
 (`metrics.json` `retried_chunks`). A CUDA out-of-memory, at load or mid-chunk, ends the worker
 with `oom`, so the job frees the card and waits again (§10.4). Triton needs a C compiler and
 stibnite has none: `engines/breeze/bin/cc` is zig's clang from the venv's `ziglang` wheel.
+
+**One narrator per voice** (1.2, `refs.py`). Up to 1.1 every chunk was voice-designed on its own,
+and voice design draws a speaker for the text it is given: every chunk (two to four sentences)
+was a different narrator of the same description. Leo heard it ("why it seem to switch voices
+every other sentence?"), and a speaker-embedding model measures it (section "Measured": the
+default voice's neighbouring chunks 0.38 alike, the halves of one chunk 0.83). So a
+voice is now designed once: the engine spec's `reference_text` (the paragraph papercast-group's
+samples and custom-voice previews say, so this is the very clip people heard and picked),
+voice-designed from the voice's instruction and seed like a chunk was, with the same length check
+and retries. The job keeps it under `engines.breeze.references_dir` (`voices/breeze/<voice>-<recipe
+id>.wav` and `.json`; the recipe id hashes model, voice, instruction, seed, speaker, CFG and the
+paragraph, so a changed description never finds an old clip) and every chunk of every episode in
+that voice is then voiced from it: upstream's voice clone (`ref_clone_tata`: the clip and its
+transcript before the text, no instruction, no CFG, as upstream's README says a clone runs). The
+first job of a voice designs it (about one chunk's time, on whichever GPU it got; the first clip
+kept wins if two jobs design at once), every later job, on any host, sends the kept clip to its
+engine. A chunk whose reply does not name that clip is not kept; `chunks/<key>/reference.json`
+names the clip a job's chunks came from, and chunks from another clip are voiced again. The chunk
+key carries the recipe id (`-r<10 hex>`), so no chunk voice-designed by 1.1 is ever reused.
+`output.reference` is the clip's sha256. The CPU voice (Kokoro) speaks from a fixed voice file and
+needs none of this; an episode is never a mix of the two (Use CPU voice voices every chunk again).
 
 **No systemd unit** (a deliberate deviation from the brief; RISKS.md says why). The voice is a
 command, not a service: the runner's user unit supervises it, re-adopts it after its own restart,
@@ -175,8 +196,11 @@ and restarts an interrupted voice step once after a reboot (INTERFACE §3).
 "voice": "preset-warm-male-s42", "instruction": "Adult male, mid-30s, ...", "seed": 42}` or
 `{"engine": "kokoro", "voice": "af_heart"}` (with `"engine": "cpu"` in job.json). It may set only
 `voice`, `instruction`, `seed` and `speed` of that engine's spec; `voice` is the chunk cache key
-(`chunks/<engine>-<voice>-...`) and comes back as `output.voice`. A GPU voice that falls back
-to the CPU keeps the CPU engine's own voice. Without it, everything is as before.
+(`chunks/<engine>-<voice>-...`) and comes back as `output.voice`. A Breeze voice's reference clip
+is designed from its instruction and seed the first time it speaks, and kept ("One narrator per
+voice"). A GPU voice that falls back to the CPU keeps the CPU engine's own voice, for the whole
+episode (`output.engine` "cpu:kokoro", `output.voice` "af_heart"). Without it, everything is as
+before.
 
 **out/timings.json** (`timings.py`): `{"version": 1, "duration_s", "segments": [{"start", "end",
 "text"}]}`, one segment per sentence (a heading is one) in script order, seconds of the MP3. The
@@ -206,6 +230,8 @@ are still there (a finished job deletes them), checked against the MP3's duratio
 | bs1, fp16 (2026-09-27) | fails on the first chunk: `probability tensor contains either inf, nan or element < 0` (device-side assert in sampling) | the sample paragraph, bs1 GPU 0 (Quadro RTX 6000, Turing: no bf16), the pipeline's remote path (`hosts.Host` + `Worker`) |
 | bs1, fp32: quality gate against stibnite's bf16 (2026-09-27) | same text, narrator description and seed; the two precisions sample different audio, so these compare distributions. **Whisper small.en (CPU) word errors**: sample paragraph 5 of 74 on bs1, 7 of 74 on stibnite (both mostly Whisper writing "200" and "1" for the spoken numbers, which a word-only score counts, and "plane" for "plain"); 1,000-word excerpt 2 errors (0.2 %) on bs1, 4 (0.4 %) on stibnite. **Seconds per word** (raw chunk audio): 0.488 vs 0.482 (paragraph), 0.358 vs 0.354 (excerpt). **Median pitch** (pYIN, voiced frames): 194.9 vs 185.1 Hz (paragraph), 190.5 vs 186.1 Hz (excerpt); bs1's excerpt chunks 166-215 Hz, stibnite's full episode 157-240 Hz. **Raw loudness** before normalisation: -21.2 vs -22.6 LUFS (paragraph); bs1 excerpt -21.6 (chunks -23.5 to -19.4); the pipeline normalises both to -16. No NaN or silent chunk, no chunk retried. **Peak GPU memory 16,138 MiB** (engine process; device 16,141), flat after load; load 48 s; **real-time factor 1.15** (excerpt: 412.8 s of synthesis for 357.8 s of audio; paragraph 1.18) | sample paragraph + the first 15 paragraphs (1,000 words, 24 chunks) of `tests/fixtures/long_script.md`, bs1 GPU 0, nice 10, nvidia-smi every 1 s over ssh. stibnite's reference: `~/papercast-voice-cache/narrators-2026-09-27/now_s42.wav` (the installed engine, seed 42) and the same chunks of the 2026-09-26 full episode (`measure/breeze-episode-2026-09-26.*`; its raw chunks were deleted, so its excerpt loudness is not comparable) |
 | short episode on bs1, real | 137 words → 58.9 s of audio in 115 s (engine load 44 s), -16.09 LUFS, -2.4 dBTP, Whisper word error rate 0.7 %, tags read back; afterwards no new file under bs1's install and its engine gone | `test_real_remote.py`: the installed voice through the runner's `launch.sh`, stibnite's card switched off for the job |
+| the narrator changing from chunk to chunk (1.1, 2026-09-29) | speaker-embedding cosine (1 = same voice) between the two halves of one chunk, and between the end of one chunk and the start of the next: **default Breeze voice** (e_emcv7ywo56j6, 59 chunks) **0.83 within, 0.38 between neighbours**, 91 % of neighbouring pairs under 0.6, median pitch per chunk 142–215 Hz; anime preset (e_cml7wvtqpfdw, 47 chunks) 0.87 within, 0.65 between, 37 % under 0.6; **Kokoro** (two episodes, 63 and 65 chunks) **0.89 within, 0.87–0.88 between**, none under 0.6, pitch 190–206 Hz. Every chunk of each came from one engine and one voice key (no mixing) | papercast-group's episodes on perov (the MP3s; chunks of at least 6 s; chunk bounds from timings.json, or, where there was none, from the joiner's silences matched to plan.json's gaps, which on the three episodes that have timings put the bounds 0.04–0.06 s from them, median, with at most 2 chunks more than 0.5 s off), ECAPA-TDNN (speechbrain spkrec-ecapa-voxceleb) on the CPU, pitch by pYIN |
+| one designed clip, then clone (1.2, 2026-09-29) — CPU proxy | the default voice's description and seed, six chunks of `tests/fixtures/long_script.md` (20–48 words): **designed one by one** (1.1): halves of a chunk 0.71 (median), neighbours **0.39**, all chunk pairs 0.43 (min 0.26), chunks against the voice's clip 0.34 (0.10–0.51), pitch 188–208 Hz; **cloned from one designed clip** (1.2): halves 0.76, neighbours **0.75**, all pairs 0.84 (min 0.76), against the clip 0.89 (0.83–0.89), pitch 164–182 Hz. Both encoded as an episode: -16.2 and -16.1 LUFS, -1.9 and -2.4 dBTP, one attempt | **not the production path**: Breeze on stibnite's CPU (fp32, upstream's HF `generate`, no CUDA graphs; the same weights, templates and seed), because both GPUs were busy with real episodes; the same ECAPA scoring. The six chunks took 488 s to clone against 1,844 s to design, 12 threads each (a clone has no CFG: one branch, not two). Listen: `~/lab/plots/2026-09-29_voice-fix-{before,after}-cpu.mp3`. **Not yet run on the GPU** (bf16, fast stages): its pace, peak memory and the same scores |
 
 ## Install (on stibnite, as leo, no sudo)
 
@@ -346,6 +372,7 @@ taken while stt is on it. RISKS.md "bs1" says what that means for the chat model
 | `papercast_voice/cli.py` | `info`, `run`, `check`, `slots` (the line and who holds each slot), `measure-*` |
 | `papercast_voice/job.py` | one episode: states, controls, resume, GPU and CPU passes, encode |
 | `papercast_voice/textprep.py` | chunking and the speakable-text guard |
+| `papercast_voice/refs.py` | each GPU voice's reference clip: designed once, kept, every chunk voiced from it |
 | `papercast_voice/gpu.py` | nvidia-smi readings, admission rule, give-back rule (stibnite) |
 | `papercast_voice/hosts.py` | GPU slots on stibnite and bs1: ssh, remote readings, remote admission and give-back, the engine command there |
 | `papercast_voice/sched.py` | the line for GPU slots (tickets in `run/queue/`) |

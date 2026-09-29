@@ -171,6 +171,39 @@ class Worker:
             raise EngineError(f"engine {self.spec['name']} reported chunk {rid} done but wrote no audio")
         return msg
 
+    def _request(self, req: dict, timeout: float, cancel: threading.Event) -> dict:
+        if not self.proc or self.proc.poll() is not None:
+            raise EngineError(f"engine {self.spec['name']} is not running")
+        try:
+            self.proc.stdin.write(json.dumps(req) + "\n")
+            self.proc.stdin.flush()
+        except (BrokenPipeError, OSError) as e:
+            raise EngineError(f"engine {self.spec['name']} went away: {e}") from e
+        msg = self._wait(req["id"], timeout, cancel)
+        self.maxrss_mib = max(self.maxrss_mib, int(msg.get("maxrss_mib") or 0))
+        return msg
+
+    def design(self, text: str, cancel: threading.Event) -> tuple[bytes, dict]:
+        """The voice's reference clip (refs.py): `text` voice-designed from the spec's
+        instruction and seed, sent back as WAV bytes (nothing is kept by the engine)."""
+        assert_speakable(text)
+        msg = self._request({"op": "design", "id": "ref-design", "text": text},
+                            float(self.spec.get("chunk_timeout_s", 600)), cancel)
+        self.gen_s += float(msg.get("gen_s") or 0)
+        try:
+            data = base64.b64decode(msg.pop("wav_b64", "") or "", validate=True)
+        except ValueError as e:
+            raise EngineError(f"engine {self.spec['name']} sent the reference garbled: {e}") from e
+        if len(data) <= 44:
+            raise EngineError(f"engine {self.spec['name']} sent no audio for the reference")
+        return data, msg
+
+    def set_reference(self, data: bytes, text: str, cancel: threading.Event) -> dict:
+        """Every chunk from now on is voiced from this clip (the engine's voice clone)."""
+        return self._request({"op": "reference", "id": "ref-set", "text": text,
+                              "wav_b64": base64.b64encode(data).decode("ascii")},
+                             float(self.spec.get("chunk_timeout_s", 600)), cancel)
+
     def stop(self, grace_s: float = 10.0) -> None:
         p = self.proc
         if not p:

@@ -85,6 +85,12 @@ class RealBreeze(unittest.TestCase):
         self.assertGreater(m["duration_s"], n_words / 220 * 60)
         self.assertLess(m["duration_s"], n_words / 60 * 60)
         mt = json.load(open(os.path.join(vdir, "metrics.json")))["runs"][-1]
+        # one narrator (1.2): every chunk voiced from the voice's kept reference clip
+        from papercast_voice import config as vconfig, refs
+        kept = refs.load(vconfig.engine_spec(vconfig.load(os.path.join(HOME, "voice.json")), "breeze"))
+        self.assertIsNotNone(kept, "the default voice has no kept reference clip")
+        self.assertEqual(out.get("reference"), kept[1]["sha256"])
+        self.assertEqual(mt["reference"]["sha256"], kept[1]["sha256"])
         print(f"\nreal Breeze: {n_words} words -> {m['duration_s']:.1f} s audio in {took:.1f} s "
               f"(waited {mt['wait_s']} s, encoded in {mt.get('encode_s')} s); {m['lufs']:.2f} LUFS, "
               f"true peak {m['true_peak_db']} dBTP; retried chunks: {mt.get('retried_chunks', [])}",

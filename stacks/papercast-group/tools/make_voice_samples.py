@@ -7,7 +7,9 @@ at a time, niced; the CPU voice on the CPU.
                                         [--force] [--keep] [--text FILE]
 
 Writes <data>/voices/<id>.mp3, which the hub serves at /api/voices/<id>/sample.mp3, and
-<id>.json beside it (the voice the clip is in, its length, when). A clip already there is kept
+<id>.json beside it (the voice the clip is in, its length, when, and the reference clip it was
+voiced from: papercast-voice 1.2 designs a GPU voice once, saying this same paragraph, keeps that
+clip and voices every chunk of every episode from it, so the sample is the episodes' narrator). A clip already there is kept
 unless --force. A clip that came out in another voice than asked (papercast-voice fell back to
 the CPU, say) is not kept. The job directories are <data>/voices/work/<id>/voice/, removed
 afterwards unless --keep. Ctrl-C stops the clip being made (its `cancel`) and exits.
@@ -137,7 +139,10 @@ class Maker:
         shutil.copyfile(mp3, tmp)
         os.replace(tmp, dest)
         meta.write_text(json.dumps({"id": p["id"], "name": p["name"], "voice": out.get("voice"),
-                                    "engine": out.get("engine"), "duration_s": out.get("duration_s"),
+                                    "engine": out.get("engine"), "reference": out.get("reference"),
+                                    "duration_s": out.get("duration_s"),
+                                    "loudness_lufs": out.get("loudness_lufs"),
+                                    "true_peak_db": out.get("true_peak_db"),
                                     "sha256": out.get("sha256"), "made_at": now_iso(),
                                     "took_s": round(time.time() - t0)}, indent=1) + "\n")
         print(f"{p['id']}: {out.get('duration_s')} s, {out.get('engine')}, {round(time.time() - t0)} s -> {dest}")

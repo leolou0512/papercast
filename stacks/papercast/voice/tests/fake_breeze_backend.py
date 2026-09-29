@@ -5,11 +5,14 @@ writing) runs unchanged; only `Breeze` is replaced.
 Behaviour from the environment (the orchestrator passes spec["env"] through):
   FAKE_BREEZE_MODE   ok | runaway_first | always_long | hit_limit_first | oom_load | oom_synth |
                      cuda_error | short_first
-  FAKE_BREEZE_LOG    append one JSON line per synth call: {"text", "seed", "instruction", "pid"}
+  FAKE_BREEZE_LOG    append one JSON line per synth call: {"text", "seed", "instruction", "pid",
+                     "reference": the reference clip's sha256 (a clone) or null (voice design)}
   FAKE_SEC_PER_WORD  seconds of audio per word for a good take (default 0.48, like clip A)
+  FAKE_BREEZE_DELAY_S  seconds each synth call takes (default 0)
 """
 import json
 import os
+import time
 
 import numpy as np
 
@@ -30,11 +33,14 @@ class Backend:
         self.info = {"torch": "fake", "fast_stages": sorted(spec.get("fast_stages") or [])}
         self.spw = float(os.environ.get("FAKE_SEC_PER_WORD", "0.48"))
 
-    def synth(self, text: str, seed: int):
+    def synth(self, text: str, seed: int, ref: dict | None = None):
         if os.environ.get("FAKE_BREEZE_LOG"):
             with open(os.environ["FAKE_BREEZE_LOG"], "a") as fh:
                 fh.write(json.dumps({"text": text, "seed": seed, "pid": os.getpid(),
-                                     "instruction": self.spec.get("instruction")}) + "\n")
+                                     "instruction": self.spec.get("instruction"),
+                                     "reference": ref["sha256"] if ref else None,
+                                     "reference_text": ref["text"] if ref else None}) + "\n")
+        time.sleep(float(os.environ.get("FAKE_BREEZE_DELAY_S", "0")))
         words = len(text.split())
         first = seed == int(self.spec.get("seed", 42))
         if self.mode == "oom_synth":
@@ -50,5 +56,9 @@ class Backend:
         if self.mode == "hit_limit_first" and first:
             secs, hit = 120.0, True
         t = np.arange(int(secs * SR)) / SR
-        audio = (0.2 * np.sin(2 * np.pi * 180 * t) * (np.sin(2 * np.pi * 4 * t) > 0)).astype(np.float32)
+        # the pitch stands in for the speaker: a design draws one from the text, instruction and
+        # seed (as the real model does); a clone takes the reference clip's
+        key = ref["sha256"] if ref else f"{text}|{self.spec.get('instruction')}|{seed}"
+        f0 = 150 + int.from_bytes(__import__("hashlib").sha256(key.encode()).digest()[:2], "big") % 100
+        audio = (0.2 * np.sin(2 * np.pi * f0 * t) * (np.sin(2 * np.pi * 4 * t) > 0)).astype(np.float32)
         return audio, int(secs * 12.5), hit

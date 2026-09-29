@@ -66,6 +66,20 @@ DEFAULTS: dict = {
             "voice": "described-narrator-a-seed42",
             "speaker": "S0",
             "cfg_scale": 4.0,
+            # One narrator per voice (refs.py). Voice design draws a new speaker for every text,
+            # so chunk by chunk the narrator changed. The voice is designed once, on this
+            # paragraph, from the instruction and seed above, kept under references_dir, and
+            # every chunk is voiced from that clip (Breeze's voice clone: the clip and its
+            # transcript in the prompt, no instruction, no CFG). The paragraph is the one every
+            # voice sample and custom-voice preview of papercast-group says (its hub/voices.py
+            # SAMPLE_TEXT; a test there pins the two together), so the clip is the voice people
+            # heard and picked. null: every chunk voice-designed on its own, as before.
+            "reference_text": ("Here is the idea in one breath. A diffusion model learns to undo "
+                               "noise, one small step at a time. Start from pure static, ask the "
+                               "network which way the data lies, take a small step, and ask again. "
+                               "After a few hundred steps, what comes out looks like the pictures "
+                               "it was trained on, though nobody ever drew it."),
+            "references_dir": "{home}/voices/breeze",
             "repetition_penalty": 1.1,
             # The two CUDA-graph stages of clip A: RTF 0.83 at 9.5 GiB (all eager: 3.56, 8.1 GiB).
             "fast_stages": ["depth_decoder", "backbone_decode"],

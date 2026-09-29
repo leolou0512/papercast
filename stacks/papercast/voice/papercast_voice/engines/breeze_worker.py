@@ -7,7 +7,8 @@ the narrator described in words (spec "instruction"), classifier-free guidance 4
 attention, and two of upstream's five fast stages as CUDA graphs (spec "fast_stages":
 depth_decoder + backbone_decode: real-time factor 0.83 at 9.5 GiB, against 3.56 all eager; all
 five need about 14.4 GiB). Every chunk is generated from the same seed (spec "seed"), so the same
-text always gives the same audio and every episode starts from the same narrator description.
+text always gives the same audio. Since 1.2 the narrator's clip is designed that way once per
+voice and the chunks are cloned from it (below; the job keeps the clip, refs.py).
 
 Each chunk's length is checked against its word count before it is accepted: a model like this
 can stop early (words missing) or run on (babble, or the 1,500-frame cap). Such a chunk is tried
@@ -18,13 +19,28 @@ episode that Retry would only fail again.
 A CUDA out-of-memory, at load or mid-chunk, is reported with `oom: true` and ends the worker, so
 the job frees the card and waits for it again (INTERFACE §10.4).
 
+One narrator per voice (papercast_voice/refs.py): voice design draws a new speaker for every
+text, so a voice is designed once and every chunk is then cloned from that clip. Two requests do
+it, besides "synth":
+    <- {"op": "design", "id": "ref-design", "text": "<the reference paragraph>"}
+    -> {"event": "done", "id": "ref-design", "wav_b64": "...", "seed": 42, "audio_s": 21.3, ...}
+       the paragraph voice-designed from the instruction and seed, with the length check and
+       retries of a chunk (the same request a chunk was before), sent back; nothing kept
+    <- {"op": "reference", "id": "ref-set", "text": "<its transcript>", "wav_b64": "..."}
+    -> {"event": "done", "id": "ref-set", "reference_s": 21.3, "sha256": "..."}
+       every "synth" from now on is voice clone from this clip (upstream's ref_clone_tata
+       template: the clip and its transcript before the text, no instruction, no CFG); the
+       reply of each names the clip (`reference`, its sha256)
+Without a reference, "synth" is voice design as before.
+
 For tests, spec "backend" may name a Python file defining `Backend(spec)` with `.sample_rate`,
-`.info` and `.synth(text, seed) -> (float32 numpy audio, frames, hit_limit)`; the default is the
-real model below.
+`.info` and `.synth(text, seed, ref=None) -> (float32 numpy audio, frames, hit_limit)` (ref: None,
+or {"wav": bytes, "text": str, "sha256": str}); the default is the real model below.
 """
 from __future__ import annotations
 
 import base64
+import hashlib
 import importlib.util
 import io
 import os
@@ -95,12 +111,27 @@ class Breeze:
         sys.path.insert(0, code)
         from breeze_infer.runtime import (load_runtime, resolve_device, set_all_seeds,
                                           update_generation_config_for_breeze)
+        import breeze_infer.templates as templates
+        from breeze_infer.audio import encode_prompt_audio
         from breeze_infer.templates import get_template, prepare_inputs, select_template_name
         from models.fast_streaming import FastBreezeStreamingRuntime, FastStreamingConfig
         self._seed_all, self._prepare = set_all_seeds, prepare_inputs
         self._tpl = lambda req: get_template(select_template_name(req))
+        # The reference clip is encoded into codec frames once, not once per chunk: upstream
+        # (templates._encode_prompt_audio, 008f769) reads an audio segment's path and encodes it
+        # every time; a path naming our clip is answered from here instead.
+        self._encode_prompt_audio = encode_prompt_audio
+        self._ref_codes: dict[str, object] = {}
+        upstream = templates._encode_prompt_audio
+
+        def encode(audio_tokenizer, audio_path):
+            if isinstance(audio_path, str) and audio_path.startswith(REF_PATH):
+                return self._ref_codes[audio_path[len(REF_PATH):]]
+            return upstream(audio_tokenizer, audio_path)
+        templates._encode_prompt_audio = encode
         fast = set(spec.get("fast_stages") or [])
         self.max_new_tokens = int(spec.get("max_new_tokens", 1500))
+        self.max_seq_len = int(spec.get("max_seq_len", 2048))
         from pathlib import Path
         dtype = spec.get("dtype") or "bf16"
         if dtype == "bf16":
@@ -115,7 +146,7 @@ class Breeze:
         self.rt = FastBreezeStreamingRuntime(
             self.model, self.atok,
             FastStreamingConfig(max_new_tokens=self.max_new_tokens,
-                                max_seq_len=int(spec.get("max_seq_len", 2048)), fast_all=None,
+                                max_seq_len=self.max_seq_len, fast_all=None,
                                 fast_text_encoder="text_encoder" in fast,
                                 fast_backbone_prefill="backbone_prefill" in fast,
                                 fast_backbone_decode="backbone_decode" in fast,
@@ -139,11 +170,23 @@ class Breeze:
                      "model_dtype": str(next(self.model.parameters()).dtype),
                      "torch_reserved_mib": round(torch.cuda.memory_reserved() / 2**20)}
 
-    def synth(self, text: str, seed: int):
+    def synth(self, text: str, seed: int, ref: dict | None = None):
+        """Voice design (ref None: the instruction, CFG) or voice clone from the reference clip
+        (upstream's ref_clone_tata template, which has no negative prompt, hence no CFG)."""
         torch, np = self.torch, self.np
         self.n += 1
-        req = {"id": f"c{self.n}", "text": text, "speaker": self.speaker,
-               "instruction": self.instruction}
+        if ref is None:
+            req = {"id": f"c{self.n}", "text": text, "speaker": self.speaker,
+                   "instruction": self.instruction}
+            cfg = self.cfg_scale
+        else:
+            if ref["sha256"] not in self._ref_codes:
+                self._ref_codes.clear()
+                self._ref_codes[ref["sha256"]] = self._encode_prompt_audio(
+                    self.atok, io.BytesIO(ref["wav"]))
+            req = {"id": f"c{self.n}", "text": text, "speaker": self.speaker,
+                   "ref_audio_path": REF_PATH + ref["sha256"], "ref_text": ref["text"]}
+            cfg = 1.0
         self._seed_all(seed)
         frames = [0]
 
@@ -152,13 +195,17 @@ class Breeze:
 
         with torch.inference_mode():
             inputs = self._prepare(self.tok, self.atok, self.model, [req], self._tpl(req),
-                                   guidance_scale=self.cfg_scale, guidance_scale_ref=None,
+                                   guidance_scale=cfg, guidance_scale_ref=None,
                                    guidance_scale_ins=None)
+            prompt = int(inputs["input_ids"].shape[1])
             parts = [c.audio for c in self.rt.iter_audio_chunks(
                 inputs, request_id=req["id"], seed=seed, token_observer=count)]
         torch.cuda.synchronize()
         audio = np.concatenate(parts).astype(np.float32) if parts else np.zeros(0, np.float32)
-        return audio, frames[0], frames[0] >= self.max_new_tokens - 1
+        # Generation stops at max_new_tokens frames, or where prompt + frames fill the backbone's
+        # positions (a longer prompt with the reference clip in it leaves fewer).
+        limit = min(self.max_new_tokens, self.max_seq_len - 1 - prompt)
+        return audio, frames[0], frames[0] >= limit - 1
 
     def memory(self) -> dict:
         t = self.torch
@@ -167,6 +214,7 @@ class Breeze:
 
 
 DTYPES = {"fp16": "float16", "fp32": "float32"}
+REF_PATH = "papercast-voice-reference:"      # an audio segment path that names the reference clip
 
 
 def _load_as(ckpt_dir, device: str, dtype_name: str):
@@ -239,18 +287,34 @@ def main() -> None:
         threading.Thread(target=_idle_exit, args=(state, float(spec["idle_exit_s"])),
                          daemon=True).start()
 
+    ref = None          # the reference clip (op "reference"): every synth after it is a clone
     for req in proto.requests():
         state["busy"], state["last"] = True, time.time()
         rid = req.get("id")
-        text = req["text"]
-        words = len(text.split())
+        op = req.get("op") or "synth"
         try:
+            if op == "reference":
+                data = base64.b64decode(req.get("wav_b64") or "", validate=True)
+                clip, clip_sr = sf.read(io.BytesIO(data), dtype="float32", always_2d=True)
+                text = str(req.get("text") or "").strip()
+                if clip_sr != sr or len(clip) < sr or not text:
+                    raise ValueError(f"reference clip must be {sr} Hz, at least 1 s, with its "
+                                     f"transcript (got {clip_sr} Hz, {len(clip) / clip_sr:.1f} s)")
+                ref = {"wav": data, "text": text, "sha256": hashlib.sha256(data).hexdigest()}
+                proto.send(event="done", id=rid, reference_s=round(len(clip) / sr, 3),
+                           sha256=ref["sha256"])
+                continue
+            if op not in ("synth", "design"):
+                raise ValueError(f"unknown op {op!r}")
+            text = req["text"]
+            words = len(text.split())
+            use = ref if op == "synth" else None     # "design": the instruction, never a clone
             t1 = time.time()
             tries = []
             best = None
             for k in range(attempts):
                 seed = base_seed + k
-                audio, frames, hit = be.synth(text, seed)
+                audio, frames, hit = be.synth(text, seed, use) if use else be.synth(text, seed)
                 dur = len(audio) / sr
                 sig = signal_problem(audio)
                 if sig:
@@ -270,9 +334,13 @@ def main() -> None:
             if len(audio) == 0:
                 raise RuntimeError(f"no audio in {attempts} attempts")
             msg = {"event": "done", "id": rid, "audio_s": round(len(audio) / sr, 3),
-                   "gen_s": round(time.time() - t1, 3), "seed": seed, "attempts": len(tries)}
-            if req.get("inline"):
-                # A remote engine: the WAV travels in the reply (base64), nothing stays there.
+                   "gen_s": round(time.time() - t1, 3), "seed": seed, "attempts": len(tries),
+                   "mode": "clone" if use else "design"}
+            if use:
+                msg["reference"] = use["sha256"]
+            if req.get("inline") or op == "design":
+                # A remote engine, or the designed reference: the WAV travels in the reply
+                # (base64), nothing stays here.
                 buf = io.BytesIO()
                 sf.write(buf, np.asarray(audio, dtype=np.float32), sr, subtype="PCM_16",
                          format="WAV")

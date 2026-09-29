@@ -318,6 +318,30 @@ class GpuPath(Base):
         self.assertEqual(len(idx), len(set(idx)))            # no chunk voiced twice
         self.assertIsNone(other.poll())
 
+    def test_never_two_engines_in_one_episode(self):
+        """Leo, 2026-09-29: "why it seem to switch voices every other sentence?" One cause it
+        could have been: chunks of the GPU voice and of the CPU voice in one episode. The GPU
+        voices some chunks, gives the card back, and Use CPU voice is pressed while it waits:
+        the CPU voice then voices every chunk, and the episode says so (engine, voice)."""
+        other = subprocess.Popen(["sleep", "120"])
+        self.addCleanup(other.kill)
+        self.rig.engine_env("fakegpu", FAKE_DELAY_S=0.3)
+        vdir = self.rig.job()
+        p = self.rig.start(vdir)
+        wait_for(lambda: status(vdir).get("chunks_done", 0) >= 2, timeout=30)
+        self.rig.set_gpu(free=5000, util=100, apps=[[other.pid, 6000]],
+                         pmon=[[other.pid, "C", 95]])
+        wait_for(lambda: status(vdir).get("phase") == "waiting-for-gpu", timeout=30)
+        gpu_idx = {c["idx"] for c in self.rig.fake_calls() if c["engine"] == "fakegpu"}
+        self.assertGreaterEqual(len(gpu_idx), 2)
+        open(os.path.join(vdir, "use-cpu"), "w").close()
+        self.assertEqual(p.wait(timeout=60), 0, voice_log(vdir)[-3000:])
+        st = self.assertDone(vdir, "cpu:kokoro")
+        self.assertEqual(st["output"]["voice"], "fake-cpu-voice")
+        self.assertNotIn("reference", st["output"])
+        cpu_idx = [c["idx"] for c in self.rig.fake_calls() if c["engine"] == "kokoro"]
+        self.assertEqual(sorted(cpu_idx), list(range(st["chunks_total"])))   # every chunk, once
+
     def test_own_engine_on_the_card_is_not_a_reason_to_yield(self):
         self.rig.engine_env("fakegpu", FAKE_DELAY_S=0.3)
         vdir = self.rig.job()

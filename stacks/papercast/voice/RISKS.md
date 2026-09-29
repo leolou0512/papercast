@@ -5,19 +5,21 @@ README; everything else is an assumption or untested, and says so.
 
 ## The GPU voice (Breeze TTS 2)
 
-- **One narrator, described in words, not a fixed recording.** Breeze has no preset voices. Every
-  chunk is generated from clip A's description, CFG 4 and seed 42, so the same text always gives
-  the same audio and every episode starts from the same settings. But the seed does not pin a
-  timbre: each chunk's text differs, so each chunk is a fresh draw from the description. The
-  voice can therefore shift between chunks (pitch, brightness, pace). Measured on the full
-  episode, with median pitch (librosa pYIN) as a rough proxy, not a speaker-identity test: the
-  60 paragraph chunks range from 157 to 240 Hz (median 188; 10th–90th percentile 169–213), with
-  one chunk 27 % above the median and 17 more than 10 % off it. That stays within one female
-  voice; whether it is more than one narrator's natural variation, and audible, has not been
-  checked by ear. `measure/breeze-episode-2026-09-26.pitch.json` has the per-chunk figures.
-  If Leo hears it wander, the fix is voice cloning from clip A (upstream's `ref_clone_tata`
-  template; the fast path refuses only dual-CFG modes, so it should run there) — not built, not
-  measured.
+- **One narrator per voice: a designed clip, then voice clone.** Breeze has no preset voices, and
+  voice design draws a speaker for the text it is given, whatever the seed. Up to 1.1 every chunk
+  was designed on its own, so every chunk was a different narrator of the same description; Leo
+  heard it as the voice switching every other sentence, and a speaker-embedding model confirms it
+  (README "Measured": neighbouring chunks of the default voice scored 0.38 alike, the two halves
+  of one chunk 0.83). Since 1.2 each voice is designed once, on the samples' paragraph, and every
+  chunk is cloned from that clip (README "One narrator per voice"). What is measured and what is
+  not: see README "Measured"; the clone path on the GPU (bf16, the two CUDA-graph stages, a prompt
+  now holding the clip's ~280 codec frames) has not run yet, so its speed and peak memory are the
+  design path's until measure-gpu runs again (memory is set at load, so the peak should not move).
+  A clone copies the clip's delivery as well as its timbre: a narrator whose clip came out flat
+  or odd stays so in every episode (the clip is the one its sample lets people hear first). The
+  clip is kept in the voice's home; deleting it makes the next job design it again (the same
+  request, so on the same kind of GPU the same clip), and any job that had chunks from the old
+  clip voices them again.
 - **A chunk can come out wrong.** Such a model can stop early (words missing) or run on (babble,
   or the 1,500-frame cap). The adapter checks every chunk's length against its word count (0.15
   to 1.2 s a word, plus 2 s) and retries with seed 43, then 44. If no attempt passes it keeps
@@ -144,8 +146,8 @@ README; everything else is an assumption or untested, and says so.
 - **One narrator in two precisions.** stibnite speaks bf16, bs1 fp32 (fp16 fails there). Same
   description, seed and settings; measured on the same texts, word error rate, pace and median
   pitch match within what one precision varies from chunk to chunk (README "Measured"). A paper
-  that moves between hosts mid-episode (it gave a GPU back) mixes chunks of both; not checked
-  by ear.
+  that moves between hosts mid-episode (it gave a GPU back) mixes chunks of both precisions,
+  all cloned from the one kept clip of its voice (since 1.2); not checked by ear.
 - **Speed**: fp32 on a Quadro RTX 6000 speaks at 1.15 × real time (stibnite 0.83), and an engine
   takes about 45 s to load, per paper. 6 bs1 cards (0-5; 6 while stt is on it is not taken) and
   stibnite voice about 5.9 × as fast as stibnite alone, not 7 ×.

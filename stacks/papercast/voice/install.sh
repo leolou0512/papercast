@@ -70,7 +70,7 @@ cp -a "$SRC/papercast_voice" "$new/"
 find "$new" -name __pycache__ -prune -exec rm -rf {} +
 rev=$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo unknown)
 dirty=$(git -C "$SRC" status --porcelain -- . 2>/dev/null | head -1 || true)
-echo "1.1 (git $rev${dirty:+ + uncommitted edits}, installed $(date -u +%Y-%m-%dT%H:%M:%SZ))" \
+echo "1.2 (git $rev${dirty:+ + uncommitted edits}, installed $(date -u +%Y-%m-%dT%H:%M:%SZ))" \
     > "$new/papercast_voice/VERSION"
 if [ -d "$H/app" ] && [ ! -L "$H/app" ]; then
     mv "$H/app" "$H/app-1.0"        # once: 1.0 installed a directory here

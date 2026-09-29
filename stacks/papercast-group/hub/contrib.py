@@ -31,7 +31,7 @@ from pathlib import Path
 from papercast_cli.common import bundle, checks, wording
 from papercast_cli.common import prefs as P
 
-from . import db, events, graph, voiceq
+from . import db, events, graph, search, voiceq
 from .app import HTTPError
 
 log = logging.getLogger("pcg.contrib")
@@ -612,6 +612,20 @@ def library(req):
     req.send_json(200, {"papers": [dict(r) for r in rows]})
 
 
+def mentions(req):
+    """GET /api/cli/mentions?title=&arxiv=&doi=&exclude=<paper id>,...: the library papers whose
+    own text mentions this paper (search.mentions), for the CLI's links step: they are the
+    papers that build on a new one, whatever Semantic Scholar knows yet. No Claude."""
+    q = req.query
+    title = (q.get("title") or "")[:1000]
+    arxiv = (q.get("arxiv") or q.get("arxiv_id") or "")[:100]
+    doi = (q.get("doi") or "")[:300]
+    if not (title.strip() or arxiv.strip() or doi.strip()):
+        raise HTTPError(400, "no_keys", "give at least one of title, arxiv, doi")
+    exclude = [x.strip() for x in (q.get("exclude") or "").split(",") if x.strip()][:20]
+    req.send_json(200, search.mentions(req.cfg, title=title, arxiv=arxiv, doi=doi, exclude=exclude))
+
+
 # ---- routes: lookup and claims
 
 def _keys_from(d) -> dict:
@@ -908,6 +922,7 @@ ROUTES = [
     ("PUT", r"^/api/cli/prefs$", put_prefs, "cli"),
     ("GET", r"^/api/cli/library$", library, "cli"),
     ("GET", r"^/api/cli/lookup$", lookup, "cli"),
+    ("GET", r"^/api/cli/mentions$", mentions, "cli"),
     ("POST", r"^/api/cli/claims$", post_claim, "cli-contributor"),
     ("PUT", rf"^/api/cli/claims/{_ID}$", put_claim, "cli-contributor"),
     ("DELETE", rf"^/api/cli/claims/{_ID}$", delete_claim, "cli-contributor"),

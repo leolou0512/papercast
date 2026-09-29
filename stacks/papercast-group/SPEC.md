@@ -139,6 +139,9 @@ note)`, `base_prompt(version=None)`, `add_base_prompt(text, wording_json, by)`.
 - `GET /api/cli/prompt` → `{"version": N, "guideline": "<markdown>", "wording": {...}}` (latest base).
 - `GET /api/cli/prefs` → `{"settings": {...}, "note": "...", "version": N}`.
 - `GET /api/cli/library` → `{"papers": [{"id","title","year","arxiv_id","doi","s2_id"}]}` (for links).
+- `GET /api/cli/mentions?title=&arxiv=&doi=&exclude=<paper ids>` → `{"mentions": [{"paper_id",
+  "field": "arxiv"|"doi"|"title", "fields", "snippet"}], "info"}`: the library papers whose own
+  text (paper.txt) names this paper, never the paper itself or a version of it (for links).
 - `GET /api/cli/lookup?arxiv_id=&doi=&sha256=&title=` → `{"paper": null | {"id","title",
   "episodes": [{"id","made_by":{"id","name"},"prefs_summary","state"}]}, "claim": null | {"by",
   "since"}}`.
@@ -166,7 +169,7 @@ tar.gz with `manifest.json` at the root plus the files it names:
            "explainer_html": "explainer.html", "claims": "claims.md"},
  "links": [{"other": {"paper_id": "p_..."} | {"arxiv_id": "..."} | {"doi": "..."} | {"title": "..."},
             "direction": "builds_on" | "built_on_by", "grade": "e" | "s" | "w",
-            "source": "s2" | "text"}],
+            "source": "s2" | "text" | "both"}],
  "stats": {"words": 3100, "est_minutes": 21.0, "wall_s": 1400}}
 ```
 `paper_id` set = a new version of an existing paper; else `claim_id` set = a new paper.
@@ -333,7 +336,8 @@ voice in use; its owner or an admin). The page hears `voice` events (a person's 
   (4) the local checks and the cut pass as Leo's runner does; (5) `explainer.html` built from
   explainer.json (crops need `pdftoppm` if the paper has figures: when missing, SVG and text only);
   (6) links: Semantic Scholar references and citations of the paper, matched against
-  `GET /api/cli/library`, graded by `claude -p --model claude-haiku-4-5` with no tools;
+  `GET /api/cli/library`, merged with the library papers the paper's text names and those whose
+  text names it (`GET /api/cli/mentions`), graded by `claude -p --model claude-haiku-4-5` with no tools;
   (7) bundle and `POST /api/cli/episodes`. Claude usage limit: detect as Leo's runner's
   `limits.py` does, pause until the reset time, resume.
 - Tests use a fake `claude` on PATH (a script that writes the expected files), never the real one.

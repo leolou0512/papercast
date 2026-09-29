@@ -1,5 +1,5 @@
 """The local job queue (SPEC.md section 11): one directory per job, a detached worker that runs
-at most two at once, and resuming after sleep, reboot or Claude's usage limit.
+at most `papercast config --parallel` at once (2 by default), and resuming after sleep, reboot or Claude's usage limit.
 
   $XDG_STATE_HOME/papercast/
     jobs/<job_id>/job.json     the job's state (below); written atomically, under .job.lock
@@ -52,7 +52,12 @@ from .errors import (ApiError, Cancelled, ClaudeNotReady, NeedsAnswer, Papercast
                      UsageLimit)
 
 PIPELINE = "papercast_cli.pipeline.run:run_job"
-MAX_PARALLEL = 2                    # SPEC section 11: at most 2 jobs at once
+MAX_PARALLEL = config.PARALLEL_DEFAULT   # the default; `papercast config --parallel N` changes it
+
+
+def max_parallel() -> int:
+    """Read again on every pass, so a new setting reaches a worker that is already running."""
+    return config.parallel()
 MAX_INTERRUPTIONS = 5               # a job whose process keeps dying stops being restarted
 NICE = 10
 NO_RESET_S = 3600                   # the limit gave no reset time: wait an hour, then try
@@ -512,7 +517,7 @@ def _log(msg: str) -> None:
 
 
 class Worker:
-    """Runs queued jobs, at most MAX_PARALLEL at once, until none is left."""
+    """Runs queued jobs, at most max_parallel() at once, until none is left."""
 
     def __init__(self, out=print):
         self.out = out
@@ -602,8 +607,9 @@ class Worker:
                 pending = True
                 queued.append(job)
         if until is None:
+            cap = max_parallel()
             for job in queued:
-                if running >= MAX_PARALLEL:
+                if running >= cap:
                     break
                 self._start(job)
                 running += 1
@@ -960,8 +966,9 @@ def state_text(job: dict, *, ep: dict | None = None, server: str = "",
         if until:
             return "queued · " + limit_text(until, now)
         extra = " · " + job["detail"] if job.get("detail") else ""
-        return "queued" + (f" · waits for a free slot ({MAX_PARALLEL} at once)"
-                           if busy >= MAX_PARALLEL else "") + extra
+        cap = max_parallel()
+        return "queued" + (f" · waits for a free slot ({cap} at once)"
+                           if busy >= cap else "") + extra
     if st == "running":
         bits = [job.get("phase") or "starting"]
         if isinstance(job.get("progress"), (int, float)):

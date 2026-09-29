@@ -1,7 +1,7 @@
 """Where papercast keeps its settings and its jobs (SPEC.md section 11).
 
   config  $XDG_CONFIG_HOME/papercast/config.json  (default ~/.config/...), mode 600:
-          {"server", "token", "device", "user"}; the token is the only secret
+          {"server", "token", "device", "user", "parallel"}; the token is the only secret
   state   $XDG_STATE_HOME/papercast/              (default ~/.local/state/...):
           jobs/<job_id>/, worker.lock, worker.log, pause.json
 """
@@ -110,6 +110,19 @@ def update(**fields) -> dict:
             cfg[k] = v
     save(cfg)
     return cfg
+
+
+PARALLEL_DEFAULT = 2
+PARALLEL_MAX = 200
+
+
+def parallel(cfg: dict | None = None) -> int:
+    """How many papers run at once on this computer (`papercast config --parallel N`)."""
+    try:
+        v = int((load() if cfg is None else cfg).get("parallel", PARALLEL_DEFAULT))
+    except (TypeError, ValueError, PapercastError):
+        return PARALLEL_DEFAULT
+    return min(max(v, 1), PARALLEL_MAX)
 
 
 def require_login(cfg: dict | None = None) -> dict:

@@ -43,6 +43,18 @@ class JobsTest(CliTestCase):
         return start, end
 
     # ------------------------------------------------------------------ parallelism
+    def test_config_parallel_lets_more_run_at_once(self):
+        r = self.run_cli("config", "--parallel", "5")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("parallel 5", r.stdout)
+        pdfs = [self.pdf(f"q{i}.pdf", sleep=2.0, title=f"Paper Q{i}") for i in range(6)]
+        r = self.add(*pdfs)
+        self.assertIn("at most 5 at once", r.stdout)
+        self.wait_for(lambda: self.all_done(6), 60, "all six done")
+        self.assertEqual(overlap([self.span(j["id"]) for j in self.jobs()]), 5)
+        self.wait_worker_gone()
+
+    # ------------------------------------------------------------------ parallelism
     def test_two_run_at_once_and_a_third_waits(self):
         pdfs = [self.pdf(f"p{i}.pdf", sleep=1.5, title=f"Paper {i}") for i in range(3)]
         r = self.add(*pdfs)

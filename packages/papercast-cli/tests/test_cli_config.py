@@ -23,6 +23,19 @@ class ConfigTest(CliTestCase):
         self.assertEqual(config.config_dir(), Path(self.home) / ".config" / "papercast")
         self.assertEqual(config.state_dir(), Path(self.home) / ".local" / "state" / "papercast")
 
+    def test_parallel_setting(self):
+        self.assertEqual(config.parallel(), config.PARALLEL_DEFAULT)
+        config.update(parallel=80)
+        self.assertEqual(config.parallel(), 80)
+        for bad, got in ((0, 1), (10_000, config.PARALLEL_MAX), ("x", config.PARALLEL_DEFAULT)):
+            config.update(parallel=bad)
+            self.assertEqual(config.parallel(), got, bad)
+        r = self.run_cli("config", "--parallel", "0")
+        self.assertNotEqual(r.returncode, 0)
+        r = self.run_cli("config", "--parallel", "80")
+        self.assertEqual((r.returncode, r.stdout.strip().split()[:2]), (0, ["parallel", "80"]))
+        self.assertEqual(config.load()["parallel"], 80)
+
     def test_saved_with_mode_600_in_a_700_dir(self):
         config.save({"server": "https://hub.example.org", "token": "pcg_x", "device": "d"})
         p = config.config_path()

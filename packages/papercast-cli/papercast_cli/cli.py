@@ -51,6 +51,15 @@ def cmd_logout(args) -> int:
     return 0
 
 
+def cmd_config(args) -> int:
+    if args.parallel is not None:
+        if not 1 <= args.parallel <= config.PARALLEL_MAX:
+            raise PapercastError(f"--parallel is 1 to {config.PARALLEL_MAX}")
+        config.update(parallel=args.parallel)
+    print(f"parallel {config.parallel()}  (papers at once on this computer)")
+    return 0
+
+
 def cmd_whoami(args) -> int:
     cfg = config.require_login()
     me = Api.from_config(cfg, retries=1, timeout=20).me()
@@ -228,7 +237,7 @@ def cmd_add(args) -> int:
     if made:
         jobs.ensure_worker()
         print(f"Working on {'it' if len(made) == 1 else 'them'} in the background (at most "
-              f"{jobs.MAX_PARALLEL} at once); closing this terminal is fine. "
+              f"{jobs.max_parallel()} at once); closing this terminal is fine. "
               "Follow with: papercast status")
     return 1 if problems else 0
 
@@ -499,6 +508,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--yes", "-y", action="store_true",
                    help="answer yes to the job's question (make your own version)")
     s.set_defaults(func=cmd_retry)
+
+    s = sub.add_parser("config", help="this computer's settings: how many papers run at once")
+    s.add_argument("--parallel", type=int, metavar="N",
+                   help=f"papers at once (1 to {config.PARALLEL_MAX}; default {config.PARALLEL_DEFAULT})")
+    s.set_defaults(func=cmd_config)
 
     s = sub.add_parser("worker", help="run waiting jobs now (for login items; exits when done)")
     s.add_argument("--detach", action="store_true", help="in the background")

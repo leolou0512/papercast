@@ -178,8 +178,8 @@ Before it starts, `papercast add`:
   if the site has Slack set up. Enter takes your default (Settings, Preferences). `--slack` or
   `--no-slack` answers it in advance: `papercast add --no-slack ~/Downloads/2006.11239.pdf`.
 
-Then it works in the background, at most two papers at a time. Closing the terminal is fine.
-Follow it with:
+Then it works in the background, two papers at a time unless you change it
+(`papercast config --parallel 8`). Closing the terminal is fine. Follow it with:
 
 ```
 papercast status

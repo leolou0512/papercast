@@ -444,6 +444,186 @@ class TestAgentLinks(Base):
         self.assertEqual((r["state"], r["origin"], r["grade"], r["id"]), ("active", "human", "e", lab))
 
 
+class TestSelectParents(unittest.TestCase):
+    """Leo's per-paper rule on its own (graph.select_parents, build.py lineage()): every essential
+    parent; strong ones until 5; weak ones only until 4, and only where no other drawn path joins
+    the two papers; ties by isInfluential, then the most recent; a person's links count and stay."""
+
+    def pick(self, cands, fixed=(), anc=None):
+        """cands: {parent: "e"|"s"|"w" or (grade, influential)}; time order: the order the names
+        sort in ("s7" is more recent than "s1")."""
+        cs = {p: (g, False) if isinstance(g, str) else g for p, g in cands.items()}
+        when = {p: k for k, p in enumerate(sorted(set(cs) | set(fixed)))}
+        anc = anc or {}
+        return graph.select_parents(list(fixed), cs, when, lambda q: anc.get(q, set()))
+
+    def test_the_numbers(self):
+        self.assertEqual((graph.TARGET_STRONG, graph.TARGET_WEAK, graph.KEEP_GRADES), (5, 4, ("e", "s")))
+
+    def test_every_essential_parent_beyond_five(self):
+        cands = {f"e{i}": "e" for i in range(7)}
+        cands.update({"s1": "s", "s2": "s", "w1": "w"})
+        self.assertEqual(sorted(self.pick(cands)), [f"e{i}" for i in range(7)])
+
+    def test_strong_ones_until_five_most_recent_first(self):
+        cands = {"e1": "e", **{f"s{i}": "s" for i in range(1, 8)}, "w1": "w"}
+        self.assertEqual(self.pick(cands), ["e1", "s7", "s6", "s5", "s4"])       # 5 parents, no weak one
+
+    def test_weak_ones_only_until_four(self):
+        self.assertEqual(self.pick({"s1": "s", "w1": "w", "w2": "w", "w3": "w", "w4": "w"}), ["s1", "w4", "w3", "w2"])
+        self.assertEqual(self.pick({"e1": "e", "s1": "s", "s2": "s", "s3": "s", "w1": "w"}), ["e1", "s3", "s2", "s1"])
+        self.assertEqual(self.pick({"s1": "s", "s2": "s", "s3": "s", "s4": "s", "s5": "s", "w1": "w"}),
+                         ["s5", "s4", "s3", "s2", "s1"])
+        self.assertEqual(self.pick({"w1": "w", "w2": "w"}), ["w2", "w1"])
+
+    def test_ties_isinfluential_first_then_the_most_recent(self):
+        cands = {f"s{i}": "s" for i in range(1, 8)}
+        cands["s1"] = ("s", True)                                      # the oldest ones, but influential
+        cands["s2"] = ("s", True)
+        self.assertEqual(self.pick(cands), ["s2", "s1", "s7", "s6", "s5"])
+        self.assertEqual(self.pick({"s1": "s", "w1": ("w", True), "w2": "w", "w3": "w", "w4": "w"}), ["s1", "w1", "w4", "w3"])
+
+    def test_a_weak_parent_another_path_joins_is_left_out_and_its_slot_refilled(self):
+        # w5 -> s1 is drawn: the weak arrow w5 -> paper is skipped for the next weak one
+        anc = {"s1": {"w5"}}
+        self.assertEqual(self.pick({"s1": "s", "w5": "w", "w4": "w", "w3": "w", "w2": "w"}, anc=anc), ["s1", "w4", "w3", "w2"])
+        # w1 comes in first (influential), then w3 that builds on it: w1 is dropped and its slot refilled
+        anc = {"w3": {"w1"}}
+        self.assertEqual(self.pick({"s1": "s", "w1": ("w", True), "w3": "w", "w2": "w", "w0": "w"}, anc=anc),
+                         ["s1", "w3", "w2", "w0"])
+        # essential and strong ones are never dropped by it
+        anc = {"s2": {"s1", "e1"}}
+        self.assertEqual(sorted(self.pick({"e1": "e", "s1": "s", "s2": "s"}, anc=anc)), ["e1", "s1", "s2"])
+
+    def test_a_persons_links_count_and_stay(self):
+        # two of a person's links, one of them joined by another path: they stay, and count toward the 5 and the 4
+        got = self.pick({f"s{i}": "s" for i in range(1, 6)} | {"w1": "w"}, fixed=["h1", "h2"], anc={"h1": {"h2"}})
+        self.assertEqual(got, ["s5", "s4", "s3"])
+        self.assertEqual(self.pick({"e1": "e", "e2": "e", "s1": "s"}, fixed=["h1", "h2", "h3", "h4", "h5"]), ["e2", "e1"])
+        self.assertEqual(self.pick({"w1": "w", "w2": "w"}, fixed=["h1", "h2", "h3"]), ["w2"])
+        # a weak candidate a person's link already reaches through another path
+        self.assertEqual(self.pick({"w1": "w", "w2": "w"}, fixed=["h1"], anc={"h1": {"w2"}}), ["w1"])
+
+
+class TestRuleOnUploads(Base):
+    """The rule where an upload's links come in: a paper built on keeps the parents the rule
+    chooses, the rest are remembered as graded pairs; a new paper arriving as a parent can push an
+    agent link out (logged as the agent's); a person's links stay and count; suggest only."""
+
+    def upload(self, paper, links, who=None):
+        return graph.apply_agent_links("e_x", paper, who or self.h.bob,
+                                       [{"other": {"paper_id": o}, "direction": d, "grade": g, "source": "s2",
+                                         **({"influential": i} if i is not None else {})} for o, d, g, i in links])
+
+    def active(self, dst):
+        return {r["src"]: r["grade"] for r in db.conn().execute(
+            "SELECT src, grade FROM links WHERE dst = ? AND state = 'active'", (dst,))}
+
+    def graded(self, dst):
+        return {r["src"]: (r["grade"], r["influential"]) for r in db.conn().execute(
+            "SELECT * FROM link_candidates WHERE dst = ?", (dst,))}
+
+    def parents(self, n, year=2010):
+        return [self.h.paper(f"Parent paper number {i}", year + i, ["ru"]) for i in range(n)]
+
+    def test_an_upload_links_the_parents_the_rule_chooses(self):
+        h = self.h
+        ps = self.parents(8)
+        child = h.paper("The child paper", 2024, ["ru"])
+        out = self.upload(child, [(p, "builds_on", "s", p == ps[0]) for p in ps])
+        self.assertEqual((out["added"], out["removed"]), (5, 0))
+        self.assertEqual(sorted(s["reason"] for s in out["skipped"]), [graph.NOT_CHOSEN] * 3)
+        self.assertEqual(set(self.active(child)), {ps[0], ps[7], ps[6], ps[5], ps[4]})   # the influential one, the newest
+        self.assertEqual(len(self.graded(child)), 8)                    # every graded pair remembered
+        self.assertEqual(self.graded(child)[ps[0]], ("s", 1))
+        # the same upload again (without the flag): nothing changes
+        n = h.log_count()
+        out = self.upload(child, [(p, "builds_on", "s", None) for p in ps])
+        self.assertEqual((out["added"], out["removed"], h.log_count()), (0, 0, n))
+        self.assertEqual(sorted(s["reason"] for s in out["skipped"]), ["exists"] * 5 + [graph.NOT_CHOSEN] * 3)
+        self.assertEqual(self.graded(child)[ps[0]], ("s", 1))
+
+    def test_a_new_parent_via_built_on_by_pushes_the_oldest_out(self):
+        h = self.h
+        ps = self.parents(5)
+        child = h.paper("The child paper", 2024, ["ru"])
+        self.assertEqual(self.upload(child, [(p, "builds_on", "s", None) for p in ps])["added"], 5)
+        n = h.log_count()
+        new = h.paper("A new paper the child builds on", 2020, ["ru"])
+        out = self.upload(new, [(child, "built_on_by", "e", None)], who=h.alice)
+        self.assertEqual((out["added"], out["removed"]), (1, 1))          # essential: the strong ones go to 4
+        self.assertEqual(set(self.active(child)), set(ps[1:]) | {new})
+        other = h.paper("Another newer parent", 2021, ["ru"])
+        out = self.upload(other, [(child, "built_on_by", "s", None)], who=h.alice)
+        self.assertEqual((out["added"], out["removed"]), (1, 1))
+        self.assertEqual(set(self.active(child)), set(ps[2:]) | {new, other})
+        rows = db.conn().execute("SELECT * FROM graph_log WHERE id > ? ORDER BY id", (n,)).fetchall()
+        self.assertEqual([(r["op"], r["actor"], r["user_id"]) for r in rows], [("link.remove", "agent", h.alice),
+                         ("link.add", "agent", h.alice)] * 2)
+        texts = [e["summary"] for e in h.ok("GET", "/api/graph-log")["log"] if e["op"] == "link.remove"]
+        self.assertTrue(texts[0].startswith("the agent for Alice removed Parent paper number"), texts)
+        # the map's Undo: a person's undo of the removal makes that link theirs, and the rule leaves it
+        st, js = h.undo("any", who="bob")
+        self.assertEqual((st, js["reverted"]["op"]), (200, "link.add"))
+        st, js = h.undo("any", who="bob")
+        self.assertEqual((st, js["reverted"]["op"]), (200, "link.remove"))
+        self.assertEqual(h.link_row(ps[1], child)["state"], "active")
+        m = h.log_count()
+        self.upload(child, [(p, "builds_on", "s", None) for p in ps] + [(other, "builds_on", "s", None)])
+        self.assertEqual(h.log_count(), m)                              # other: a person removed it; ps[1]: a person's now
+        self.assertEqual(set(self.active(child)), set(ps[1:]) | {new})
+
+    def test_a_persons_links_count_and_stay(self):
+        h = self.h
+        ps = self.parents(6)
+        child = h.paper("The child paper", 2024, ["ru"])
+        self.link(ps[0], child, "w")                                   # a person's links (weak ones)
+        self.link(ps[1], child, "w", who="bob")
+        out = self.upload(child, [(p, "builds_on", "s", None) for p in ps[2:]])
+        self.assertEqual(out["added"], 3)                              # 2 + 3 = 5
+        self.assertEqual(set(self.active(child)), {ps[0], ps[1], ps[5], ps[4], ps[3]})
+        self.assertEqual({r[0] for r in db.conn().execute(
+            "SELECT origin FROM links WHERE dst = ? AND src IN (?, ?)", (child, ps[0], ps[1]))}, {"human"})
+
+    def test_the_weak_arrow_another_path_joins(self):
+        h = self.h
+        a, b, c, d = (h.paper("Alpha paper", 2015, ["ru"]), h.paper("Beta paper", 2017, ["ru"]),
+                      h.paper("Gamma paper", 2019, ["ru"]), h.paper("Delta paper", 2014, ["ru"]))
+        self.assertEqual(self.upload(b, [(a, "builds_on", "s", None)])["added"], 1)
+        out = self.upload(c, [(b, "builds_on", "s", None), (a, "builds_on", "w", None), (d, "builds_on", "w", None)])
+        self.assertEqual(out["added"], 2)                              # not a -> c: a -> b -> c is drawn
+        self.assertEqual(set(self.active(c)), {b, d})
+        self.assertEqual([s["reason"] for s in out["skipped"]], [graph.NOT_CHOSEN])
+
+    def test_suggest_only(self):
+        h = self.h
+        ps = self.parents(7)
+        child = h.paper("The child paper", 2024, ["ru"])
+        self.assertEqual(self.upload(child, [(p, "builds_on", "s", None) for p in ps[:5]])["added"], 5)
+        h.ok("PUT", "/api/graph-settings", {"agent_links": "suggest"}, who="root")
+        n = h.log_count()
+        out = self.upload(child, [(ps[6], "builds_on", "e", None), (ps[5], "builds_on", "s", None)])
+        self.assertEqual((out["added"], out["suggested"], out["removed"], h.log_count()), (0, 1, 0, n))
+        self.assertEqual(len(self.active(child)), 5)                   # nothing removed while a person decides
+        self.assertEqual([(r["src"], r["grade"]) for r in db.conn().execute("SELECT * FROM link_suggestions")], [(ps[6], "e")])
+
+    def test_a_pending_parent_arrives(self):
+        h = self.h
+        ps = self.parents(5)
+        child = h.paper("The child paper", 2024, ["ru"])
+        self.upload(child, [(p, "builds_on", "s", None) for p in ps])
+        graph.apply_agent_links("e_y", child, h.bob, [{"other": {"arxiv_id": "2301.00077"}, "direction": "builds_on",
+                                                         "grade": "s", "influential": True}])
+        late = h.paper("A paper that came later", 2023, ["ru"], arxiv_id="2301.00077")
+        self.assertEqual(graph.resolve_pending(late), 1)
+        self.assertEqual(set(self.active(child)), set(ps[1:]) | {late})  # influential first
+        q = db.conn().execute("SELECT * FROM pending_links").fetchone()
+        self.assertEqual((q["outcome"], q["influential"]), ("added", 1))
+        last = db.conn().execute("SELECT * FROM graph_log ORDER BY id DESC LIMIT 2").fetchall()
+        self.assertEqual(sorted((r["op"], r["actor"], r["user_id"]) for r in last),
+                         [("link.add", "agent", h.bob), ("link.remove", "agent", h.bob)])
+
+
 class TestEvents(Base):
     def test_graph_and_log_events(self):
         h = self.h

@@ -5,8 +5,9 @@ papers (its tag rule, plus papers added by hand, minus papers removed by hand) a
 among its members. Every change is one row in graph_log with the state before and after, so a
 change can be undone against the current state, and the undo undone.
 
-Agents (the links an upload brings) only ever add: a link a person removed stays removed, and a
-link that already exists (a person's or an agent's) is left as it is. A link whose other paper is
+Agents (the links an upload brings) never touch a person's links: a link a person removed stays
+removed, and a link a person made or changed is left as it is. They add links, and remove only
+their own ones that Leo's per-paper rule (below) no longer chooses. A link whose other paper is
 not in the library yet waits in pending_links until that paper arrives.
 
 Locked graphs: only admins change them, their links included (a link between two members of a
@@ -19,10 +20,21 @@ undone) or dismisses it (for good: that pair is never suggested again).
 
 `papercast relink` sends the links found again for papers already in the library (relink): the
 same rules as an upload's, and the agent may also regrade its own links or remove one that now
-grades none; a link a person made or changed is never touched. Each change is a log row."""
+grades none; a link a person made or changed is never touched. Each change is a log row.
+
+Leo's per-paper rule ("try to have 4-5 links to other papers, or more if really justified"; his
+lineage map's build.py lineage()) decides which of the agent's graded pairs are links: for each
+paper built on, over all its parents in the library (whatever graph shows them), every essential
+parent; strong ones until it has TARGET_STRONG parents; weak ones only until it has TARGET_WEAK,
+and a weak one only where no other drawn path already joins the two papers. A person's links
+always stay and count. It is applied to a paper whenever the agent's links into it change (an
+upload, a relink, a new paper that arrives as its parent); the agent's graded pairs are kept
+(link_candidates), so a pair the rule leaves out is not proposed again as new, and comes in when
+the choice changes. `papercast relink --restructure` applies it to the whole map at once."""
 from __future__ import annotations
 
 import hashlib
+import heapq
 import json
 import logging
 import math
@@ -67,7 +79,28 @@ SEED_GRAPHS = [
 
 AGENT_MODES = ("auto", "suggest")
 
+# Leo's per-paper rule (papercast-itest/lineage/build.py lineage()): every essential parent, strong
+# ones until a paper has TARGET_STRONG parents, weak ones only until it has TARGET_WEAK
+TARGET_STRONG, TARGET_WEAK = 5, 4
+KEEP_GRADES = ("e", "s")    # never dropped by the transitive reduction; weak ones are
+RANK = {"e": 0, "s": 1, "w": 2}
+NOT_CHOSEN = "not chosen by the per-paper rule"
+RESTRUCTURE_MAX = 50000     # graded pairs in one restructure request
+RESTRUCTURE_BODY_MAX = 16 * 1024 * 1024
+
 EXTRA_SCHEMA = """
+CREATE TABLE IF NOT EXISTS link_candidates (  -- the agent's latest grade of a pair (an upload's or a relink's), linked or not
+  src TEXT NOT NULL REFERENCES papers(id),
+  dst TEXT NOT NULL REFERENCES papers(id),
+  grade TEXT NOT NULL CHECK (grade IN ('e', 's', 'w', 'none')),
+  influential INTEGER NOT NULL DEFAULT 0,         -- Semantic Scholar flags the citation isInfluential
+  source TEXT,                                    -- s2 | text | both
+  user_id INTEGER REFERENCES users(id),           -- who the agent graded it for
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (src, dst)
+);
+CREATE INDEX IF NOT EXISTS link_candidates_dst ON link_candidates(dst);
+
 CREATE TABLE IF NOT EXISTS graph_settings (   -- site-wide settings of the graphs: agent_links = auto | suggest
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,
@@ -156,11 +189,13 @@ def ensure_schema() -> None:
         for stmt in EXTRA_SCHEMA.split(";"):      # one by one: executescript would commit a caller's transaction
             if stmt.strip():
                 c.execute(stmt)
-        if "label" not in {r[1] for r in c.execute("PRAGMA table_info(papers)")}:
-            try:
-                c.execute("ALTER TABLE papers ADD COLUMN label TEXT")   # a short name; null: automatic
-            except sqlite3.OperationalError:                           # added by another process meanwhile
-                pass
+        for table, col, decl in (("papers", "label", "TEXT"),          # a short name; null: automatic
+                                 ("pending_links", "influential", "INTEGER")):   # Semantic Scholar's isInfluential
+            if col not in {r[1] for r in c.execute(f"PRAGMA table_info({table})")}:
+                try:
+                    c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+                except sqlite3.OperationalError:                       # added by another process meanwhile
+                    pass
         _seed()
         if c.in_transaction:     # a caller's transaction may still roll it back: check again next time
             return
@@ -954,7 +989,11 @@ def log_entries(ids) -> list:
     if not ids:
         return []
     with _reading() as c:
-        rows = c.execute(f"SELECT * FROM graph_log WHERE id IN ({','.join('?' * len(ids))}) ORDER BY id", ids).fetchall()
+        rows = []
+        for i in range(0, len(ids), 500):              # a restructure's hundreds of rows: under SQLite's 999 variables
+            part = ids[i:i + 500]
+            rows += c.execute(f"SELECT * FROM graph_log WHERE id IN ({','.join('?' * len(part))})", part).fetchall()
+        rows.sort(key=lambda r: r["id"])
         return _entries(c, rows)
 
 
@@ -1002,7 +1041,10 @@ def _after_suggestions(sids) -> None:
     if not sids:
         return
     c, w = db.conn(), _world()
-    rows = c.execute(f"SELECT src, dst FROM link_suggestions WHERE id IN ({','.join('?' * len(sids))})", sids).fetchall()
+    rows = []
+    for i in range(0, len(sids), 500):
+        part = sids[i:i + 500]
+        rows += c.execute(f"SELECT src, dst FROM link_suggestions WHERE id IN ({','.join('?' * len(part))})", part).fetchall()
     gids = sorted({g for r in rows for g in _link_graphs(w, r[0], r[1])})
     for gid in gids:
         events.publish("graph", {"id": gid, "change": "suggestions"})
@@ -1100,8 +1142,295 @@ def _agent_add(c, adj, src, dst, grade, user_id, sugg=None):
     return "added", _log(c, user_id, "agent", "link.add", cur.lastrowid, None, snap)
 
 
-def _resolve_for(c, adj, paper, sugg=None) -> list:
-    """Pending links that name this paper: add them now (or suggest them, with `sugg`). -> log ids."""
+# ---------------------------------------------------------------- Leo's per-paper rule
+
+def select_parents(fixed, cands, when, anc) -> list:
+    """Leo's per-paper rule for one paper (build.py lineage()): every essential parent, no limit;
+    strong ones until the paper has TARGET_STRONG parents; weak ones only until it has
+    TARGET_WEAK, and a weak one is dropped (its slot going to the next weak one) where another
+    drawn path already joins the two papers: its parent is an ancestor of another of the paper's
+    parents. Essential and strong ones are never dropped that way. Ties: Semantic Scholar's
+    isInfluential first, then the most recent parent.
+
+    fixed: the parents that stay whatever the rule says (a person's links, and the agent's links
+    it may not remove now): they count, and are never dropped. cands: {parent: (grade e|s|w,
+    influential)}, the agent's. when: {paper: its place in time order} (higher: more recent).
+    anc(parent): the set of its ancestors along the drawn links.
+    -> the candidates chosen (not the fixed ones), in the rule's order."""
+    fixed = list(dict.fromkeys(fixed))
+    keep = set(fixed)
+    cs = sorted((p for p in cands if p not in keep),
+                key=lambda p: (RANK[cands[p][0]], not cands[p][1], -when.get(p, -1), p))
+    es = [p for p in cs if cands[p][0] == "e"]
+    st = [p for p in cs if cands[p][0] == "s"]
+    weak = [p for p in cs if cands[p][0] == "w"]
+    chosen = fixed + es
+    chosen += st[:max(0, TARGET_STRONG - len(chosen))]
+    for _ in range(4):          # as build.py: fill with weak ones, drop those another path joins, again
+        for p in weak:
+            if p in chosen or len(chosen) >= TARGET_WEAK:
+                continue
+            if any(p in anc(q) for q in chosen):
+                continue
+            chosen.append(p)
+        ps = list(chosen)
+        chosen = [p for p in ps if p in keep or cands[p][0] in KEEP_GRADES
+                  or not any(p in anc(q) for q in ps if q != p)]
+    return [p for p in chosen if p not in keep]
+
+
+class _Ctx:
+    """What the agent's link changes in one transaction work from: the active links (adj), the
+    links a person has had a hand in, the setting for links from uploads (sugg: the suggestions
+    made, while they are suggestions only), each paper's place in time order, and the log rows
+    made (ids)."""
+
+    def __init__(self, c, uid=None):
+        self.c, self.uid = c, uid
+        self.mode = _agent_mode(c)
+        self.sugg = [] if self.mode == "suggest" else None
+        self.adj = _adj(c)
+        self.person = _person_links(c)
+        self.w = _world()
+        order = sorted(self.w.papers, key=lambda i: (self.w.papers[i]["okey"], i))
+        self.when = {pid: k for k, pid in enumerate(order)}
+        self.ids = []
+        self._admin = {}
+
+    def admin(self, uid) -> bool:
+        if uid not in self._admin:
+            r = self.c.execute("SELECT role FROM users WHERE id = ?", (uid,)).fetchone() if uid is not None else None
+            self._admin[uid] = bool(r) and r[0] == "admin"
+        return self._admin[uid]
+
+    def may_remove(self, uid, src, dst) -> bool:
+        """The agent removes one of its own links only while links from uploads are automatic (else
+        a person decides), and in a locked graph only for an admin."""
+        if self.sugg is not None:
+            return False
+        if self.admin(uid):
+            return True
+        return not any(g["locked"] and src in self.w.members[gid] and dst in self.w.members[gid]
+                       for gid, g in self.w.graphs.items())
+
+
+def _influential(v):
+    return v if isinstance(v, bool) else None
+
+
+def _record(c, src, dst, grade, influential=None, source=None, uid=None) -> None:
+    """The agent's latest grade of the pair src -> dst (e|s|w|none), linked or not: the rule
+    chooses among these, so a pair it left out is remembered rather than proposed again as new.
+    influential None: as it was."""
+    old = c.execute("SELECT influential, source FROM link_candidates WHERE src = ? AND dst = ?", (src, dst)).fetchone()
+    if influential is None:
+        influential = bool(old and old[0])
+    if source not in ("s2", "text", "both"):
+        source = old[1] if old else None
+    c.execute("INSERT OR REPLACE INTO link_candidates(src, dst, grade, influential, source, user_id, updated_at) "
+              "VALUES (?, ?, ?, ?, ?, ?, ?)", (src, dst, grade, 1 if influential else 0, source, uid, db.now()))
+
+
+def _blocked(ctx, src, dst):
+    """Why the agent may not link src -> dst now (None: it may): a person's decision on the pair
+    (their removal, either way round, or a dismissed suggestion), a link the other way, the time
+    order, a loop. While links from uploads are suggestions only, a removed link stays removed."""
+    c = ctx.c
+    row = c.execute("SELECT id, state FROM links WHERE src = ? AND dst = ?", (src, dst)).fetchone()
+    if row is not None and row["state"] == "removed":
+        if row["id"] in ctx.person:
+            return "removed by a person"
+        if ctx.sugg is not None:
+            return "removed"
+    back = c.execute("SELECT id, state FROM links WHERE src = ? AND dst = ?", (dst, src)).fetchone()
+    if back is not None:
+        if back["state"] == "active":
+            return "linked the other way"
+        if back["id"] in ctx.person:
+            return "removed by a person (the other way)"
+    s = c.execute("SELECT state FROM link_suggestions WHERE src = ? AND dst = ?", (src, dst)).fetchone()
+    if s is not None and s[0] == "dismissed":
+        return "dismissed by a person"
+    ps, pd = ctx.w.papers.get(src), ctx.w.papers.get(dst)
+    if ps and pd and ps["year"] and pd["year"] and ps["year"] > pd["year"]:
+        return "order"                 # the parent is the later paper (build.py drops these too)
+    if _reaches(ctx.adj, dst, src):
+        return "cycle"
+    return None
+
+
+def _ancestors(adj):
+    """anc(q): the papers a drawn path leads from to q (along adj as it is now), memoised."""
+    radj = defaultdict(list)
+    for s, ds in adj.items():
+        for d in ds:
+            radj[d].append(s)
+    memo = {}
+
+    def anc(q):
+        got = memo.get(q)
+        if got is None:
+            got, stack = set(), [q]
+            while stack:
+                for m in radj.get(stack.pop(), ()):
+                    if m not in got:
+                        got.add(m)
+                        stack.append(m)
+            got.discard(q)
+            memo[q] = got
+        return got
+    return anc
+
+
+def _topo(ctx, nodes) -> list:
+    """`nodes` with every paper after the papers it builds on (its links and the agent's graded
+    pairs), time order otherwise: the rule for a paper then sees its parents' links as they will
+    stay. Papers in a loop (old data) come last, in time order."""
+    nodes = set(nodes)
+    edges = defaultdict(set)
+    for s, ds in ctx.adj.items():
+        edges[s].update(ds)
+    for s, d in ctx.c.execute("SELECT src, dst FROM link_candidates WHERE grade IN ('e', 's', 'w')"):
+        if s != d:
+            edges[s].add(d)
+    every = nodes | set(edges) | {d for ds in edges.values() for d in ds}
+    indeg = dict.fromkeys(every, 0)
+    for ds in edges.values():
+        for d in ds:
+            indeg[d] += 1
+    key = lambda n: (ctx.when.get(n, -1), n)
+    heap = [key(n) for n in every if indeg[n] == 0]
+    heapq.heapify(heap)
+    out, done = [], set()
+    while heap:
+        _, n = heapq.heappop(heap)
+        done.add(n)
+        if n in nodes:
+            out.append(n)
+        for d in edges.get(n, ()):
+            indeg[d] -= 1
+            if indeg[d] == 0:
+                heapq.heappush(heap, key(d))
+    return out + sorted((n for n in nodes if n not in done), key=key)
+
+
+def _settle(ctx, child, uid=None, users=None) -> dict:
+    """Leo's rule for one paper built on (child), over all its parents in the library: the agent's
+    graded pairs into it (link_candidates) and the links it has. A person's links stay and count,
+    and so do the agent's while it may not remove them (links from uploads are suggestions only;
+    a locked graph, for anyone but an admin). The agent's links the rule does not choose are
+    removed; the pairs it chooses that are not linked are added (a link the agent itself removed
+    before is restored), or, while links from uploads are suggestions only, suggested. One log
+    row per change, as the agent acting for uid (a new link: for users[parent] where given, the
+    uploader who found it).
+    -> {"id": child, "parents": [{"src", "grade", "by": person | agent, "influential", "status":
+    kept | added | suggested | removed | not selected | blocked, "reason"?, "link_id"?, "restored"?}]}"""
+    c = ctx.c
+    uid = ctx.uid if uid is None else uid
+    users = users or {}
+    rows = {r["src"]: r for r in c.execute("SELECT * FROM links WHERE dst = ?", (child,))}
+    graded = {r["src"]: r for r in c.execute("SELECT * FROM link_candidates WHERE dst = ?", (child,))}
+
+    def infl(s):
+        return bool(graded[s]["influential"]) if s in graded else False
+    fixed, mine, cands, blocked = {}, {}, {}, {}
+    for s, r in rows.items():
+        if r["state"] != "active":
+            continue
+        if r["id"] in ctx.person or not ctx.may_remove(uid, s, child):
+            fixed[s] = r
+        else:
+            mine[s] = r
+            cands[s] = (r["grade"], infl(s))
+    for s, g in graded.items():
+        if s in fixed or s in mine or s == child or g["grade"] not in GRADES:
+            continue
+        why = _blocked(ctx, s, child)
+        if why:
+            blocked[s] = why
+        else:
+            cands[s] = (g["grade"], bool(g["influential"]))
+    chosen = select_parents(list(fixed), cands, ctx.when, _ancestors(ctx.adj))
+    sel = set(chosen)
+    out = []
+
+    def entry(s, grade, by, status, **kw):
+        out.append({"src": s, "grade": grade, "by": by, "influential": infl(s), "status": status, **kw})
+    for s, r in fixed.items():
+        entry(s, r["grade"], "person" if r["id"] in ctx.person else "agent", "kept", link_id=r["id"])
+    for s, r in mine.items():
+        if s in sel:
+            entry(s, r["grade"], "agent", "kept", link_id=r["id"])
+            continue
+        if s not in graded:            # remembered, so that the rule brings it back when the choice changes
+            _record(c, s, child, r["grade"], None, None, r["created_by"])
+        before = _link_snap(r)
+        c.execute("UPDATE links SET state = 'removed', updated_at = ? WHERE id = ?", (db.now(), r["id"]))
+        if child in ctx.adj.get(s, []):
+            ctx.adj[s].remove(child)
+        ctx.ids.append(_log(c, uid, "agent", "link.remove", r["id"], before, _link_snap(_link_row(c, r["id"]))))
+        entry(s, r["grade"], "agent", "removed", link_id=r["id"])
+    for s in chosen:
+        if s in mine:
+            continue
+        grade, r, who = cands[s][0], rows.get(s), users.get(s, uid)
+        if r is not None:              # the agent's own removal (the rule's, or a grade of none then): restored
+            before = _link_snap(r)
+            c.execute("UPDATE links SET grade = ?, state = 'active', updated_at = ? WHERE id = ?", (grade, db.now(), r["id"]))
+            ctx.adj[s].append(child)
+            ctx.ids.append(_log(c, who, "agent", "link.add", r["id"], before, _link_snap(_link_row(c, r["id"]))))
+            entry(s, grade, "agent", "added", link_id=r["id"], restored=True)
+            continue
+        outcome, lid = _agent_add(c, ctx.adj, s, child, grade, who, ctx.sugg)
+        if lid is not None:
+            ctx.ids.append(lid)
+            entry(s, grade, "agent", "added",
+                  link_id=int(c.execute("SELECT target FROM graph_log WHERE id = ?", (lid,)).fetchone()[0]))
+        elif outcome == "suggested":
+            entry(s, grade, "agent", "suggested")
+        else:
+            entry(s, grade, "agent", "blocked", reason=outcome)
+    for s, (grade, _) in cands.items():
+        if s not in sel and s not in mine:
+            entry(s, grade, "agent", "not selected")
+    for s, why in blocked.items():
+        entry(s, graded[s]["grade"], "agent", "blocked", reason=why)
+    return {"id": child, "parents": out}
+
+
+def _settle_all(ctx, children, users=None, uids=None) -> list:
+    """_settle for each of these papers, parents before children."""
+    users, uids = users or {}, uids or {}
+    return [_settle(ctx, ch, uids.get(ch), users.get(ch)) for ch in _topo(ctx, children)]
+
+
+# what an upload's pair came to, in the words apply_agent_links has always used
+UPLOAD_REASONS = {"removed by a person": "removed", "removed by a person (the other way)": "removed",
+                  "dismissed by a person": "dismissed", "linked the other way": "cycle"}
+
+
+def _outcome(e) -> str:
+    if e is None:
+        return NOT_CHOSEN
+    st = e["status"]
+    if st == "kept":
+        return "exists"
+    if st in ("added", "suggested"):
+        return st
+    if st in ("removed", "not selected"):
+        return NOT_CHOSEN
+    return UPLOAD_REASONS.get(e.get("reason"), e.get("reason") or st)
+
+
+def _results(settled) -> dict:
+    return {(e["src"], r["id"]): e for r in settled for e in r["parents"]}
+
+
+def _resolve_for(ctx, paper) -> list:
+    """Pending links that name this paper: their pairs graded (link_candidates), for the rule to
+    decide (a pending link that names its own paper is done here).
+    -> [{"id", "src", "dst", "user_id"}]"""
+    c = ctx.c
     ax, doi, tn = _norm_arxiv(paper["arxiv_id"]), _norm_doi(paper["doi"]), paper["title_norm"]
     tn = tn if tn and len(tn) >= TITLE_MATCH_MIN else None
     if not (ax or doi or tn):
@@ -1110,21 +1439,43 @@ def _resolve_for(c, adj, paper, sugg=None) -> list:
         "SELECT * FROM pending_links WHERE resolved_at IS NULL AND ((arxiv_id IS NOT NULL AND arxiv_id = ?) "
         "OR (doi IS NOT NULL AND doi = ?) OR (title_norm IS NOT NULL AND title_norm = ?)) ORDER BY id",
         (ax, doi, tn)).fetchall()
-    ids = []
+    out = []
     for r in rows:
         if r["paper_id"] == paper["id"]:
-            outcome, lid = "self", None
-        elif r["direction"] == "builds_on":            # the uploaded paper builds on this one
-            outcome, lid = _agent_add(c, adj, paper["id"], r["paper_id"], r["grade"], r["user_id"], sugg)
+            c.execute("UPDATE pending_links SET resolved_at = ?, outcome = 'self', link_id = NULL WHERE id = ?",
+                      (db.now(), r["id"]))
+            continue
+        if r["direction"] == "builds_on":            # the uploaded paper builds on this one
+            src, dst = paper["id"], r["paper_id"]
         else:
-            outcome, lid = _agent_add(c, adj, r["paper_id"], paper["id"], r["grade"], r["user_id"], sugg)
-        link = None
-        if lid is not None:
-            link = int(c.execute("SELECT target FROM graph_log WHERE id = ?", (lid,)).fetchone()[0])
-            ids.append(lid)
+            src, dst = r["paper_id"], paper["id"]
+        infl = r["influential"] if "influential" in r.keys() else None
+        _record(c, src, dst, r["grade"], None if infl is None else bool(infl), r["source"], r["user_id"])
+        out.append({"id": r["id"], "src": src, "dst": dst, "user_id": r["user_id"]})
+    return out
+
+
+def _pending_users(pend, mine=()):
+    """For _settle_all: who each pending pair's new link is for (its uploader), and whom the agent
+    acts for on a paper only pending pairs touch."""
+    users, uids = defaultdict(dict), {}
+    for q in pend:
+        users[q["dst"]][q["src"]] = q["user_id"]
+        if q["dst"] not in mine:
+            uids.setdefault(q["dst"], q["user_id"])
+    return users, uids
+
+
+def _finish_pending(c, pend, results) -> int:
+    """Each pending link's outcome, once the rule decided. -> how many became links or suggestions."""
+    n = 0
+    for q in pend:
+        e = results.get((q["src"], q["dst"]))
+        oc = _outcome(e)
         c.execute("UPDATE pending_links SET resolved_at = ?, outcome = ?, link_id = ? WHERE id = ?",
-                  (db.now(), outcome, link, r["id"]))
-    return ids
+                  (db.now(), oc, e.get("link_id") if e and oc in ("added", "exists") else None, q["id"]))
+        n += oc in ("added", "suggested")
+    return n
 
 
 def apply_agent_links(episode, paper_id=None, user_id=None, links=None) -> dict:
@@ -1132,11 +1483,16 @@ def apply_agent_links(episode, paper_id=None, user_id=None, links=None) -> dict:
     one log row per link, actor 'agent', user_id the uploader. Called by contrib after the
     checks pass, as apply_agent_links(episode_id, paper_id, user_id, links) or
     apply_agent_links(episode_row, links). Also adds the earlier uploads' pending links that
-    name this paper. Never re-adds a link a person removed and never changes an existing link.
+    name this paper. Never re-adds a link a person removed and never changes a person's link.
 
-    While links from uploads are suggestions only, the links it would add are suggested instead.
+    Leo's per-paper rule decides which: each pair is remembered with its grade (link_candidates),
+    and for each paper built on (this one, and those it is a parent of) the rule chooses among all
+    its parents; the agent's links it no longer chooses are removed (logged as the agent's).
+    While links from uploads are suggestions only, the links it would add are suggested instead
+    and nothing is removed.
 
-    -> {"added", "suggested", "pending", "resolved", "skipped": [{"index", "reason"}], "log_ids"}"""
+    -> {"added", "suggested", "pending", "resolved", "removed", "skipped": [{"index", "reason"}],
+    "log_ids"}"""
     ensure_schema()
     if links is None and isinstance(paper_id, (list, tuple)):
         links, paper_id = paper_id, None
@@ -1153,17 +1509,14 @@ def apply_agent_links(episode, paper_id=None, user_id=None, links=None) -> dict:
             user_id = user_id if user_id is not None else r["made_by"]
     if not paper_id:
         raise ValueError("apply_agent_links: no paper for this episode")
-    out = {"added": 0, "suggested": 0, "pending": 0, "resolved": 0, "skipped": [], "log_ids": []}
-    ids = []
+    out = {"added": 0, "suggested": 0, "pending": 0, "resolved": 0, "removed": 0, "skipped": [], "log_ids": []}
     with _tx() as c:
         me = _paper_row(c, paper_id)
         if me is None:
             raise ValueError(f"apply_agent_links: no paper {paper_id}")
-        adj = _adj(c)
-        sugg = [] if _agent_mode(c) == "suggest" else None
-        got = _resolve_for(c, adj, me, sugg)
-        out["resolved"] = len(got) + len(sugg or [])
-        ids += got
+        ctx = _Ctx(c, user_id)
+        pend = _resolve_for(ctx, me)
+        pairs, seen = [], set()
         for k, item in enumerate(links or []):
             if not isinstance(item, dict) or not isinstance(item.get("other"), dict):
                 out["skipped"].append({"index": k, "reason": "not a link"})
@@ -1173,6 +1526,7 @@ def apply_agent_links(episode, paper_id=None, user_id=None, links=None) -> dict:
                 out["skipped"].append({"index": k, "reason": "bad direction or grade"})
                 continue
             other = item["other"]
+            infl = _influential(item.get("influential"))
             oid = _find_paper(c, other)
             if oid is None:
                 ax, doi, tn = _pending_keys(other)
@@ -1181,9 +1535,11 @@ def apply_agent_links(episode, paper_id=None, user_id=None, links=None) -> dict:
                     continue
                 cur = c.execute(
                     "INSERT OR IGNORE INTO pending_links(paper_id, episode_id, user_id, direction, grade, source, "
-                    "arxiv_id, doi, title_norm, other, key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "arxiv_id, doi, title_norm, other, key, created_at, influential) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (paper_id, episode_id, user_id, direction, grade, item.get("source"), ax, doi, tn,
-                     db.dumps(other), f"a:{ax or ''}|d:{doi or ''}|t:{tn or ''}", db.now()))
+                     db.dumps(other), f"a:{ax or ''}|d:{doi or ''}|t:{tn or ''}", db.now(),
+                     None if infl is None else int(infl)))
                 if cur.rowcount:
                     out["pending"] += 1
                 else:
@@ -1193,30 +1549,38 @@ def apply_agent_links(episode, paper_id=None, user_id=None, links=None) -> dict:
                 out["skipped"].append({"index": k, "reason": "self"})
                 continue
             src, dst = (oid, paper_id) if direction == "builds_on" else (paper_id, oid)
-            n0 = len(sugg or [])
-            outcome, lid = _agent_add(c, adj, src, dst, grade, user_id, sugg)
-            if lid is not None:
-                out["added"] += 1
-                ids.append(lid)
-            elif sugg is not None and len(sugg) > n0:
-                out["suggested"] += 1
+            if (src, dst) in seen:
+                out["skipped"].append({"index": k, "reason": "exists"})
+                continue
+            seen.add((src, dst))
+            _record(c, src, dst, grade, infl, item.get("source"), user_id)
+            pairs.append((k, src, dst))
+        mine = {d for _, _, d in pairs}
+        users, uids = _pending_users(pend, mine)
+        settled = _settle_all(ctx, mine | {q["dst"] for q in pend}, users, uids)
+        results = _results(settled)
+        out["removed"] = sum(1 for e in results.values() if e["status"] == "removed")
+        for k, src, dst in pairs:
+            oc = _outcome(results.get((src, dst)))
+            if oc in ("added", "suggested"):
+                out[oc] += 1
             else:
-                out["skipped"].append({"index": k, "reason": outcome})
-        _bump_links(c, ids, user_id, "agent")
-    out["log_ids"] = ids
-    _after(ids)
-    _after_suggestions(sugg)
+                out["skipped"].append({"index": k, "reason": oc})
+        out["resolved"] = _finish_pending(c, pend, results)
+        _bump_links(c, ctx.ids, user_id, "agent")
+    out["log_ids"] = ctx.ids
+    _after(ctx.ids)
+    _after_suggestions(ctx.sugg)
     from . import layout
     layout.schedule(reset=False)       # a new paper may have joined graphs by its tags
     return out
 
 
 def resolve_pending(paper_id=None) -> int:
-    """Add the pending links naming this paper (or, without one, every paper that has any).
-    The upload path calls it through apply_agent_links; call it after creating a paper some
-    other way (an import). -> how many links were added."""
+    """Add the pending links naming this paper (or, without one, every paper that has any), as
+    the per-paper rule chooses. The upload path does it through apply_agent_links; call it after
+    creating a paper some other way (an import). -> how many became links (or suggestions)."""
     ensure_schema()
-    ids = []
     with _tx() as c:
         if paper_id:
             rows = [r for r in [_paper_row(c, paper_id)] if r is not None]
@@ -1225,16 +1589,19 @@ def resolve_pending(paper_id=None) -> int:
                 "SELECT DISTINCT p.* FROM papers p JOIN pending_links q ON q.resolved_at IS NULL AND "
                 "((q.arxiv_id IS NOT NULL AND q.arxiv_id = p.arxiv_id) OR (q.doi IS NOT NULL AND q.doi = lower(p.doi)) "
                 "OR (q.title_norm IS NOT NULL AND q.title_norm = p.title_norm))").fetchall()
-        adj = _adj(c)
-        sugg = [] if _agent_mode(c) == "suggest" else None
+        ctx = _Ctx(c)
+        pend = []
         for r in rows:
-            ids += _resolve_for(c, adj, r, sugg)
-        if ids:
-            u = c.execute("SELECT user_id FROM graph_log WHERE id = ?", (ids[-1],)).fetchone()
-            _bump_links(c, ids, u[0] if u else None, "agent")
-    _after(ids)
-    _after_suggestions(sugg)
-    return len(ids) + len(sugg or [])
+            pend += _resolve_for(ctx, r)
+        users, uids = _pending_users(pend)
+        results = _results(_settle_all(ctx, {q["dst"] for q in pend}, users, uids))
+        n = _finish_pending(c, pend, results)
+        if ctx.ids:
+            u = c.execute("SELECT user_id FROM graph_log WHERE id = ?", (ctx.ids[-1],)).fetchone()
+            _bump_links(c, ctx.ids, u[0] if u else None, "agent")
+    _after(ctx.ids)
+    _after_suggestions(ctx.sugg)
+    return n
 
 
 on_paper_created = resolve_pending
@@ -1268,9 +1635,10 @@ def _relink_grade(v):
 def relink_state(since=None) -> dict:
     """What `papercast relink` needs from the graph side (GET /api/cli/relink): every link (active
     or removed) with `person` (a person made or changed it: the agent leaves it alone), every
-    suggestion, the setting for links from uploads, each paper's visibility (on a map at all), the
-    graphs with their counts and whether their layout is up to date, and the newest log row
-    (with `since`: the log rows after it, counted by op and actor)."""
+    suggestion, the agent's graded pairs (link_candidates: what the per-paper rule chooses from,
+    linked or not), the rule's numbers, the setting for links from uploads, each paper's
+    visibility (on a map at all), the graphs with their counts and whether their layout is up to
+    date, and the newest log row (with `since`: the log rows after it, counted by op and actor)."""
     ensure_schema()
     w = _world()
     with _reading() as c:
@@ -1279,6 +1647,8 @@ def relink_state(since=None) -> dict:
                   "state": r["state"], "person": r["id"] in person, "created_by": r["created_by"]}
                  for r in c.execute("SELECT * FROM links ORDER BY id")]
         sugg = [dict(r) for r in c.execute("SELECT src, dst, grade, state FROM link_suggestions ORDER BY id")]
+        cands = [{"src": r[0], "dst": r[1], "grade": r[2], "influential": bool(r[3])}
+                 for r in c.execute("SELECT src, dst, grade, influential FROM link_candidates ORDER BY dst, src")]
         mode = _agent_mode(c)
         log_max = c.execute("SELECT coalesce(max(id), 0) FROM graph_log").fetchone()[0]
         counts = None
@@ -1294,141 +1664,237 @@ def relink_state(since=None) -> dict:
                        "suggestions": sum(1 for x in w.sugg if x["src"] in mem and x["dst"] in mem),
                        "layout": {"rev": st.get("rev", 0), "updated_at": st.get("updated_at"),
                                   "current": bool(st) and st.get("sig") == _gsig(w, gid)}})
-    out = {"agent_links": mode, "links": links, "suggestions": sugg, "graphs": graphs,
+    out = {"agent_links": mode, "links": links, "suggestions": sugg, "candidates": cands,
+           "rule": {"target_strong": TARGET_STRONG, "target_weak": TARGET_WEAK}, "graphs": graphs,
            "visible": {pid: p["visible"] for pid, p in w.papers.items()}, "log_max": log_max}
     if counts is not None:
         out["log_since"] = {"since": since, "rows": counts}
     return out
 
 
+def _skip(out, k, reason, src=None, dst=None) -> None:
+    out["skipped"].append({"index": k, **({"src": src, "dst": dst} if src else {}), "reason": reason})
+
+
+def _relink_apply(ctx, todo, out, children=(), dry_run=False) -> None:
+    """A relink's graded pairs [(index, src, dst, grade e|s|w|none, influential, source)], applied as
+    the agent acting for ctx.uid: each remembered (link_candidates); the agent's own links
+    regraded, or removed at "none"; then Leo's rule for each paper built on (`children` and the
+    pairs' own), parents first: the pairs it chooses linked, the agent's links it does not choose
+    removed. A person's links, removals and dismissals are never touched (see relink)."""
+    c, uid = ctx.c, ctx.uid
+    idx, new, same, rows = {}, set(), set(), {}
+
+    def change(k, op, src, dst, grade, **kw):
+        out["changes"].append({"index": k, "op": op, "src": src, "dst": dst, "grade": grade, **kw})
+    for k, src, dst, grade, infl, source in todo:
+        idx[(src, dst)] = k
+        rows[(src, dst)] = c.execute("SELECT * FROM links WHERE src = ? AND dst = ?", (src, dst)).fetchone()
+        _record(c, src, dst, grade, infl, source, uid)
+    # the links there are first (a removal may clear the way for a new link), then the rule
+    for k, src, dst, grade, _, _ in todo:
+        row = rows[(src, dst)]
+        if row is None:
+            if grade == "none":
+                out["unchanged"] += 1
+            else:
+                new.add((src, dst))
+            continue
+        if row["state"] == "removed":
+            if row["id"] in ctx.person:
+                _skip(out, k, "removed by a person", src, dst)
+            elif grade == "none" or ctx.sugg is not None:
+                _skip(out, k, "removed", src, dst)
+            else:
+                new.add((src, dst))            # the agent's own removal: the rule may bring it back
+            continue
+        if row["id"] in ctx.person:
+            _skip(out, k, "a person's link", src, dst)
+            continue
+        if grade == row["grade"]:
+            same.add((src, dst))
+            continue
+        if ctx.sugg is not None:
+            _skip(out, k, "suggest only", src, dst)
+            continue
+        if not ctx.may_remove(uid, src, dst):
+            _skip(out, k, "locked", src, dst)
+            continue
+        before = _link_snap(row)
+        if grade == "none":
+            c.execute("UPDATE links SET state = 'removed', updated_at = ? WHERE id = ?", (db.now(), row["id"]))
+            op, what = "link.remove", "remove"
+            if dst in ctx.adj.get(src, []):
+                ctx.adj[src].remove(dst)
+        else:
+            c.execute("UPDATE links SET grade = ?, updated_at = ? WHERE id = ?", (grade, db.now(), row["id"]))
+            op, what = "link.grade", "regrade"
+        ctx.ids.append(_log(c, uid, "agent", op, row["id"], before, _link_snap(_link_row(c, row["id"]))))
+        change(k, what, src, dst, grade, was=row["grade"], link_id=row["id"], **({"why": "none"} if grade == "none" else {}))
+    for res in _settle_all(ctx, set(children) | {d for _, _, d, _, _, _ in todo}):
+        out["papers"].append(res)
+        for e in res["parents"]:
+            pair, st = (e["src"], res["id"]), e["status"]
+            k = idx.get(pair)
+            if st == "removed":
+                change(k, "remove", pair[0], pair[1], e["grade"], was=e["grade"], link_id=e["link_id"], why="rule")
+            elif st == "added":                # an item's pair, or a remembered one the rule chooses now
+                change(k, "add", pair[0], pair[1], e["grade"], **({} if dry_run else {"link_id": e["link_id"]}),
+                       **({"restored": True} if e.get("restored") else {}))
+            elif st == "suggested":
+                change(k, "suggest", pair[0], pair[1], e["grade"])
+            elif pair in new:
+                if st == "not selected":
+                    _skip(out, k, NOT_CHOSEN, *pair)
+                elif st == "blocked":
+                    _skip(out, k, e.get("reason") or "blocked", *pair)
+            elif pair in same and st == "kept":
+                out["unchanged"] += 1
+
+
 def relink(paper_id, user, links, dry_run=False) -> dict:
     """`papercast relink` for one paper already in the library (POST /api/cli/papers/<id>/links):
     the links its two-way candidate filter found and haiku graded again, applied as the agent
-    acting for `user`. Items as an upload's links, with grade e/s/w or "none" and `other` a
-    library paper_id. The rules:
-      - no link yet: added as apply_agent_links adds one (or, while links from uploads are
-        suggestions only, suggested): never against the time order or into a loop, never a pair
-        a person dismissed as a suggestion (in either setting), and never a pair a person
-        removed, either way round; "none" adds nothing;
-      - a link a person made or changed in any way (_person_links) is never touched;
+    acting for `user`. Items as an upload's links, with grade e/s/w or "none", `other` a library
+    paper_id, and `influential` (Semantic Scholar's flag, for the rule's ties). The rules:
+      - every pair's grade is remembered (link_candidates), linked or not;
+      - a link a person made or changed in any way (_person_links) is never touched, and a pair a
+        person removed (either way round) or dismissed as a suggestion is never linked;
       - a link the agent made: regraded when the grade differs, removed when it grades "none";
         neither while links from uploads are suggestions only (they wait for a person), and in
         a locked graph only for an admin;
-      - a removed link stays removed (a person brings it back by hand).
+      - then Leo's per-paper rule for this paper and every paper the items build on (over all
+        their parents in the library): the pairs it chooses that are not linked are added (as
+        apply_agent_links adds one, or suggested while links from uploads are suggestions only;
+        never against the time order or into a loop; a link the agent itself removed before is
+        restored), and the agent's links it does not choose are removed (under the same
+        conditions as a regrade). A pair it leaves out is remembered, not linked.
     Every change is one graph_log row, actor 'agent', user_id the caller: the map's History
     lists each and its Undo reverts it (a person's undo then makes it theirs, so a later relink
     leaves it). dry_run: the same decisions in a transaction that is rolled back.
     -> {"paper_id", "mode", "dry_run", "changes": [{"index", "op": "add" | "suggest" | "regrade" |
-    "remove", "src", "dst", "grade", "was"?, "link_id"?}], "skipped": [{"index", "src"?, "dst"?,
-    "reason"}], "unchanged", "log_ids"}"""
+    "remove", "src", "dst", "grade", "was"?, "why"?: none | rule, "link_id"?, "restored"?}],
+    "skipped": [{"index", "src"?, "dst"?, "reason"}], "unchanged", "papers": [{"id", "parents"}]
+    (see _settle), "log_ids"}"""
     ensure_schema()
     if not isinstance(links, list) or len(links) > RELINK_MAX:
         raise HTTPError(400, "bad_links", f"links is a list of at most {RELINK_MAX}")
     uid = user["id"]
-    admin = _is_admin(user)
     out = {"paper_id": paper_id, "mode": None, "dry_run": bool(dry_run), "changes": [], "skipped": [],
-           "unchanged": 0, "log_ids": []}
-    ids, sugg = [], None
+           "unchanged": 0, "papers": [], "log_ids": []}
+    ctx = None
     try:
         with db.transaction() as c:
             if _paper_row(c, paper_id) is None:
                 raise HTTPError(404, "no_such_paper", f"no paper {paper_id}")
-            mode = out["mode"] = _agent_mode(c)
-            sugg = [] if mode == "suggest" else None
-            adj = _adj(c)
-            person = _person_links(c)
-            w = _world()
+            ctx = _Ctx(c, uid)
+            out["mode"] = ctx.mode
             todo, seen = [], set()
-
-            def skip(k, reason, src=None, dst=None):
-                out["skipped"].append({"index": k, **({"src": src, "dst": dst} if src else {}), "reason": reason})
-
             for k, item in enumerate(links):
                 if not isinstance(item, dict) or not isinstance(item.get("other"), dict):
-                    skip(k, "not a link")
+                    _skip(out, k, "not a link")
                     continue
                 direction, grade = item.get("direction"), _relink_grade(item.get("grade"))
                 if direction not in ("builds_on", "built_on_by") or grade is None:
-                    skip(k, "bad direction or grade")
+                    _skip(out, k, "bad direction or grade")
                     continue
                 oid = item["other"].get("paper_id")
                 if not isinstance(oid, str) or _paper_row(c, oid) is None:
-                    skip(k, "unknown paper")
+                    _skip(out, k, "unknown paper")
                     continue
                 if oid == paper_id:
-                    skip(k, "self")
+                    _skip(out, k, "self")
                     continue
                 src, dst = (oid, paper_id) if direction == "builds_on" else (paper_id, oid)
                 if (src, dst) in seen:
-                    skip(k, "twice", src, dst)
+                    _skip(out, k, "twice", src, dst)
                     continue
                 seen.add((src, dst))
-                todo.append((k, src, dst, grade, c.execute("SELECT * FROM links WHERE src = ? AND dst = ?",
-                                                           (src, dst)).fetchone()))
-            # the links there are first (a removal may clear the way for a new link), then new ones
-            for k, src, dst, grade, row in [t for t in todo if t[4] is not None]:
-                if row["state"] == "removed":
-                    skip(k, "removed by a person" if row["id"] in person else "removed", src, dst)
-                    continue
-                if row["id"] in person:
-                    skip(k, "a person's link", src, dst)
-                    continue
-                if grade == row["grade"]:
-                    out["unchanged"] += 1
-                    continue
-                if sugg is not None:
-                    skip(k, "suggest only", src, dst)
-                    continue
-                if not admin:
-                    try:
-                        _check_links_edit(w, user, src, dst)
-                    except HTTPError:
-                        skip(k, "locked", src, dst)
-                        continue
-                before = _link_snap(row)
-                if grade == "none":
-                    c.execute("UPDATE links SET state = 'removed', updated_at = ? WHERE id = ?", (db.now(), row["id"]))
-                    op, what = "link.remove", "remove"
-                    if dst in adj.get(src, []):
-                        adj[src].remove(dst)
-                else:
-                    c.execute("UPDATE links SET grade = ?, updated_at = ? WHERE id = ?", (grade, db.now(), row["id"]))
-                    op, what = "link.grade", "regrade"
-                after = _link_snap(_link_row(c, row["id"]))
-                ids.append(_log(c, uid, "agent", op, row["id"], before, after))
-                out["changes"].append({"index": k, "op": what, "src": src, "dst": dst, "grade": grade,
-                                       "was": row["grade"], "link_id": row["id"]})
-            for k, src, dst, grade, _ in [t for t in todo if t[4] is None]:
-                if grade == "none":
-                    out["unchanged"] += 1
-                    continue
-                back = c.execute("SELECT * FROM links WHERE src = ? AND dst = ?", (dst, src)).fetchone()
-                if back is not None and back["state"] == "removed" and back["id"] in person:
-                    skip(k, "removed by a person (the other way)", src, dst)
-                    continue
-                old = c.execute("SELECT state FROM link_suggestions WHERE src = ? AND dst = ?", (src, dst)).fetchone()
-                if old is not None and old[0] == "dismissed":        # a person's no, whatever the setting now
-                    skip(k, "dismissed by a person", src, dst)
-                    continue
-                n0 = len(sugg or [])
-                outcome, lid = _agent_add(c, adj, src, dst, grade, uid, sugg)
-                if lid is not None:
-                    ids.append(lid)
-                    link_id = int(c.execute("SELECT target FROM graph_log WHERE id = ?", (lid,)).fetchone()[0])
-                    out["changes"].append({"index": k, "op": "add", "src": src, "dst": dst, "grade": grade,
-                                           **({} if dry_run else {"link_id": link_id})})
-                elif sugg is not None and len(sugg) > n0:
-                    out["changes"].append({"index": k, "op": "suggest", "src": src, "dst": dst, "grade": grade})
-                else:
-                    skip(k, outcome, src, dst)
+                todo.append((k, src, dst, grade, _influential(item.get("influential")), item.get("source")))
+            _relink_apply(ctx, todo, out, [paper_id], dry_run)
             if dry_run:
                 raise _DryRun
-            _bump_links(c, ids, uid, "agent")
+            _bump_links(c, ctx.ids, uid, "agent")
     except _DryRun:
         return out
-    out["log_ids"] = ids
-    _after(ids)
-    _after_suggestions(sugg)
+    out["log_ids"] = ctx.ids
+    _after(ctx.ids)
+    _after_suggestions(ctx.sugg)
+    return out
+
+
+def _counts(ctx):
+    """Active links now: in the library, and among each graph's members. -> (n, {graph id: n})"""
+    pairs = ctx.c.execute("SELECT src, dst FROM links WHERE state = 'active'").fetchall()
+    per = {}
+    for gid in ctx.w.graphs:
+        m = ctx.w.members.get(gid, set())
+        per[gid] = sum(1 for s, d in pairs if s in m and d in m)
+    return len(pairs), per
+
+
+def restructure(user, links, dry_run=False) -> dict:
+    """`papercast relink --restructure` (POST /api/cli/relink/restructure): Leo's per-paper rule
+    applied to the whole map at once, in one transaction. `links`: every pair the relink graded
+    ([{"src", "dst", "grade": e|s|w|none, "influential"?, "source"?}]), taken as a relink's (each
+    remembered, the agent's own links regraded or removed at none); then every paper built on
+    (every paper with a link into it or a graded pair: all its parents in the library, whatever
+    graph shows them), parents before children, gets its parents as the rule chooses them from
+    the agent's graded pairs and the links there: the ones missing added, the agent's links it
+    does not choose removed; a person's links stay and count (relink's rules). One log row per
+    change, the agent acting for `user`. dry_run: the same in a transaction that is rolled back,
+    so its answer is exactly what the real one does.
+    -> relink's answer (without paper_id) plus "totals": {"before", "after"} (active links in
+    the library) and "graphs": [{"id", "name", "n", "before", "after"}] (links among each graph's
+    members)."""
+    ensure_schema()
+    if not isinstance(links, list) or len(links) > RESTRUCTURE_MAX:
+        raise HTTPError(400, "bad_links", f"links is a list of at most {RESTRUCTURE_MAX}")
+    uid = user["id"]
+    out = {"mode": None, "dry_run": bool(dry_run), "changes": [], "skipped": [], "unchanged": 0, "papers": [],
+           "totals": {}, "graphs": [], "log_ids": []}
+    ctx = None
+    try:
+        with db.transaction() as c:
+            ctx = _Ctx(c, uid)
+            out["mode"] = ctx.mode
+            before = _counts(ctx)
+            known = set(ctx.w.papers)
+            todo, seen = [], set()
+            for k, item in enumerate(links):
+                if not isinstance(item, dict):
+                    _skip(out, k, "not a link")
+                    continue
+                src, dst, grade = item.get("src"), item.get("dst"), _relink_grade(item.get("grade"))
+                if not isinstance(src, str) or not isinstance(dst, str) or grade is None:
+                    _skip(out, k, "bad pair or grade")
+                    continue
+                if src not in known or dst not in known:
+                    _skip(out, k, "unknown paper")
+                    continue
+                if src == dst:
+                    _skip(out, k, "self")
+                    continue
+                if (src, dst) in seen:
+                    _skip(out, k, "twice", src, dst)
+                    continue
+                seen.add((src, dst))
+                todo.append((k, src, dst, grade, _influential(item.get("influential")), item.get("source")))
+            children = {r[0] for r in c.execute("SELECT DISTINCT dst FROM links WHERE state = 'active'")}
+            children |= {r[0] for r in c.execute("SELECT DISTINCT dst FROM link_candidates WHERE grade IN ('e', 's', 'w')")}
+            _relink_apply(ctx, todo, out, children, dry_run)
+            after = _counts(ctx)
+            out["totals"] = {"before": before[0], "after": after[0]}
+            out["graphs"] = [{"id": gid, "name": g["name"], "n": len(ctx.w.members.get(gid, ())),
+                              "before": before[1][gid], "after": after[1][gid]} for gid, g in ctx.w.graphs.items()]
+            if dry_run:
+                raise _DryRun
+            _bump_links(c, ctx.ids, uid, "agent")
+    except _DryRun:
+        return out
+    out["log_ids"] = ctx.ids
+    _after(ctx.ids)
+    _after_suggestions(ctx.sugg)
     return out
 
 

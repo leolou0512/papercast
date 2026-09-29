@@ -17,8 +17,17 @@ links. For every paper on the map (or the ones named):
    call), a few calls at a time. Every pair's grade is kept (pairs.json), so a pair is graded
    once and a second run asks nothing and changes nothing;
 4. per paper built on, POST /api/cli/papers/<id>/links with the grades (e/s/w, and "none" for a
-   link the agent made that no longer holds): the hub adds, regrades or removes as its rules
-   say, or with --dry-run only says what it would do.
+   link the agent made that no longer holds) and Semantic Scholar's isInfluential: the hub
+   regrades or removes the agent's own links, then chooses the paper's parents by Leo's
+   per-paper rule (every essential one, strong ones until it has 5, weak ones only until it has
+   4; a person's links stay and count): the ones it chooses are linked, the agent's links it
+   does not choose removed. Every paper built on that has a pair or an agent link is sent, with
+   nothing to grade too, so the rule is applied to each. With --dry-run it only says what it
+   would do.
+
+--restructure: steps 1-3 as above, then every graded pair in one request
+(POST /api/cli/relink/restructure): the hub applies the rule to the whole map in one
+transaction, parents before children, so the dry run says exactly what the real run does.
 
 Semantic Scholar: every answer cached (relink/s2), requests paced S2_INTERVAL_S apart whichever
 thread asks, 429 and 5xx retried with backoff (links.retrying). Everything is kept under
@@ -49,6 +58,7 @@ S2_INTERVAL_S = 1.1             # between two Semantic Scholar requests, over al
 POST_MAX = 1000                 # links in one request (the hub takes 2000)
 TO_HUB = {"essential": "e", "strong": "s", "weak": "w", "none": "none"}
 WORD = {"e": "essential", "s": "strong", "w": "weak", "none": "none"}
+RANK_OF = {"e": 0, "s": 1, "w": 2}
 _DEFAULT = object()
 
 
@@ -143,11 +153,15 @@ def source(e: dict) -> str:
 
 
 def run(api, *, ids=None, dry_run: bool = False, parallel: int = PARALLEL, fetch=_DEFAULT, grade=None,
-        root: Path | None = None, log=None, refresh: bool = False) -> dict:
+        root: Path | None = None, log=None, refresh: bool = False, restructure: bool = False) -> dict:
     """One relink over the library (or the papers `ids`). `api`: get(path, params) and
     post(path, body), as api.Api. `fetch`: Semantic Scholar (None: without it; default: the
     network, paced and retried). `grade`: links' grade(prompt) (default: claude haiku). `log`:
-    progress lines. -> the result (see report())."""
+    progress lines. `restructure`: every graded pair to the hub in one request, which applies
+    Leo's per-paper rule to the whole map (the whole library only). -> the result (see report()
+    and restructure_report())."""
+    if restructure and ids:
+        raise PapercastError("--restructure applies the rule to the whole map: name no papers")
     root = Path(root) if root is not None else root_dir()
     config.private_dir(root)
     log = log or (lambda msg: None)
@@ -173,7 +187,7 @@ def run(api, *, ids=None, dry_run: bool = False, parallel: int = PARALLEL, fetch
     else:
         todo = [p["id"] for p in papers]
     mode = st.get("agent_links") or "auto"
-    res = {"server": where, "at": util.now_iso(), "dry_run": bool(dry_run), "mode": mode,
+    res = {"server": where, "at": util.now_iso(), "dry_run": bool(dry_run), "mode": mode, "restructure": bool(restructure),
            "library": len(papers), "papers": len(todo), "log_max": st.get("log_max"),
            "changes": [], "skipped": [], "held": [], "errors": [], "limit": None, "info": {}, "log_ids": []}
 
@@ -250,12 +264,17 @@ def run(api, *, ids=None, dry_run: bool = False, parallel: int = PARALLEL, fetch
     # 3. left out before grading: a person's decision, or linked the other way
     links_by = {(l["src"], l["dst"]): l for l in st.get("links") or [] if isinstance(l, dict)}
     sugg_by = {(s["src"], s["dst"]): s for s in st.get("suggestions") or [] if isinstance(s, dict)}
+    kept_by = {(k["src"], k["dst"]): k for k in st.get("candidates") or [] if isinstance(k, dict)}
 
     def held(src, dst):
         row, back = links_by.get((src, dst)), links_by.get((dst, src))
         if row is not None:
             if row["state"] == "removed":
-                return "removed by a person" if row.get("person") else "removed"
+                if row.get("person"):
+                    return "removed by a person"
+                if (kept_by.get((src, dst)) or {}).get("grade") in ("e", "s", "w"):
+                    return "left out by the per-paper rule (the hub keeps its grade)"
+                return "removed"
             if row.get("person"):
                 return "a person's link"
             return None
@@ -337,27 +356,65 @@ def run(api, *, ids=None, dry_run: bool = False, parallel: int = PARALLEL, fetch
             continue
         by_child.setdefault(e["dst"], []).append(dict(e, grade=g))
     res["ungraded"] = ungraded
-    for n, (child, es) in enumerate(sorted(by_child.items(), key=lambda kv: okey(kv[0])), 1):
-        for i in range(0, len(es), POST_MAX):
-            part = es[i:i + POST_MAX]
-            body = {"links": [{"other": {"paper_id": e["src"]}, "direction": "builds_on",
-                               "grade": TO_HUB[e["grade"]], "source": source(e)} for e in part],
-                    "dry_run": bool(dry_run)}
-            try:
-                r = api.post(f"/api/cli/papers/{urllib.parse.quote(child)}/links", body)
-            except (ApiError, PapercastError) as ex:
-                res["errors"].append({"paper_id": child, "what": "links", "error": str(ex)})
-                continue
-            r = r if isinstance(r, dict) else {}
-            for ch in r.get("changes") or []:
-                e = part[ch["index"]] if isinstance(ch.get("index"), int) and ch["index"] < len(part) else {}
-                res["changes"].append(dict(ch, evidence=evidence(e) if e else [], found_by=e.get("found_by", [])))
-            for sk in r.get("skipped") or []:
-                e = part[sk["index"]] if isinstance(sk.get("index"), int) and sk["index"] < len(part) else None
-                res["skipped"].append(dict(_brief(e), reason=sk.get("reason")) if e else sk)
-            res["log_ids"] += list(r.get("log_ids") or [])
-        if n % 10 == 0 or n == len(by_child):
-            log(f"{'asked' if dry_run else 'sent'} the hub: {n} of {len(by_child)} papers")
+
+    def ev(ch, part):
+        """The pair's evidence: from the item sent (its index), else from the pairs found."""
+        k = ch.get("index")
+        e = part[k] if isinstance(k, int) and 0 <= k < len(part) else pairs.get((ch.get("src"), ch.get("dst")))
+        return {"evidence": evidence(e), "found_by": e.get("found_by", [])} if e else {"evidence": [], "found_by": []}
+
+    def item(e):
+        return {"grade": TO_HUB[e["grade"]], "influential": bool(e.get("influential")), "source": source(e)}
+
+    if restructure:
+        part = [e for _, es in sorted(by_child.items(), key=lambda kv: okey(kv[0])) for e in es]
+        body = {"links": [dict(item(e), src=e["src"], dst=e["dst"]) for e in part], "dry_run": bool(dry_run)}
+        log(f"{'asking' if dry_run else 'sending'} the hub to restructure the map ({len(part)} graded pairs)")
+        try:
+            r = api.post("/api/cli/relink/restructure", body, retries=0, timeout=900)
+        except NotFound:
+            raise PapercastError(f"{where} has no restructure yet (POST /api/cli/relink/restructure): "
+                                 "the hub needs its update first")
+        except (ApiError, PapercastError) as ex:
+            res["errors"].append({"paper_id": None, "what": "restructure", "error": str(ex)})
+            r = {}
+        r = r if isinstance(r, dict) else {}
+        for ch in r.get("changes") or []:
+            res["changes"].append(dict(ch, **ev(ch, part)))
+        for sk in r.get("skipped") or []:
+            e = part[sk["index"]] if isinstance(sk.get("index"), int) and 0 <= sk["index"] < len(part) else None
+            res["skipped"].append(dict(_brief(e), reason=sk.get("reason")) if e else sk)
+        res["log_ids"] += list(r.get("log_ids") or [])
+        res["sent"] = len(part)
+        for k in ("papers", "totals", "graphs", "unchanged"):
+            res[k] = r.get(k)
+    else:
+        # every paper built on that has a pair (sent or held back) or an agent link: the hub
+        # applies the rule to it, also when there is nothing to send
+        for e in pairs.values():
+            by_child.setdefault(e["dst"], [])
+        for (s, d), l in links_by.items():
+            if l.get("state") == "active" and not l.get("person") and d in todo and d in by_id:
+                by_child.setdefault(d, [])
+        for n, (child, es) in enumerate(sorted(by_child.items(), key=lambda kv: okey(kv[0])), 1):
+            for i in range(0, max(1, len(es)), POST_MAX):
+                part = es[i:i + POST_MAX]
+                body = {"links": [dict(item(e), other={"paper_id": e["src"]}, direction="builds_on") for e in part],
+                        "dry_run": bool(dry_run)}
+                try:
+                    r = api.post(f"/api/cli/papers/{urllib.parse.quote(child)}/links", body)
+                except (ApiError, PapercastError) as ex:
+                    res["errors"].append({"paper_id": child, "what": "links", "error": str(ex)})
+                    continue
+                r = r if isinstance(r, dict) else {}
+                for ch in r.get("changes") or []:
+                    res["changes"].append(dict(ch, **ev(ch, part)))
+                for sk in r.get("skipped") or []:
+                    e = part[sk["index"]] if isinstance(sk.get("index"), int) and sk["index"] < len(part) else None
+                    res["skipped"].append(dict(_brief(e), reason=sk.get("reason")) if e else sk)
+                res["log_ids"] += list(r.get("log_ids") or [])
+            if n % 10 == 0 or n == len(by_child):
+                log(f"{'asked' if dry_run else 'sent'} the hub: {n} of {len(by_child)} papers")
     res["counts"] = dict(Counter(c["op"] for c in res["changes"]))
     # agent links no candidate supports now: left as they are (only a graded "none" removes one)
     cand = set(pairs)
@@ -365,11 +422,21 @@ def run(api, *, ids=None, dry_run: bool = False, parallel: int = PARALLEL, fetch
         1 for (s, d), l in links_by.items() if l["state"] == "active" and not l.get("person")
         and (s, d) not in cand and (s in todo or d in todo) and s in by_id and d in by_id)
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    run_file = root / "runs" / f"{stamp}-{'dry-run' if dry_run else 'applied'}.json"
+    run_file = root / "runs" / f"{stamp}-{'restructure-' if restructure else ''}{'dry-run' if dry_run else 'applied'}.json"
     _write_json(run_file, res)
     res["run_file"] = str(run_file)
     res["titles"] = {pid: {"title": p.get("title"), "year": p.get("year")} for pid, p in by_id.items()}
     return res
+
+
+def _what(ch: dict) -> str:
+    grade = WORD.get(ch.get("grade"), ch.get("grade"))
+    was = WORD.get(ch.get("was"), ch.get("was"))
+    if ch["op"] == "regrade":
+        return f"{was} → {grade}"
+    if ch["op"] == "remove":
+        return f"{was} · not chosen by the per-paper rule" if ch.get("why") == "rule" else f"was {was}, now graded none"
+    return grade + (" · restored (the agent had removed it)" if ch.get("restored") else "")
 
 
 def _brief(e: dict | None) -> dict:
@@ -393,6 +460,7 @@ def report(res: dict) -> str:
     remove with their evidence; then what was left alone and why."""
     dry = res["dry_run"]
     c = res.get("counts", {})
+    rule = sum(1 for ch in res["changes"] if ch.get("op") == "remove" and ch.get("why") == "rule")
     verb = {"add": "would add" if dry else "added", "suggest": "would suggest" if dry else "suggested",
             "regrade": "would regrade" if dry else "regraded", "remove": "would remove" if dry else "removed"}
     out = [f"# papercast relink: {'dry run (nothing was changed)' if dry else 'applied'}", "",
@@ -408,7 +476,8 @@ def report(res: dict) -> str:
             + (f", {g.get('calls_failed')} calls failed" if g.get("calls_failed") else "")
             + f"; {g.get('before', 0)} graded in an earlier run.",
             f"- Changes: {', '.join(f'{verb[k]} {c[k]}' for k in ('add', 'suggest', 'regrade', 'remove') if c.get(k)) or 'none'}"
-            f"; graded none and not linked: {res.get('graded_none', 0)}; refused by the hub: {len(res['skipped'])}.",
+            + (f" ({rule} of the removals: not chosen by the per-paper rule)" if rule else "")
+            + f"; graded none and not linked: {res.get('graded_none', 0)}; left alone by the hub: {len(res['skipped'])}.",
             f"- Agent links no candidate supports now (left as they are): {res.get('unsupported_agent_links', 0)}."]
     if res.get("ungraded"):
         out.append(f"- Not graded yet: {res['ungraded']} pairs (run papercast relink again).")
@@ -429,11 +498,8 @@ def report(res: dict) -> str:
         out.append(f"## {_title(res, child)} ({_year(res, child)}, {child})")
         out.append("")
         for ch in sorted(by_child[child], key=lambda x: (x["op"], _title(res, x["src"]))):
-            grade = WORD.get(ch.get("grade"), ch.get("grade"))
-            what = (f"{WORD.get(ch.get('was'), ch.get('was'))} → {grade}" if ch["op"] == "regrade" else
-                    f"was {WORD.get(ch.get('was'), ch.get('was'))}, now graded none" if ch["op"] == "remove" else grade)
             out.append(f"- {mark.get(ch['op'], ch['op'])}: builds on “{_title(res, ch['src'])}” ({_year(res, ch['src'])})"
-                       f" · {what} · evidence {', '.join(ch.get('evidence') or ['?'])}")
+                       f" · {_what(ch)} · evidence {', '.join(ch.get('evidence') or ['?'])}")
         out.append("")
     left = res["held"] + res["skipped"]
     if left:
@@ -446,6 +512,13 @@ def report(res: dict) -> str:
                 out.append(f"  - {x.get('reason')}: “{_title(res, x['dst'], 60)}” on “{_title(res, x['src'], 60)}”"
                            f" · evidence {', '.join(x.get('evidence') or ['?'])}")
         out.append("")
+    out += _coverage(res)
+    out.append(f"(Run record: {res.get('run_file')})")
+    return "\n".join(out) + "\n"
+
+
+def _coverage(res: dict) -> list:
+    out = []
     no_s2 = [p for p, i in res["info"].items() if not i.get("s2_id")]
     no_text = [p for p, i in res["info"].items() if not i.get("text")]
     s2_err = [(p, i["s2_error"]) for p, i in res["info"].items() if i.get("s2_error")]
@@ -462,5 +535,102 @@ def report(res: dict) -> str:
         for e in res["errors"]:
             out.append(f"- Error ({e.get('what')}, {e.get('paper_id')}): {e.get('error')}")
         out.append("")
+    return out
+
+
+RULE_TEXT = ("Leo's per-paper rule, for each paper over all the papers it builds on in the library (whatever "
+             "graph shows them, not graph by graph): every essential parent, no limit; strong ones until it has 5 "
+             "parents; weak ones only until it has 4, and a weak one only where no other drawn path already joins "
+             "the two papers (its slot then goes to the next weak one). Ties: Semantic Scholar's isInfluential "
+             "first, then the most recent parent. A person's links always stay and count toward the 5 and the 4. "
+             "The agent's links the rule does not choose are removed, the graded pairs it chooses that are "
+             "missing are added.")
+
+
+def restructure_report(res: dict) -> str:
+    """papercast relink --restructure as Markdown: the totals (links before and after, per graph),
+    then per paper built on, its parents: kept, added, removed and regraded with their grades, and
+    the graded pairs the rule left out."""
+    dry = res["dry_run"]
+    ch_by: dict[str, list] = {}
+    for ch in res["changes"]:
+        ch_by.setdefault(ch["dst"], []).append(ch)
+    c = Counter(ch["op"] for ch in res["changes"])
+    rule = sum(1 for ch in res["changes"] if ch["op"] == "remove" and ch.get("why") == "rule")
+    restored = sum(1 for ch in res["changes"] if ch["op"] == "add" and ch.get("restored"))
+    t = res.get("totals") or {}
+    papers = [p for p in res.get("papers") or [] if isinstance(p, dict)]
+    kept = Counter(e["by"] for p in papers for e in p.get("parents", []) if e.get("status") == "kept")
+    would = "would be " if dry else ""
+    out = [f"# papercast relink --restructure: {'dry run (nothing was changed)' if dry else 'applied'}", "",
+           f"{res['server']} · {res['at']} · links from uploads: "
+           f"{'suggestions only' if res['mode'] == 'suggest' else 'automatic'}", "", RULE_TEXT, "",
+           f"- Links in the library: {t.get('before', '?')} before, {t.get('after', '?')} after"
+           + (" (if applied)" if dry else "") + ".",
+           f"- {'Would add' if dry else 'Added'} {c.get('add', 0)}" + (f" ({restored} restored)" if restored else "")
+           + f"; {'would remove' if dry else 'removed'} {c.get('remove', 0)} ({rule} not chosen by the rule, "
+           f"{c.get('remove', 0) - rule} graded none); {'would regrade' if dry else 'regraded'} {c.get('regrade', 0)}"
+           + (f"; {'would suggest' if dry else 'suggested'} {c['suggest']}" if c.get("suggest") else "") + ".",
+           f"- Links that stay: {kept.get('person', 0)} a person's (never touched), {kept.get('agent', 0)} the agent's.",
+           f"- Graded pairs sent: {res.get('sent', 0)}; left out before grading (a person's decision, linked the "
+           f"other way, removed): {len(res['held'])}; not graded yet: {res.get('ungraded', 0)}.",
+           f"- Papers built on: {sum(1 for p in papers if p.get('parents'))}."]
+    if res.get("limit"):
+        out.append("- Claude's usage limit stopped the grading: the pairs not graded yet were not sent.")
+    if res["errors"]:
+        out.append(f"- Errors: {len(res['errors'])} (listed at the end).")
+    graphs = res.get("graphs") or []
+    if graphs:
+        out += ["", "| Graph | Papers | Links before | Links after |", "|---|---:|---:|---:|"]
+        for g in graphs:
+            out.append(f"| {g.get('name')} | {g.get('n')} | {g.get('before')} | {g.get('after')} |")
+    out += ["", "Grades: essential, strong, weak. “S2 influential”: Semantic Scholar flags the citation "
+            "isInfluential (the rule's first tie-break).", ""]
+    order = sorted(papers, key=lambda p: (_year(res, p["id"]), _title(res, p["id"])))
+    for p in order:
+        pid, ps = p["id"], p.get("parents") or []
+        changes = ch_by.get(pid, [])
+        by = {k: [e for e in ps if e.get("status") == k] for k in ("kept", "added", "suggested", "removed",
+                                                                    "not selected", "blocked")}
+        none_rm = [x for x in changes if x["op"] == "remove" and x.get("why") != "rule"]
+        regr = {x["src"]: x for x in changes if x["op"] == "regrade"}
+        if not (by["kept"] or by["added"] or by["suggested"] or by["removed"] or none_rm):
+            continue
+        n_after = len(by["kept"]) + len(by["added"])
+        out.append(f"## {_title(res, pid)} ({_year(res, pid)}, {pid})")
+        out.append("")
+        out.append(f"{n_after} parent{'' if n_after == 1 else 's'} after: {len(by['kept'])} kept, {len(by['added'])} added"
+                   f"; removed {len(by['removed']) + len(none_rm)}.")
+        out.append("")
+
+        def name(src):
+            return f"“{_title(res, src, 80)}” ({_year(res, src)})"
+
+        def grade(e):
+            return WORD.get(e.get("grade"), e.get("grade")) + (" · S2 influential" if e.get("influential") else "")
+        for e in sorted(by["kept"], key=lambda e: (RANK_OF.get(e.get("grade"), 3), _title(res, e["src"]))):
+            rg = regr.get(e["src"])
+            out.append(f"- kept: {name(e['src'])} · {grade(e)}" + (" · a person's link" if e.get("by") == "person" else "")
+                       + (f" · regraded from {WORD.get(rg.get('was'), rg.get('was'))}" if rg else ""))
+        for e in sorted(by["added"] + by["suggested"], key=lambda e: (RANK_OF.get(e.get("grade"), 3), _title(res, e["src"]))):
+            out.append(f"- + {'add' if e['status'] == 'added' else 'suggest'}: {name(e['src'])} · {grade(e)}"
+                       + (" · restored (the agent had removed it)" if e.get("restored") else ""))
+        for e in sorted(by["removed"], key=lambda e: (RANK_OF.get(e.get("grade"), 3), _title(res, e["src"]))):
+            out.append(f"- − remove: {name(e['src'])} · {grade(e)} · not chosen by the rule")
+        for x in none_rm:
+            out.append(f"- − remove: {name(x['src'])} · was {WORD.get(x.get('was'), x.get('was'))}, graded none now")
+        if by["not selected"]:
+            out.append("- not chosen (not linked): " + "; ".join(
+                f"{name(e['src'])} {grade(e)}" for e in sorted(by["not selected"], key=lambda e: (RANK_OF.get(e.get("grade"), 3), _title(res, e["src"])))))
+        if by["blocked"]:
+            out.append("- not allowed: " + "; ".join(f"{name(e['src'])} {grade(e)} ({e.get('reason')})" for e in by["blocked"]))
+        out.append("")
+    left = res["held"] + res["skipped"]
+    if left:
+        out += ["## Left alone", ""]
+        for why, n in Counter(x.get("reason") for x in left).most_common():
+            out.append(f"- {why}: {n}")
+        out.append("")
+    out += _coverage(res)
     out.append(f"(Run record: {res.get('run_file')})")
     return "\n".join(out) + "\n"

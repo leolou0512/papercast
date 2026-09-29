@@ -676,9 +676,24 @@ def relink_state(req):
 
 def relink_links(req, pid):
     """POST /api/cli/papers/<id>/links {"links": [{"other": {"paper_id"}, "direction", "grade":
-    e|s|w|none, "source"}], "dry_run": bool}: graph.relink, as the agent acting for the caller."""
+    e|s|w|none, "influential", "source"}], "dry_run": bool}: graph.relink, as the agent acting for
+    the caller (Leo's per-paper rule re-applied to this paper and those the links build on)."""
     b = req.json()
     req.send_json(200, graph.relink(pid, req.user, b.get("links"), dry_run=b.get("dry_run") is True))
+
+
+def relink_restructure(req):
+    """POST /api/cli/relink/restructure {"links": [{"src", "dst", "grade": e|s|w|none, "influential",
+    "source"}], "dry_run": bool}: graph.restructure, Leo's per-paper rule over the whole map in one
+    transaction, as the agent acting for the caller. Every graded pair of the library fits in the
+    body (a larger limit than other JSON bodies)."""
+    try:
+        b = json.loads(req.body(graph.RESTRUCTURE_BODY_MAX) or b"{}")
+    except ValueError:
+        raise HTTPError(400, "bad_json", "the body is not JSON")
+    if not isinstance(b, dict):
+        raise HTTPError(400, "bad_json", "the body must be a JSON object")
+    req.send_json(200, graph.restructure(req.user, b.get("links"), dry_run=b.get("dry_run") is True))
 
 
 # ---- routes: lookup and claims
@@ -980,6 +995,7 @@ ROUTES = [
     ("GET", r"^/api/cli/mentions$", mentions, "cli"),
     ("GET", r"^/api/cli/relink$", relink_state, "cli-contributor"),
     ("POST", rf"^/api/cli/papers/{_ID}/links$", relink_links, "cli-contributor"),
+    ("POST", r"^/api/cli/relink/restructure$", relink_restructure, "cli-contributor"),
     ("POST", r"^/api/cli/claims$", post_claim, "cli-contributor"),
     ("PUT", rf"^/api/cli/claims/{_ID}$", put_claim, "cli-contributor"),
     ("DELETE", rf"^/api/cli/claims/{_ID}$", delete_claim, "cli-contributor"),

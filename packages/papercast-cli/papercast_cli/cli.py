@@ -7,7 +7,8 @@
   papercast prefs [--maths ...]       your listening preferences (stored on the hub), and
                   [--slack on|off]    whether add's Slack question defaults to yes
   papercast cancel|retry <job>        stop a job, or run it again
-  papercast relink [--dry-run]        find the links between the library's papers again
+  papercast relink [--dry-run] [--restructure]
+                                      find the links between the library's papers again
   papercast whoami | logout | worker
 """
 from __future__ import annotations
@@ -461,11 +462,12 @@ def cmd_relink(args) -> int:
                              "viewer. Ask an admin of the group.")
     jobs.check_claude(warn=_err)
     res = relink.run(api, ids=args.papers or None, dry_run=args.dry_run, parallel=args.parallel,
-                     refresh=args.refresh, log=lambda m: print(m, file=sys.stderr, flush=True))
+                     refresh=args.refresh, restructure=args.restructure,
+                     log=lambda m: print(m, file=sys.stderr, flush=True))
     if args.json:
         print(json.dumps(res, indent=1, ensure_ascii=False))
     else:
-        print(relink.report(res), end="")
+        print((relink.restructure_report if args.restructure else relink.report)(res), end="")
     if res.get("limit"):
         at = res["limit"].get("resume_at")
         _err("Claude's usage limit stopped the grading" + (f" (resets about {util.local_hhmm(at)})" if at else "")
@@ -579,6 +581,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("papers", nargs="*", metavar="PAPER_ID", help="only these papers (default: every "
                                                                  "paper on the map)")
     s.add_argument("--dry-run", action="store_true", help="only say what would change")
+    s.add_argument("--restructure", action="store_true",
+                   help="apply the per-paper link rule (every essential parent, strong ones until 5, weak ones "
+                        "until 4) to the whole map at once: the agent's links it does not choose removed, the "
+                        "graded ones it chooses added; a person's links stay")
     s.add_argument("--parallel", type=int, default=3, metavar="N",
                    help="papers and grading calls at once (1 to 8; default 3)")
     s.add_argument("--refresh", action="store_true",

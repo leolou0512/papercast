@@ -189,6 +189,8 @@ def _link(out, i, link) -> None:
         out.append(f"{label}.grade: e, s or w")
     if link.get("source") not in SOURCES:
         out.append(f"{label}.source: s2, text or both")
+    if "influential" in link and not isinstance(link["influential"], bool):
+        out.append(f"{label}.influential: true or false (Semantic Scholar's isInfluential), or left out")
 
 
 def _announce(out, a) -> None:

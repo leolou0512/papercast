@@ -498,6 +498,7 @@ class Bundle(unittest.TestCase):
         self.bad(lambda m: m["links"][0].update(direction="cites"), "links[0].direction")
         self.bad(lambda m: m["links"][0].update(grade="strong"), "links[0].grade")
         self.bad(lambda m: m["links"][0].pop("source"), "links[0].source")
+        self.bad(lambda m: m["links"][0].update(influential="yes"), "links[0].influential: true or false")
         self.bad(lambda m: m.update(stats=[]), "stats: must be an object")
         self.bad(lambda m: m["stats"].update(words=-1), "stats.words")
         self.bad(lambda m: m["stats"].update(est_minutes="21"), "stats.est_minutes")

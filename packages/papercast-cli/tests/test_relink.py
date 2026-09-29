@@ -98,6 +98,10 @@ class FakeHub:
 
     def post(self, path, body, **kw):
         self.calls.append(("POST", path, body))
+        if path == "/api/cli/relink/restructure":             # (its rules are the hub's own tests')
+            n = sum(1 for l in self.links.values() if l["state"] == "active")
+            return {"changes": [], "skipped": [], "unchanged": len(body["links"]), "papers": [], "graphs": [],
+                    "totals": {"before": n, "after": n}, "log_ids": [], "dry_run": bool(body.get("dry_run")), "mode": self.mode}
         pid = re.match(r"^/api/cli/papers/([^/]+)/links$", path).group(1)
         changes, skipped, unchanged = [], [], 0
         snapshot = {k: dict(v) for k, v in self.links.items()}
@@ -294,6 +298,72 @@ class RelinkCase(unittest.TestCase):
             relink.run(Old(), grade=self.grader, root=self.root, fetch=None)
         self.assertIn("needs its update", str(cm.exception))
 
+    def test_every_paper_built_on_is_sent_with_isinfluential(self):
+        self.hub.link(A, C, "s", origin="human")               # C's pairs now all a person's: nothing to send for it
+        s2 = FakeS2()
+        s2.answers[f"/paper/S2{C}/references"]["data"][0]["isInfluential"] = True     # C cites A influentially
+        self.run_relink(fetch=s2)
+        posts = {c[1].split("/")[4]: c[2]["links"] for c in self.hub.calls if c[0] == "POST"}
+        self.assertEqual(posts[C], [])                         # sent anyway: the hub re-applies the rule to it
+        flags = {(l["other"]["paper_id"], child): l["influential"] for child, ls in posts.items() for l in ls}
+        self.assertEqual(set(flags.values()), {False})
+        s2 = FakeS2()
+        s2.answers[f"/paper/S2{B}/references"]["data"][0]["isInfluential"] = True     # B cites A influentially
+        self.hub.calls.clear()
+        self.run_relink(fetch=s2, refresh=True)
+        posts = {c[1].split("/")[4]: c[2]["links"] for c in self.hub.calls if c[0] == "POST"}
+        self.assertEqual([(l["other"]["paper_id"], l["influential"]) for l in posts[B]], [(A, True)])
+
+    def test_restructure_sends_every_graded_pair_in_one_request(self):
+        answer = {"changes": [{"index": None, "op": "remove", "src": C, "dst": E, "grade": "s", "was": "s", "why": "rule",
+                               "link_id": 5}],
+                  "skipped": [], "unchanged": 1, "log_ids": [],
+                  "papers": [{"id": E, "parents": [
+                      {"src": C, "grade": "s", "by": "agent", "influential": False, "status": "removed"},
+                      {"src": A, "grade": "w", "by": "agent", "influential": True, "status": "added"},
+                      {"src": D, "grade": "s", "by": "agent", "influential": False, "status": "not selected"}]},
+                             {"id": C, "parents": [{"src": B, "grade": "w", "by": "person", "influential": False,
+                                                    "status": "kept"}]}],
+                  "totals": {"before": 4, "after": 4}, "graphs": [{"id": "g1", "name": "Diffusion", "n": 5, "before": 4, "after": 4}]}
+        hub = self.hub
+        sent = []
+
+        def post(path, body, **kw):
+            hub.calls.append(("POST", path, body))
+            if path != "/api/cli/relink/restructure":
+                raise AssertionError(f"a restructure posts once, not {path}")
+            sent.append((body, kw))
+            return dict(answer, dry_run=body["dry_run"], mode="auto")
+        hub.post = post
+        res = self.run_relink(restructure=True, dry_run=True)
+        self.assertEqual(len(sent), 1)
+        body, kw = sent[0]
+        self.assertEqual((body["dry_run"], kw.get("retries")), (True, 0))
+        self.assertEqual(sorted((l["src"], l["dst"], l["grade"]) for l in body["links"]),
+                         sorted([(A, B, "s"), (A, C, "e"), (A, E, "w"), (B, D, "s"), (B, E, "none")]))
+        self.assertTrue(all(set(l) == {"src", "dst", "grade", "influential", "source"} for l in body["links"]))
+        self.assertEqual((res["totals"], res["changes"][0]["why"]), ({"before": 4, "after": 4}, "rule"))
+        text = relink.restructure_report(res)
+        self.assertIn("# papercast relink --restructure: dry run (nothing was changed)", text)
+        self.assertIn("- Links in the library: 4 before, 4 after (if applied).", text)
+        self.assertIn("| Diffusion | 5 | 4 | 4 |", text)
+        self.assertIn(f"## {TITLE[E]} (2024, {E})", text)
+        self.assertIn(f"- − remove: “{TITLE[C]}” (2023) · strong · not chosen by the rule", text)
+        self.assertIn(f"- + add: “{TITLE[A]}” (2020) · weak · S2 influential", text)
+        self.assertIn(f"- not chosen (not linked): “{TITLE[D]}” (2023) strong", text)
+        self.assertIn(f"- kept: “{TITLE[B]}” (2021) · weak · a person's link", text)
+        self.assertIn("not graph by graph", text)
+        with self.assertRaises(PapercastError) as cm:
+            self.run_relink(restructure=True, ids=[E])
+        self.assertIn("name no papers", str(cm.exception))
+
+        def old(path, body, **kw):
+            raise NotFound("no")
+        hub.post = old
+        with self.assertRaises(PapercastError) as cm:
+            self.run_relink(restructure=True)
+        self.assertIn("needs its update", str(cm.exception))
+
 
 class PacedTest(unittest.TestCase):
     def test_requests_are_spaced_whichever_thread_asks(self):
@@ -343,6 +413,10 @@ class CommandTest(unittest.TestCase):
                 self.assertEqual(cli.main(["relink", "--json"]), 0)
             self.assertEqual(json.loads(o2.getvalue())["counts"]["regrade"], 1)
             self.assertEqual(hub.links[(A, B)]["grade"], "s")
+            with redirect_stdout(io.StringIO()) as o4, redirect_stderr(io.StringIO()):
+                self.assertEqual(cli.main(["relink", "--restructure", "--dry-run"]), 0)
+            self.assertIn("# papercast relink --restructure: dry run (nothing was changed)", o4.getvalue())
+            self.assertIn("- Links in the library: 6 before, 6 after (if applied).", o4.getvalue())
             with redirect_stderr(io.StringIO()) as e3:
                 self.assertEqual(cli.main(["relink", "--parallel", "99"]), 1)
             self.assertIn("--parallel is 1 to 8", e3.getvalue())

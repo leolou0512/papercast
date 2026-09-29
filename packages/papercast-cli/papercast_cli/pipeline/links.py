@@ -521,7 +521,8 @@ def grade_all(cands: list[dict], this: dict, lib: Library, grade, cache_dir: str
         info[c["other"]] = {"title": p.get("title") or "", "year": p.get("year"), "claims": []}
     graded, stats = grade_batches(batches(cands, this_id), info, grade, cache_dir, progress)
     links = [{"other": {"paper_id": c["other"]}, "direction": c["direction"], "grade": SHORT[g],
-              "source": c["source"]} for (_, _, c), g in graded if g in SHORT]
+              "source": c["source"], "influential": bool(c.get("influential"))}   # the hub's rule breaks ties by it
+             for (_, _, c), g in graded if g in SHORT]
     return links, stats
 
 

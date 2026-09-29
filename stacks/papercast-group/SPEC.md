@@ -144,15 +144,24 @@ note)`, `base_prompt(version=None)`, `add_base_prompt(text, wording_json, by)`.
   text (paper.txt) names this paper, never the paper itself or a version of it (for links).
 - `GET /api/cli/relink[?since=<graph_log id>]` (cli-contributor) → `{"papers": [{...as library,
   "visible", "text", "claims"}], "links": [{"id","src","dst","grade","origin","state","person"}],
-  "suggestions", "agent_links": "auto"|"suggest", "graphs": [{"id","name","n","links",
+  "suggestions", "candidates": [{"src","dst","grade","influential"}], "rule": {"target_strong",
+  "target_weak"}, "agent_links": "auto"|"suggest", "graphs": [{"id","name","n","links",
   "suggestions","layout": {"rev","updated_at","current"}}], "log_max", "log_since"?}`: what
-  `papercast relink` works from (`person`: a person made or changed that link).
+  `papercast relink` works from (`person`: a person made or changed that link; `candidates`: the
+  agent's graded pairs, linked or not, that the per-paper rule of section 8 chooses from).
 - `POST /api/cli/papers/<id>/links` (cli-contributor) `{"links": [{"other": {"paper_id"},
-  "direction", "grade": "e"|"s"|"w"|"none", "source"}], "dry_run": bool}` → `{"changes": [{"op":
-  "add"|"suggest"|"regrade"|"remove", "src","dst","grade","was"?}], "skipped": [{"reason"}],
-  "unchanged", "log_ids"}`: a relink's links for a library paper, applied as the agent acting for
-  the caller (section 8's rules for an upload's links; also an agent's own link regraded, or
-  removed at "none"; a link a person made or changed never touched); a dry run keeps nothing.
+  "direction", "grade": "e"|"s"|"w"|"none", "influential", "source"}], "dry_run": bool}` →
+  `{"changes": [{"op": "add"|"suggest"|"regrade"|"remove", "src","dst","grade","was"?,
+  "why"?: "none"|"rule", "restored"?}], "skipped": [{"reason"}], "unchanged", "papers", "log_ids"}`:
+  a relink's links for a library paper, applied as the agent acting for the caller (section 8's
+  rules for an upload's links; also an agent's own link regraded, or removed at "none"; a link a
+  person made or changed never touched), then the per-paper rule for this paper and the papers
+  the links build on; a dry run keeps nothing.
+- `POST /api/cli/relink/restructure` (cli-contributor) `{"links": [{"src","dst","grade",
+  "influential","source"}], "dry_run": bool}` → as above plus `"totals": {"before","after"}` and
+  `"graphs": [{"id","name","n","before","after"}]`: every graded pair of the library at once, and
+  the per-paper rule applied to every paper in one transaction (parents first), so a dry run says
+  exactly what the real run does (`papercast relink --restructure`).
 - `GET /api/cli/lookup?arxiv_id=&doi=&sha256=&title=` → `{"paper": null | {"id","title",
   "episodes": [{"id","made_by":{"id","name"},"prefs_summary","state"}]}, "claim": null | {"by",
   "since"}}`.
@@ -180,7 +189,7 @@ tar.gz with `manifest.json` at the root plus the files it names:
            "explainer_html": "explainer.html", "claims": "claims.md"},
  "links": [{"other": {"paper_id": "p_..."} | {"arxiv_id": "..."} | {"doi": "..."} | {"title": "..."},
             "direction": "builds_on" | "built_on_by", "grade": "e" | "s" | "w",
-            "source": "s2" | "text" | "both"}],
+            "source": "s2" | "text" | "both", "influential": true | false (optional)}],
  "stats": {"words": 3100, "est_minutes": 21.0, "wall_s": 1400}}
 ```
 `paper_id` set = a new version of an existing paper; else `claim_id` set = a new paper.
@@ -216,6 +225,18 @@ Page CSP as Leo's (`PAGE_CSP` in stacks/papercast/web/app.py): no inline script 
 - **Links** are global: `src` = the earlier paper, `dst` = the paper built on it, `grade` e/s/w.
   `origin` agent|human. A link a person removed stays `removed`, and an agent never re-adds it; a
   link a person added is never removed by an agent.
+- **Leo's per-paper rule** ("try to have 4-5 links to other papers, or more if really justified";
+  `TARGET_STRONG = 5`, `TARGET_WEAK = 4`, as his lineage map's build.py): for each paper, over all
+  its parents in the library (whatever graph shows them, not graph by graph): every essential
+  parent; strong ones until it has 5; weak ones only until it has 4, and a weak one is dropped (its
+  slot refilled by the next) where another drawn path already joins the two papers. Ties: Semantic
+  Scholar's isInfluential first, then the most recent parent. A person's links (made or changed by
+  one) always stay and count. It is applied whenever the agent's links into a paper change (an
+  upload, a relink, a new paper arriving as a parent): the agent's links it does not choose are
+  removed (logged as the agent's), the graded pairs it chooses are linked (an agent's own earlier
+  removal restored). Every graded pair is kept (`link_candidates`), so one the rule left out is not
+  proposed again unless the choice changes. While links from uploads are suggestions only, the
+  agent's links stay and count, and only the pairs it chooses are suggested.
 - **Graphs** are named sets of papers: `rule_tags` (papers with any of these tags) plus
   `added` minus `removed`. Seed graphs from Leo's five topics (reinforcement learning, diffusion
   and generative models, materials and molecules, language models, robotics and agents) by tag.
@@ -355,10 +376,12 @@ voice in use; its owner or an admin). The page hears `voice` events (a person's 
   text names it (`GET /api/cli/mentions`), graded by `claude -p --model claude-haiku-4-5` with no tools;
   (7) bundle and `POST /api/cli/episodes`. Claude usage limit: detect as Leo's runner's
   `limits.py` does, pause until the reset time, resume.
-- `relink [PAPER_ID...] [--dry-run]`: the links between papers already in the library found
-  again with the same two-way filter (Semantic Scholar, the hub's text index both ways), each pair
-  graded once by haiku (cached), and sent to `POST /api/cli/papers/<id>/links`; `--dry-run`
-  prints what would change. A second run changes nothing.
+- `relink [PAPER_ID...] [--dry-run] [--restructure]`: the links between papers already in the
+  library found again with the same two-way filter (Semantic Scholar, the hub's text index both
+  ways), each pair graded once by haiku (cached), and sent to `POST /api/cli/papers/<id>/links`
+  (every paper built on, so the per-paper rule is applied to each); `--dry-run` prints what would
+  change. A second run changes nothing. `--restructure`: every graded pair in one request to
+  `POST /api/cli/relink/restructure`, the rule over the whole map at once.
 - Tests use a fake `claude` on PATH (a script that writes the expected files), never the real one.
 
 ## 12. Rules for every agent

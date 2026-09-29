@@ -867,6 +867,200 @@ class RelinkTest(unittest.TestCase):
         out = self.relink(b, [(a, "builds_on", "e")], who=self.leo)
         self.assertEqual(self.ops(out), {("regrade", a, b, "e")})
 
+    # -- Leo's per-paper rule on a relink, and the restructure of the whole map
+    def legacy(self, src, dst, grade="s"):
+        """An agent link as the live map has them from before the rule: straight into the database."""
+        at = db.now()
+        with db.transaction() as c:
+            return c.execute("INSERT INTO links(src, dst, grade, origin, state, created_by, created_at, updated_at) "
+                             "VALUES (?, ?, ?, 'agent', 'active', ?, ?, ?)", (src, dst, grade, self.ann["id"], at, at)).lastrowid
+
+    def active(self, dst):
+        return {r["src"]: r["grade"] for r in db.conn().execute(
+            "SELECT src, grade FROM links WHERE dst = ? AND state = 'active'", (dst,))}
+
+    def parents(self, n, tags=()):
+        return [self.paper(f"Parent paper number {i} about scores", 2010 + i, tags) for i in range(n)]
+
+    def restructure(self, items, who=None, dry_run=False, code=200):
+        """items: (src, dst, grade, influential)."""
+        body = {"links": [{"src": s, "dst": d, "grade": g, "influential": i, "source": "s2"} for s, d, g, i in items],
+                "dry_run": dry_run}
+        st, out = self.h.request("POST", "/api/cli/relink/restructure", body, user=who or self.leo)
+        self.assertEqual(st, code, out)
+        return out
+
+    def snap(self):
+        c = db.conn()
+        return ([dict(r) for r in c.execute("SELECT * FROM links ORDER BY id")], self.log_max(),
+                [dict(r) for r in c.execute("SELECT * FROM graph_rev ORDER BY graph_id")],
+                [dict(r) for r in c.execute("SELECT * FROM link_candidates ORDER BY src, dst")])
+
+    def test_relink_applies_the_rule_and_remembers_the_rest(self):
+        ps = self.parents(7)
+        child = self.paper("The child paper about scores", 2024)
+        out = self.relink(child, [(p, "builds_on", "s") for p in ps])
+        self.assertEqual(sorted(ch["src"] for ch in out["changes"] if ch["op"] == "add"), sorted(ps[2:]))
+        self.assertEqual(self.reasons(out), [graph.NOT_CHOSEN] * 2)
+        st, state = self.h.request("GET", "/api/cli/relink", user=self.leo)
+        self.assertEqual(len([k for k in state["candidates"] if k["dst"] == child]), 7)     # the relink sees them
+        self.assertEqual(state["rule"], {"target_strong": 5, "target_weak": 4})
+        # again: nothing (the two left out are remembered, not proposed as new)
+        m = self.log_max()
+        again = self.relink(child, [(p, "builds_on", "s") for p in ps])
+        self.assertEqual((again["changes"], again["unchanged"], self.log_max()), ([], 5, m))
+        # the choice changes (Semantic Scholar flags the oldest one isInfluential): it comes in, the oldest of the rest goes
+        items = [{"other": {"paper_id": p}, "direction": "builds_on", "grade": "s", "influential": p == ps[0]} for p in ps]
+        st, out = self.h.request("POST", f"/api/cli/papers/{child}/links", {"links": items}, user=self.leo)
+        self.assertEqual(sorted((ch["op"], ch["src"], ch.get("why")) for ch in out["changes"]),
+                         sorted([("add", ps[0], None), ("remove", ps[2], "rule")]))
+        rows = self.log_rows(m)
+        self.assertEqual(sorted((r["op"], r["actor"], r["user_id"]) for r in rows),
+                         [("link.add", "agent", self.leo["id"]), ("link.remove", "agent", self.leo["id"])])
+        # a person removes one the rule chose: the next relink (nothing new to send) fills its slot with a
+        # remembered one, the agent's own removal restored
+        self.assertEqual(self.browser("DELETE", f"/api/links/{self.row(ps[3], child)['id']}")[0], 200)
+        out = self.relink(child, [])
+        self.assertEqual([(ch["op"], ch["src"], ch.get("restored")) for ch in out["changes"]], [("add", ps[2], True)])
+        self.assertEqual((self.row(ps[3], child)["state"], len(self.active(child))), ("removed", 5))
+        st, log = self.browser("GET", "/api/graph-log", who=self.leo)
+        self.assertTrue(log["log"][0]["summary"].startswith("the agent for Leo restored Parent paper number"), log["log"][0])
+
+    def test_relink_trims_a_paper_from_before_the_rule_never_a_persons_link(self):
+        ps = self.parents(8)
+        child = self.paper("The child paper about scores", 2024)
+        st, js = self.browser("POST", "/api/links", {"src": ps[0], "dst": child, "grade": "w"})    # a person's, weak
+        self.assertEqual(st, 201, js)
+        for p in ps[1:]:
+            self.legacy(p, child, "s")
+        m = self.log_max()
+        dry = self.relink(child, [], dry_run=True)
+        self.assertEqual(self.log_max(), m)
+        out = self.relink(child, [])
+        self.assertEqual(self.ops(out), self.ops(dry))
+        self.assertEqual(sorted((ch["op"], ch["src"], ch["why"]) for ch in out["changes"]),
+                         sorted(("remove", p, "rule") for p in ps[1:4]))            # 1 + the 4 newest strong stay
+        self.assertEqual(set(self.active(child)), {ps[0], *ps[4:]})
+        self.assertEqual([(r["op"], r["actor"], r["user_id"]) for r in self.log_rows(m)], [("link.remove", "agent", self.leo["id"])] * 3)
+        par = {e["src"]: e for e in out["papers"][0]["parents"]}
+        self.assertEqual((par[ps[0]]["by"], par[ps[0]]["status"], par[ps[1]]["status"]), ("person", "kept", "removed"))
+
+    def build_map(self):
+        """A small map as the live one is from before the rule: C1 has a person's weak link and six of the
+        agent's strong ones; C2 three weak ones of the agent (two of them joined by another path through C1),
+        one a person removed, and an essential pair not linked yet."""
+        P = [self.paper(f"Parent paper number {i} about scores", 2010 + i, ["diffusion"]) for i in range(7)]
+        c1, c2 = self.paper("First child about scores", 2020, ["diffusion"]), self.paper("Second child about scores", 2022, ["diffusion"])
+        st, js = self.browser("POST", "/api/links", {"src": P[0], "dst": c1, "grade": "w"})
+        self.assertEqual(st, 201, js)
+        for p in P[1:]:
+            self.legacy(p, c1, "s")
+        for p in (c1, P[6], P[5]):
+            self.legacy(p, c2, "w")
+        gone = self.legacy(P[3], c2, "s")
+        self.assertEqual(self.browser("DELETE", f"/api/links/{gone}")[0], 200)
+        items = ([(p, c1, "s", False) for p in P[1:]] + [(c1, c2, "w", False), (P[6], c2, "w", False), (P[5], c2, "w", False),
+                 (P[4], c2, "e", True), (P[3], c2, "s", False), (P[2], c2, "none", False), (P[0], c1, "e", False)])
+        return P, c1, c2, items
+
+    def test_restructure_dry_run_real_and_again(self):
+        P, c1, c2, items = self.build_map()
+        s0 = self.snap()
+        dry = self.restructure(items, dry_run=True)
+        self.assertEqual(self.snap(), s0)
+        self.assertEqual((dry["dry_run"], dry["log_ids"]), (True, []))
+        want = {("remove", P[1], c1, "s"), ("remove", P[2], c1, "s"), ("add", P[4], c2, "e"),
+                ("remove", P[6], c2, "w"), ("remove", P[5], c2, "w")}
+        self.assertEqual(self.ops(dry), want)
+        self.assertEqual(sorted(s["reason"] for s in dry["skipped"]), ["a person's link", "removed by a person"])
+        self.assertEqual((dry["totals"], {g["name"]: (g["before"], g["after"]) for g in dry["graphs"]}["Diffusion and generative models"]),
+                         ({"before": 10, "after": 7}, (10, 7)))
+        m = self.log_max()
+        real = self.restructure(items)
+        self.assertEqual((self.ops(real), real["totals"]), (want, dry["totals"]))
+        self.assertEqual(set(self.active(c1)), {P[0], *P[3:]})
+        self.assertEqual(set(self.active(c2)), {P[4], c1})                   # P5, P6 -> c2: through c1 already
+        rows = self.log_rows(m)
+        self.assertEqual(sorted((r["op"], r["actor"], r["user_id"]) for r in rows),
+                         sorted([("link.remove", "agent", self.leo["id"])] * 4 + [("link.add", "agent", self.leo["id"])]))
+        self.assertEqual(real["log_ids"], [r["id"] for r in rows])
+        self.assertEqual(self.row(P[0], c1)["origin"], "human")
+        self.assertEqual(self.row(P[3], c2)["state"], "removed")
+        # again, and a relink after it: nothing more
+        m = self.log_max()
+        again = self.restructure(items)
+        self.assertEqual((again["changes"], again["totals"], self.log_max()), ([], {"before": 7, "after": 7}, m))
+        self.assertEqual(self.relink(c2, [(c1, "builds_on", "w"), (P[6], "builds_on", "w")])["changes"], [])
+        self.assertEqual(self.log_max(), m)
+        # the newest change undone from the map (the essential link added): a person's removal now, and it stays so
+        st, log = self.browser("GET", "/api/graph-log", who=self.leo)
+        st, js = self.browser("POST", "/api/graph-log/revert", {"scope": "any", "expect": log["undo"]["any"]["id"]}, who=self.leo)
+        self.assertEqual((st, js["reverted"]["op"]), (200, "link.add"), js)
+        self.assertEqual(self.restructure(items)["changes"], [])
+        self.assertEqual(self.row(P[4], c2)["state"], "removed")
+
+    def test_restructure_levels_arguments_and_locked_graphs(self):
+        P, c1, c2, items = self.build_map()
+        self.assertEqual(self.h.request("POST", "/api/cli/relink/restructure", {"links": []}, user=self.vic)[0], 403)
+        st, out = self.h.request("POST", "/api/cli/relink/restructure", {"links": "all"}, user=self.ann)
+        self.assertEqual((st, out["error"]), (400, "bad_links"))
+        out = self.restructure([(P[1], "p_nothere", "s", False), (P[1], P[1], "s", False), (P[1], c1, "great", False)],
+                               dry_run=True)
+        self.assertEqual(sorted(s["reason"] for s in out["skipped"]), ["bad pair or grade", "self", "unknown paper"])
+        # a locked graph: a contributor's restructure leaves the agent's links in it (they count); an admin's trims them
+        st, js = self.browser("POST", "/api/graphs", {"name": "Locked one", "tags": ["diffusion"]}, who=self.leo)
+        self.assertEqual(self.browser("PUT", f"/api/graphs/{js['graph']['id']}", {"locked": True}, who=self.leo)[0], 200)
+        out = self.restructure(items, who=self.ann, dry_run=True)
+        self.assertEqual(self.ops(out), {("add", P[4], c2, "e")})             # agents still add; nothing removed
+        self.assertEqual(len(self.restructure(items, who=self.leo, dry_run=True)["changes"]), 5)
+
+    def test_the_cli_restructure_against_this_hub(self):
+        """papercast relink --restructure (the CLI's own module) against this hub: a paper from before the
+        rule with seven of the agent's strong links keeps the five newest; the dry run says so exactly."""
+        from papercast_cli import relink as R
+        from papercast_cli.api import Api
+        titles = ["Alpha Particle Scattering in Thin Gold Foils", "Beta Decay Spectra of Heavy Nuclei Measured",
+                  "Gamma Ray Bursts from Distant Galaxies Observed", "Delta Resonance Production in Pion Nucleon Collisions",
+                  "Epsilon Expansion of Critical Exponents in Three Dimensions",
+                  "Zeta Function Regularization of Quantum Field Determinants", "Eta Meson Decays into Three Pions Revisited"]
+        filler = "Filler about sampling, noise levels and the rest of the method. " * 30
+        ps = [self.paper(t, 2010 + i, text=filler) for i, t in enumerate(titles)]
+        child = self.paper("Theta Oscillations in the Hippocampus of Freely Moving Rats", 2024,
+                           text=filler + "".join(f"[{i}] A. Author. {t}. 20{10 + i}.\n" for i, t in enumerate(titles)) + filler)
+        for p in ps:
+            self.legacy(p, child, "s")
+        from hub import search
+        search.idle(self.h.cfg)
+        api = Api(f"http://127.0.0.1:{self.h.port}", self.leo["token"], retries=0)
+
+        def grade(prompt):
+            n = prompt.count("\n  [")
+            return json.dumps({"answers": [{"i": i, "g": "strong"} for i in range(1, n + 1)]})
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(R.PapercastError):
+                R.run(api, ids=[child], restructure=True, fetch=None, grade=grade, root=tmp)
+            m = self.log_max()
+            dry = R.run(api, restructure=True, dry_run=True, fetch=None, grade=grade, root=tmp)
+            self.assertEqual(self.log_max(), m)
+            self.assertEqual(sorted((x["op"], x["src"], x.get("why")) for x in dry["changes"]),
+                             sorted([("remove", ps[0], "rule"), ("remove", ps[1], "rule")]))
+            text = R.restructure_report(dry)
+            self.assertIn("dry run (nothing was changed)", text)
+            self.assertIn("- Links in the library: 7 before, 5 after (if applied).", text)
+            self.assertIn("## Theta Oscillations in the Hippocampus of Freely Moving Rats (2024, " + child + ")", text)
+            self.assertIn("- − remove: “Alpha Particle Scattering in Thin Gold Foils” (2010) · strong · not chosen by the rule", text)
+            self.assertIn("- kept: “Eta Meson Decays into Three Pions Revisited” (2016) · strong", text)
+            real = R.run(api, restructure=True, fetch=None, grade=grade, root=tmp)
+            self.assertEqual(sorted((x["op"], x["src"]) for x in real["changes"]), sorted([("remove", ps[0]), ("remove", ps[1])]))
+            self.assertEqual(set(self.active(child)), set(ps[2:]))
+            self.assertEqual(real["log_ids"], [r["id"] for r in self.log_rows(m)])
+            again = R.run(api, restructure=True, fetch=None, grade=grade, root=tmp)
+            self.assertEqual((again["changes"], again["totals"]), ([], {"before": 5, "after": 5}))
+            plain = R.run(api, fetch=None, grade=grade, root=tmp)                  # a plain relink after it: nothing
+            self.assertEqual(plain["changes"], [])
+            self.assertIn("left out by the per-paper rule (the hub keeps its grade)", [x["reason"] for x in plain["held"]])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,6 +7,7 @@ reboot or a Retry. Everything that must survive is on disk in <dir>:
   status.json           written atomically on every change and every heartbeat_s (§10.3)
   use-cpu, cancel       the runner's controls (§10.4), checked at least every second
   chunks/<engine key>/  one WAV per finished chunk; a re-run never voices a chunk twice
+                        (and reference.json: the voice's reference clip they were voiced from)
   out/episode.mp3       the result; status.json `output` carries its sha256
   out/timings.json      when each sentence is spoken in it (timings.py); `output.timings`
   metrics.json          timings, memory, rates of every run (voice-internal)
@@ -30,7 +31,7 @@ import threading
 import time
 import traceback
 
-from . import VERSION, audio, gpu, hosts, procs, sched, tags, textprep, timings
+from . import VERSION, audio, gpu, hosts, procs, refs, sched, tags, textprep, timings
 from .config import engine_spec, gpu_need_mib
 from .locks import FileLock
 from .textprep import ScriptInvalid
@@ -178,6 +179,7 @@ class Job:
         self.spec: dict | None = None
         self.voice: dict | None = None      # job.json `voice`, checked
         self.done: dict[int, float] = {}
+        self.ref_sha: str | None = None     # the reference clip the engine voices from (refs.py)
         self.run_words = 0
         self.run_t0: float | None = None
         self.m: dict = {"started_at": now_iso(), "pid": os.getpid(), "version": VERSION,
@@ -291,7 +293,12 @@ class Job:
     # --------------------------------------------------------------- chunks
     @staticmethod
     def engine_key(spec: dict) -> str:
-        raw = f"{spec['name']}-{spec.get('voice', '')}-{spec.get('speed', 1.0)}-w{spec['max_words']}-p{PLAN_VERSION}"
+        """The chunk cache's name: engine, voice, speed, chunk size, chunking version and, for a
+        voice spoken from a designed reference clip (refs.py), that clip's recipe, so chunks
+        voice-designed one by one (before 1.2) or from another description are never reused."""
+        ref = f"-r{refs.recipe_id(spec)[:10]}" if refs.uses_reference(spec) else ""
+        raw = (f"{spec['name']}-{spec.get('voice', '')}-{spec.get('speed', 1.0)}{ref}"
+               f"-w{spec['max_words']}-p{PLAN_VERSION}")
         return re.sub(r"[^A-Za-z0-9._-]", "_", raw)
 
     def chunk_path(self, spec: dict, ch: textprep.Chunk) -> str:
@@ -350,7 +357,16 @@ class Job:
         self.status.set(**kw)
 
     def _synth_one(self, w: Worker, ch: textprep.Chunk) -> None:
-        msg = w.synth(ch.idx, ch.text, self.chunk_path(self.spec, ch), self.cancel)
+        path = self.chunk_path(self.spec, ch)
+        msg = w.synth(ch.idx, ch.text, path, self.cancel)
+        if self.ref_sha and msg.get("reference") != self.ref_sha:
+            # One episode, one narrator: a chunk not voiced from the voice's clip is not kept.
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+            raise EngineError(f"chunk {ch.idx} was not voiced from the voice's reference clip "
+                              f"(engine said {msg.get('reference')!r}, mode {msg.get('mode')!r})")
         with self.plock:
             if self.run_t0 is None:
                 self.run_t0 = time.time() - float(msg.get("gen_s") or 0)
@@ -562,6 +578,7 @@ class Job:
                    cfg=self.cfg, tag="gpu")
         self.workers.append(w)
         w.start(self.cancel)
+        self._use_reference(w, spec)
         yr = gpu.YieldRule(g["yield_other_sm_pct"], g["yield_polls"], g["yield_free_floor_mib"])
         last = time.time()
         for ch in self.todo():
@@ -602,6 +619,7 @@ class Job:
         w.start(self.cancel)
         self.event(f"{slot.label}: engine ready in {(w.ready or {}).get('load_s')} s "
                    f"({(w.ready or {}).get('dtype')}, remote pid {w.remote_pid})")
+        self._use_reference(w, spec)
         yr = hosts.RemoteYield(host, slot.gpu, g["yield_free_floor_mib"], known)
         last = 0.0
         for ch in self.todo():
@@ -614,6 +632,62 @@ class Job:
                 if y:
                     raise Yielded(f"{slot.label}: {why}")
             self._synth_one(w, ch)
+
+    def _use_reference(self, w: Worker, spec: dict) -> None:
+        """One narrator per voice (refs.py): the engine gets the voice's kept reference clip, or,
+        the first time this voice speaks anywhere, the clip it designs now, which is kept; every
+        chunk after it is voiced from that clip. Chunks this job made from another clip are
+        voiced again, so an episode is one voice."""
+        self.ref_sha = None
+        if not refs.uses_reference(spec):
+            return
+        got = refs.load(spec)
+        if got is None:
+            self.status.set(note="Designing this voice once (its reference clip), then speaking.")
+            t0 = time.time()
+            data, msg = w.design(spec["reference_text"], self.cancel)
+            data, meta, kept = refs.store(spec, data, {
+                "seed": msg.get("seed"), "attempts": msg.get("attempts"),
+                "audio_s": msg.get("audio_s"), "warning": msg.get("warning"),
+                "made_on": self.where, "voice_version": VERSION})
+            self.event(f"voice {spec.get('voice')}: reference clip designed on {self.where} in "
+                       f"{time.time() - t0:.0f} s ({msg.get('audio_s')} s of audio, seed "
+                       f"{msg.get('seed')}); " + ("kept" if kept else
+                                                  "another job kept one first: voicing from that"))
+        else:
+            data, meta = got
+        w.set_reference(data, spec["reference_text"], self.cancel)
+        sha = meta["sha256"]
+        self._pin_reference(spec, sha)
+        self.ref_sha = sha
+        self.m["reference"] = {"sha256": sha, "file": os.path.basename(refs.paths(spec)[0]),
+                               "made_at": meta.get("made_at"), "made_on": meta.get("made_on")}
+        self._progress()
+
+    def _pin_reference(self, spec: dict, sha: str) -> None:
+        """chunks/<key>/reference.json names the clip this job's chunks are voiced from. Chunks
+        from another clip (the kept one was replaced between two runs of this job) go."""
+        mk = os.path.join(self.p("chunks", self.engine_key(spec)), "reference.json")
+        cur = read_json(mk)
+        if cur is not None and cur.get("sha256") == sha:
+            return
+        if self.done:
+            with self.plock:
+                n = len(self.done)
+                for ch in self.plan:
+                    if ch.idx in self.done:
+                        try:
+                            os.unlink(self.chunk_path(spec, ch))
+                        except FileNotFoundError:
+                            pass
+                self.done = {}
+            self.event(f"{n} chunks were voiced from another reference clip "
+                       f"({str((cur or {}).get('sha256') or 'unrecorded')[:12]}); voicing them "
+                       "again, so the episode is one voice")
+        tmp = mk + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"sha256": sha, "at": now_iso(), "file": os.path.basename(refs.paths(spec)[0])}, fh)
+        os.replace(tmp, mk)
 
     def _gpu_pass(self, script: str, name: str) -> dict | None:
         spec = self._with_voice(engine_spec(self.cfg, name))
@@ -663,7 +737,7 @@ class Job:
                 if self.slot_lock is not None:
                     self.slot_lock.release()
                     self.slot_lock = None
-                self.where = self.host_spw = None
+                self.where = self.host_spw = self.ref_sha = None
         return spec
 
     def _remote_failed(self, slot, fails: dict[str, int], why: str) -> bool:
@@ -690,6 +764,7 @@ class Job:
     def _cpu_pass(self, script: str, why: str) -> dict:
         spec = self._with_voice(engine_spec(self.cfg, self.cfg["cpu_engine"]))
         self._prepare(spec, script)
+        self.ref_sha = None
         self.event(f"CPU voice ({spec['name']}): {why}")
         t0 = time.time()
         while not self.cpu_lock.try_acquire():
@@ -795,6 +870,9 @@ class Job:
                "true_peak_db": round(m["true_peak_db"], 1), "sha256": sha256_file(final),
                "size": size, "engine": f"{spec['kind']}:{spec['label']}",
                "voice": spec.get("voice"), "tags": written}
+        pin = read_json(os.path.join(self.p("chunks", self.engine_key(spec)), "reference.json"))
+        if refs.uses_reference(spec) and pin and pin.get("sha256"):
+            out["reference"] = pin["sha256"]            # the clip every chunk was voiced from
         # The sentence timings: a bonus, so a problem with them never costs the episode.
         try:
             segs = timings.segments(script, [c.text for c in self.plan], j["spans"],

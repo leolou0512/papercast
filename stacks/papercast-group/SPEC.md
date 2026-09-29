@@ -284,6 +284,10 @@ audio meanwhile, and the new MP3 replaces it with its timings; `voice.rev` (each
 library) goes up, and the page asks `/audio/<id>.mp3?v=<rev>`. Browser routes: `GET /api/voices`,
 `PUT /api/voices/mine`, `GET /api/voices/<id>/sample.mp3`, `GET|PUT|DELETE /api/episodes/<id>/voice`,
 `GET /api/episodes/<id>/timings` (timings.json plus `rev`, the audio revision they are for).
+One narrator per voice (papercast-voice 1.2): a Breeze voice is designed once, saying the samples'
+paragraph (voices.SAMPLE_TEXT) from its instruction and seed; papercast-voice keeps that clip and
+voices every chunk of every episode, sample and preview in that voice from it. Before, each chunk
+was designed on its own and came out a different speaker.
 
 Custom voices (hub/customvoice.py; voices.py for where they are used). Each person may describe
 one narrator in Breeze's words (at most 500 characters, control characters removed), preview it

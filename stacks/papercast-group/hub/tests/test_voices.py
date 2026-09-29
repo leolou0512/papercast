@@ -102,7 +102,7 @@ class Voices(VoicesBase):
         code, j = self.web("GET", "/api/voices", v)
         self.assertEqual(code, 200, j)
         ids = [x["id"] for x in j["voices"]]
-        self.assertTrue(4 <= len(ids) <= 8, ids)
+        self.assertTrue(4 <= len(ids) <= 10, ids)
         self.assertEqual(j["default"], "clear-female")
         self.assertEqual([x["id"] for x in j["voices"] if x["default"]], ["clear-female"])
         self.assertEqual(sum(1 for x in j["voices"] if x["cpu"]), 1)
@@ -117,6 +117,9 @@ class Voices(VoicesBase):
         dflt = voices.PRESET_BY_ID["clear-female"]
         self.assertEqual((dflt["key"], dflt["instruction"], dflt["seed"]), (b["voice"], b["instruction"], b["seed"]))
         self.assertEqual(voices.PRESET_BY_ID["basic-female"]["key"], DEFAULTS["engines"]["kokoro"]["voice"])
+        # one narrator per voice: papercast-voice designs each voice's clip on the paragraph the
+        # samples and previews say, so the clip is the voice people heard (voices.py docstring)
+        self.assertEqual(b["reference_text"], voices.SAMPLE_TEXT)
         # a sample clip once tools/make_voice_samples.py has made it
         d = self.h.cfg.data / "voices"
         d.mkdir()
@@ -129,6 +132,29 @@ class Voices(VoicesBase):
         self.assertEqual(self.web("GET", "/api/voices/british-female/sample.mp3", v)[0], 404)
         self.assertEqual(self.web("GET", "/api/voices/nope/sample.mp3", v)[0], 404)
         self.assertEqual(self.h.request("GET", "/api/voices")[0], 401)
+
+    def test_the_three_voices_leo_asked_for(self):
+        """Leo, 2026-09-29: "I want 高冷御姐音, JF kennedy and Sean Bean". Breeze voices described
+        in words (no recording of anyone), keys with a version, and the two after real people
+        labelled as style voices, for fun."""
+        want = {"cool-female": "Cool, composed female", "jfk-style": "JFK-style (for fun)",
+                "bean-style": "Sean Bean-style (for fun)"}
+        for vid, name in want.items():
+            p = voices.PRESET_BY_ID[vid]
+            self.assertEqual((p["name"], p["engine"], p["seed"]), (name, "breeze", 42))
+            self.assertRegex(p["key"], r"^preset-[a-z-]+-v\d+-s42$")
+            self.assertLessEqual(len(p["instruction"]), 2000)            # papercast-voice's limit
+            self.assertTrue(p["instruction"].endswith(voices._PODCAST))
+            self.assertEqual(voices.for_claim(p)["spec"],
+                             {"engine": "breeze", "voice": p["key"], "id": vid,
+                              "instruction": p["instruction"], "seed": 42})
+        for vid in ("jfk-style", "bean-style"):
+            self.assertIn("not from any recording", voices.PRESET_BY_ID[vid]["about"])
+        self.assertIn("Boston", voices.PRESET_BY_ID["jfk-style"]["instruction"])
+        self.assertIn("Yorkshire", voices.PRESET_BY_ID["bean-style"]["instruction"])
+        self.assertIn("aloof", voices.PRESET_BY_ID["cool-female"]["instruction"])
+        # they sit with the other GPU voices, before the CPU one, which stays last
+        self.assertEqual(voices.PRESETS[-1]["id"], "basic-female")
 
     # -- timings
     def test_timings_upload_and_storage(self):

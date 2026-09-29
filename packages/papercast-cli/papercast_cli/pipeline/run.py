@@ -1151,13 +1151,46 @@ class Job:
             except (pdf.PdfError, OSError):
                 text = None
 
+        mentions, why = self._mentions(meta, exclude)
+
         def prog(i, n):
             self.progress("links", AT["links"] + 0.08 * i / max(1, n), f"graded {i} of {n}")
 
         res = plinks.find(meta, claims_md.get("claims") or [], library, self.fetch, self._grade,
-                          self.p("links"), exclude=exclude, text=text, progress=prog)
+                          self.p("links"), exclude=exclude, text=text, progress=prog,
+                          mentions=mentions)
+        if mentions is None:
+            # a hub that could not answer may be one from before "both": say "s2" (it is)
+            res["info"]["mentions_error"] = why
+            for lk in res["links"]:
+                if lk.get("source") == "both":
+                    lk["source"] = "s2"
         write_json(self.p("links.json"), res)
-        self.mark("links", n=len(res["links"]), s2_id=res.get("s2_id"))
+        info = res["info"]
+        extra = {k: info[k] for k in ("s2_error", "mentions_error") if info.get(k)}
+        if info.get("dropped"):
+            extra["dropped"] = {k: len(v) for k, v in info["dropped"].items()}
+        self.mark("links", n=len(res["links"]), s2_id=res.get("s2_id"), **extra)
+        if info.get("s2_error"):
+            self.progress("links", AT["links"] + 0.08, "Semantic Scholar could not be read "
+                          f"({info['s2_error'][:120]}); links from the texts only", force=True)
+
+    def _mentions(self, meta: dict, exclude: set) -> tuple[list | None, str | None]:
+        """The hub's GET /api/cli/mentions: library papers whose own text names this paper.
+        (None, why) when the hub cannot say (one from before it, or not reachable now)."""
+        q = {"title": meta.get("title"), "arxiv": meta.get("arxiv_id"), "doi": meta.get("doi"),
+             "exclude": ",".join(sorted(exclude))}
+        q = {k: v for k, v in q.items() if v}
+        if not any(q.get(k) for k in ("title", "arxiv", "doi")):
+            return [], None
+        try:
+            st, r = self._api("links", self.api.get, "/api/cli/mentions?" + urllib.parse.urlencode(q))
+        except PipelineError as e:
+            return None, str(e)
+        if st != 200 or not isinstance(r.get("mentions"), list):
+            return None, f"the hub answered {st} for its mentions"
+        write_json(self.p("links", "mentions.json"), r)
+        return r["mentions"], None
 
     def _grade(self, body: str) -> str:
         """One tool-free haiku call (judge2.py), with Leo's bare lockdown."""

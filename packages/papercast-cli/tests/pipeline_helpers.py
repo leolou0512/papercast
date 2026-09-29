@@ -82,8 +82,11 @@ class FakeApi:
 
     def __init__(self, paper=None, conflict=False, library=None, wording=None, guideline=GUIDELINE,
                  settings=None, note="", final_state="waiting-for-gpu", down=False,
-                 claim_expires_in=6 * 3600):
+                 claim_expires_in=6 * 3600, mentions=()):
+        """`mentions`: what GET /api/cli/mentions answers ([{"paper_id", "field"}]); None:
+        a hub from before it (404)."""
         self.paper, self.conflict, self.down = paper, conflict, down
+        self.mentions = None if mentions is None else list(mentions)
         self.library = list(LIBRARY if library is None else library)
         self.wording = default_wording() if wording is None else wording
         self.guideline, self.final_state = guideline, final_state
@@ -111,6 +114,8 @@ class FakeApi:
             return {"settings": self.settings, "note": self.note, "version": 3}
         if u.path == "/api/cli/library":
             return {"papers": self.library}
+        if u.path == "/api/cli/mentions" and self.mentions is not None:
+            return {"mentions": self.mentions, "info": {"title": "searched"}}
         if u.path.startswith("/api/cli/episodes/"):
             self.polls += 1
             eid = u.path.rsplit("/", 1)[1]

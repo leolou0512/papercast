@@ -588,8 +588,9 @@ class Links(PipelineCase):
         self.run_job(FakeApi(), fetch=fx)
         got = {(l["other"]["paper_id"], l["direction"], l["grade"], l["source"])
                for l in self.jread("links.json")["links"]}
-        self.assertEqual(got, {("p_ddpm00000001", "builds_on", "w", "s2"),     # a reference
-                               ("p_sde000000001", "builds_on", "s", "s2"),     # arXiv v2 matched
+        # page two of the PDF names both references too: "both"
+        self.assertEqual(got, {("p_ddpm00000001", "builds_on", "w", "both"),   # a reference
+                               ("p_sde000000001", "builds_on", "s", "both"),   # arXiv v2 matched
                                ("p_sd3000000001", "built_on_by", "e", "s2")})  # a citation
         # Adam: graded none, dropped; Neural ODEs: not in the library; PPO: a "citing" paper
         # older than this one; the second page of references was read
@@ -634,12 +635,190 @@ class Links(PipelineCase):
         self.assertEqual(self.kinds(), NORMAL + ["grade"])
         self.assertEqual(len(self.jread("links.json")["links"]), 3)
 
+    # ---- both ways, every source, then the grader
+
+    MORE = [
+        # named in this paper's text by its arXiv id only
+        {"id": "p_otp000000001", "title": "Optimal Transport Paths for Fake Generative Flows", "year": 2021,
+         "arxiv_id": "2101.04444", "doi": None, "s2_id": None},
+        # names this paper in its own text (the hub's mentions); Semantic Scholar does not know it
+        {"id": "p_later0000001", "title": "A Later Fake Paper Citing Flow Matching Carefully", "year": 2024,
+         "arxiv_id": "2405.00001", "doi": None, "s2_id": None},
+        # nowhere at all
+        {"id": "p_fold00000001", "title": "An Unrelated Fake Paper About Protein Folding Kinetics", "year": 2021,
+         "arxiv_id": None, "doi": None, "s2_id": None},
+        # a generic title the text does contain
+        {"id": "p_deep00000001", "title": "Deep Learning", "year": 2016, "arxiv_id": None, "doi": None, "s2_id": None},
+        # this paper again (another version: the same title)
+        {"id": "p_fmv000000001", "title": "Flow Matching for Generative Modeling", "year": 2022,
+         "arxiv_id": None, "doi": None, "s2_id": None},
+    ]
+
+    def both_ways(self, api=None, **kw):
+        from pipeline_helpers import LIBRARY, PAGE1, PAGE2, make_pdf
+        make_pdf(self.pdf_path, [PAGE1, PAGE2 + ["Our paths follow arXiv:2101.04444v3, as deep learning does."]])
+        self.scenario()
+        self.write_job()
+        if api is None:
+            api = FakeApi(library=LIBRARY + self.MORE,
+                          mentions=[{"paper_id": "p_sd3000000001", "field": "title"},
+                                    {"paper_id": "p_later0000001", "field": "arxiv"},
+                                    {"paper_id": "p_fmv000000001", "field": "title"}])
+        r = self.run_job(api, **kw)
+        return api, r, self.jread("links.json")
+
+    @unittest.skipUnless(pdf.available()["text"], "pdftotext is not installed")
+    def test_candidates_from_both_directions_and_every_source(self):
+        api, r, lk = self.both_ways()
+        self.assertEqual(r["status"], "uploaded")
+        got = {(l["other"]["paper_id"], l["direction"], l["source"]) for l in lk["links"]}
+        self.assertEqual(got, {("p_ddpm00000001", "builds_on", "both"),       # S2 and the title in the text
+                               ("p_sde000000001", "builds_on", "both"),
+                               ("p_otp000000001", "builds_on", "text"),       # the arXiv id in the text
+                               ("p_sd3000000001", "built_on_by", "both"),     # S2 and the hub, one candidate
+                               ("p_later0000001", "built_on_by", "text")})    # only the hub knows
+        cands = {(c["other"], c["direction"]): c for c in lk["info"]["candidate_list"]}
+        self.assertEqual(len(cands), len(lk["info"]["candidate_list"]))     # deduplicated
+        self.assertEqual(cands[("p_otp000000001", "builds_on")]["via"], ["text:arxiv"])
+        self.assertEqual(cands[("p_sd3000000001", "built_on_by")]["via"], ["s2", "mention:title"])
+        self.assertEqual(lk["info"]["versions"], ["p_fmv000000001"])
+        # the hub was asked with this paper's keys
+        q = [c[1] for c in api.calls if c[0] == "GET" and c[1].startswith("/api/cli/mentions?")]
+        self.assertEqual(len(q), 1)
+        self.assertIn("arxiv=2210.02747", q[0])
+        self.assertIn("title=Flow+Matching+for+Generative+Modeling", q[0])
+        # the grader saw the filtered candidates only: Adam (an S2 reference, graded none) and
+        # these five; never the unrelated paper, the generic title, or this paper's other version
+        grade = [c["argv"][1] for c in self.calls() if c["kind"] == "grade"]
+        self.assertEqual(len(grade), 1)
+        self.assertIn("Grade all 6 candidates.", grade[0])
+        for t in ("Optimal Transport Paths", "A Later Fake Paper", "Scaling Rectified Flow"):
+            self.assertIn(t, grade[0])
+        for t in ("Protein Folding", '"Deep Learning"', "Proximal Policy"):
+            self.assertNotIn(t, grade[0])
+        self.assertNotIn("p_fmv000000001", {c["other"] for c in lk["info"]["candidate_list"]})
+        # the bundle carries the sources
+        man = api.uploads[-1]["manifest"]
+        self.assertEqual({l["source"] for l in man["links"]}, {"both", "text"})
+
+    @unittest.skipUnless(pdf.available()["text"], "pdftotext is not installed")
+    def test_a_hub_without_mentions_gets_s2_not_both(self):
+        from pipeline_helpers import LIBRARY
+        api, r, lk = self.both_ways(FakeApi(library=LIBRARY + self.MORE, mentions=None))
+        self.assertEqual(r["status"], "uploaded")
+        self.assertEqual({l["source"] for l in lk["links"]}, {"s2", "text"})
+        self.assertIn("404", lk["info"]["mentions_error"])
+        self.assertNotIn("p_later0000001", {l["other"]["paper_id"] for l in lk["links"]})
+
+    @unittest.skipUnless(pdf.available()["text"], "pdftotext is not installed")
+    def test_semantic_scholar_rate_limited_falls_back_to_the_texts(self):
+        from papercast_cli.pipeline import links as plinks
+        waits = []
+        fx = S2Fixture(status=429)
+        api, r, lk = self.both_ways(fetch=plinks.retrying(fx, sleep=waits.append))
+        self.assertEqual(r["status"], "uploaded")
+        self.assertEqual(len(fx.urls), plinks.RETRY_TRIES)          # one request, every try, then given up
+        self.assertEqual(len(waits), plinks.RETRY_TRIES - 1)
+        self.assertIn("429", lk["info"]["s2_error"])
+        self.assertIn("429", self.jread("state.json")["steps"]["links"]["s2_error"])
+        self.assertTrue(any("links from the texts only" in e[2] for e in self.events))
+        got = {(l["other"]["paper_id"], l["direction"], l["source"]) for l in lk["links"]}
+        self.assertEqual(got, {("p_ddpm00000001", "builds_on", "text"), ("p_sde000000001", "builds_on", "text"),
+                               ("p_otp000000001", "builds_on", "text"), ("p_sd3000000001", "built_on_by", "text"),
+                               ("p_later0000001", "built_on_by", "text")})
+
+    def test_citations_rate_limited_keep_the_references(self):
+        pdf.DISABLED.add("pdftotext")
+        fx = S2Fixture()
+
+        def fetch(url):
+            return (429, None, {"Retry-After": "1"}) if "/citations" in url else fx(url)
+        self.scenario()
+        self.write_job()
+        self.run_job(FakeApi(), fetch=fetch)
+        lk = self.jread("links.json")
+        self.assertEqual({(l["other"]["paper_id"], l["direction"]) for l in lk["links"]},
+                         {("p_ddpm00000001", "builds_on"), ("p_sde000000001", "builds_on")})
+        self.assertIn("citations", lk["info"]["s2_error"])
+
+    def test_candidates_are_capped_per_direction(self):
+        from papercast_cli.pipeline import links as plinks
+        lib = [{"id": f"p_x{i:011d}", "title": f"Fake Paper Number {i} On Something Quite Specific",
+                "year": 2020, "arxiv_id": f"2001.{10000 + i}", "doi": None} for i in range(12)]
+        text = " ".join(f"arXiv:2001.{10000 + i}" for i in range(12))
+        old = plinks.MAX_PER_DIRECTION
+        plinks.MAX_PER_DIRECTION = 5
+        try:
+            cands, info = plinks.candidates({"title": "This Fake Paper", "year": 2022}, plinks.Library(lib), None,
+                                            text, set(), [{"paper_id": f"p_x{i:011d}"} for i in range(3)])
+        finally:
+            plinks.MAX_PER_DIRECTION = old
+        self.assertEqual(sum(c["direction"] == "builds_on" for c in cands), 5)
+        self.assertEqual(len(info["dropped"]["builds_on"]), 7)
+        self.assertNotIn("built_on_by", info["dropped"])         # 3 each way: under the cap
+
     def test_a_new_version_never_links_to_itself(self):
         self.scenario()
         self.write_job(version_of="p_sde000000001")
         self.run_job(FakeApi())
         others = {l["other"]["paper_id"] for l in self.jread("links.json")["links"]}
         self.assertNotIn("p_sde000000001", others)
+
+
+
+class Retrying(unittest.TestCase):
+    """Semantic Scholar's rate limit (many jobs on one machine): 429 and 5xx tried again with
+    backoff and jitter, Retry-After respected, no answer at all tried less, then given up."""
+
+    def fetcher(self, answers):
+        seen = []
+
+        def fetch(url):
+            seen.append(url)
+            return answers[min(len(seen), len(answers)) - 1]
+        return fetch, seen
+
+    def test_waits_back_off_with_jitter_and_retry_after(self):
+        from papercast_cli.pipeline import links as plinks
+        fetch, seen = self.fetcher([(429, None, {"Retry-After": "7"}), (503, None, {}), (429, None),
+                                    (200, {"ok": 1}, {})])
+        waits = []
+        get = plinks.retrying(fetch, sleep=waits.append, rand=lambda: 0.5)
+        self.assertEqual(get("u"), (200, {"ok": 1}))
+        self.assertEqual(len(seen), 4)
+        self.assertGreaterEqual(waits[0], 7.0)                  # Retry-After, over the backoff
+        self.assertEqual(waits[1:], [3.0, 6.0])                 # 4 s and 8 s, half of each random
+        # jitter: two jobs do not wait the same
+        a, b = [], []
+        for w, r in ((a, lambda: 0.0), (b, lambda: 0.99)):
+            plinks.retrying(self.fetcher([(429, None)])[0], sleep=w.append, rand=r)("u")
+        self.assertTrue(all(x < y for x, y in zip(a, b)))
+        self.assertLessEqual(max(b), plinks.BACKOFF_CAP_S)
+
+    def test_gives_up_and_says_so(self):
+        from papercast_cli.pipeline import links as plinks
+        fetch, seen = self.fetcher([(429, None)])
+        waits = []
+        self.assertEqual(plinks.retrying(fetch, sleep=waits.append)("u"), (429, None))
+        self.assertEqual((len(seen), len(waits)), (plinks.RETRY_TRIES, plinks.RETRY_TRIES - 1))
+        fetch, seen = self.fetcher([(0, None)])                 # the network: fewer tries
+        plinks.retrying(fetch, sleep=lambda s: None)("u")
+        self.assertEqual(len(seen), plinks.NET_TRIES)
+        fetch, seen = self.fetcher([(404, None)])               # an answer: never again
+        self.assertEqual(plinks.retrying(fetch, sleep=lambda s: None)("u"), (404, None))
+        self.assertEqual(len(seen), 1)
+        s2 = plinks.S2(plinks.retrying(self.fetcher([(429, None)])[0], sleep=lambda s: None),
+                       os.path.join(os.environ.get("TMPDIR", "/tmp"), f"pc-s2-{os.getpid()}"))
+        with self.assertRaisesRegex(OSError, "429 .rate limited"):
+            s2.get("/paper/x", {})
+
+    def test_retry_after_forms(self):
+        from email.utils import formatdate
+        from papercast_cli.pipeline import links as plinks
+        self.assertEqual(plinks.retry_after({"retry-after": "12"}), 12.0)
+        self.assertAlmostEqual(plinks.retry_after({"Retry-After": formatdate(time.time() + 30, usegmt=True)}), 30, delta=2)
+        self.assertIsNone(plinks.retry_after({"Retry-After": "soon"}))
+        self.assertIsNone(plinks.retry_after(None))
 
 
 class Hub(PipelineCase):

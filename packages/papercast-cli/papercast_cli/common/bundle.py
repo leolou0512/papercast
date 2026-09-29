@@ -37,7 +37,7 @@ SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 VERSION = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+-]{0,39}$")
 DIRECTIONS = ("builds_on", "built_on_by")
 GRADES = ("e", "s", "w")
-SOURCES = ("s2", "text")
+SOURCES = ("s2", "text", "both")     # Semantic Scholar, a text match, or both
 OTHER_FORMS = ("paper_id", "arxiv_id", "doi", "title")
 
 
@@ -188,7 +188,7 @@ def _link(out, i, link) -> None:
     if link.get("grade") not in GRADES:
         out.append(f"{label}.grade: e, s or w")
     if link.get("source") not in SOURCES:
-        out.append(f"{label}.source: s2 or text")
+        out.append(f"{label}.source: s2, text or both")
 
 
 def _announce(out, a) -> None:

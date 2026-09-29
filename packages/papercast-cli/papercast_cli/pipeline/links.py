@@ -1,32 +1,45 @@
 """Links from this paper to papers already in the group's library, from Leo's lineage pipeline
 (/home/leo/papercast-itest/lineage: fetch.py resolves papers on Semantic Scholar and reads their
 references, build.py matches them to the library, judge2.py grades each candidate with a cheap
-model). Here for one paper, both ways:
+model). Here for one paper, both ways, first found by cheap deterministic filters:
 
-- its references in the library: this paper builds on them (`builds_on`);
-- the library papers that cite it: they build on it (`built_on_by`);
-- when Semantic Scholar has no references for it: library titles found verbatim in the paper's
-  own text (`source: "text"`, build.py's fallback; needs pdftotext).
+- this paper builds on (`builds_on`): its Semantic Scholar references that are in the library
+  (source "s2"), and the library papers its own text names by arXiv id, DOI or title (source
+  "text"; needs pdftotext);
+- the library builds on it (`built_on_by`): the library papers that cite it on Semantic Scholar
+  ("s2"), and those whose own text names it, which the hub finds in its full-text index (GET
+  /api/cli/mentions, "text"): so an older library paper is linked even when Semantic Scholar's
+  citations of this one are missing or late.
+
+Found both ways is source "both". Text matching is common/mentions.py's (the same rules as the
+hub's): never a title too short or generic to match safely, never the paper itself or another
+version of it. At most MAX_PER_DIRECTION candidates each way (those found both ways first), the
+rest listed in info["dropped"].
 
 Every candidate is graded essential / strong / weak / none by `claude -p --model
 claude-haiku-4-5` with no tools, one call per up to 50 candidates grouped by child paper, as
 judge2.py; e/s/w are kept, none is dropped. Papers not in the library are never links.
 
-Network: only api.semanticscholar.org, through `fetch(url) -> (status, json | None)`, which a
-test replaces. Every answer is cached in the job dir, every graded batch too, so a resumed job
-asks nothing twice.
+Network: only api.semanticscholar.org, through `fetch(url) -> (status, json | None[, headers])`,
+which a test replaces; `retrying` waits out its rate limit (429, 5xx: backoff with jitter,
+Retry-After respected). A Semantic Scholar that still refuses is no failure: the links come from
+the texts, and info["s2_error"] says why. Every answer is cached in the job dir, every graded
+batch too, so a resumed job asks nothing twice.
 """
 from __future__ import annotations
 
+import email.utils
 import hashlib
 import json
 import os
+import random
 import re
 import time
-import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
+
+from ..common import mentions as M
 
 BASE = "https://api.semanticscholar.org/graph/v1"
 FIELDS = "paperId,externalIds,title,year"
@@ -39,7 +52,12 @@ BATCH = 50
 TRIES = 3                      # grading attempts per batch (judge2.py)
 GRADES = ("essential", "strong", "weak", "none")
 SHORT = {"essential": "e", "strong": "s", "weak": "w"}
-TEXT_MIN = 22                  # a title shorter than this (letters and digits) is never matched in text
+MAX_PER_DIRECTION = 200        # candidates graded each way at most (4 grading calls)
+RETRY_TRIES = 8                # 429 and 5xx: tries of one request (waits ~2, 4, 8, 16, 32, 60, 60 s)
+NET_TRIES = 3                  # no answer at all (the network, a proxy): tries
+BACKOFF_BASE_S = 2.0
+BACKOFF_CAP_S = 60.0
+RETRY_AFTER_CAP_S = 120.0
 
 SYSTEM = (
     "You grade edges for a lineage map of research papers. Each CHILD paper cites each of its numbered candidate "
@@ -65,34 +83,69 @@ class GradeError(Exception):
 
 # --- Semantic Scholar ---------------------------------------------------------------
 
-def http_fetch(url: str, timeout: float = 30.0) -> tuple[int, object]:
-    """One GET: (status, parsed JSON or None). Network errors are status 0."""
+def http_fetch(url: str, timeout: float = 30.0) -> tuple[int, object, dict]:
+    """One GET: (status, parsed JSON or None, headers). Network errors are status 0."""
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT,
                                                "Accept": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             body = r.read(MAX_BODY)
-            return r.status, json.loads(body.decode("utf-8", "replace"))
+            return r.status, json.loads(body.decode("utf-8", "replace")), dict(r.headers)
     except urllib.error.HTTPError as e:
-        return e.code, None
+        return e.code, None, dict(e.headers or {})
     except (urllib.error.URLError, OSError, ValueError):
-        return 0, None
+        return 0, None, {}
 
 
-def retrying(fetch, tries: int = 6, delay: float = 3.0, sleep=time.sleep):
-    """fetch.py's patience: Semantic Scholar's shared rate limit answers 429 often."""
+def retry_after(headers) -> float | None:
+    """Seconds a Retry-After header asks for (a number or an HTTP date), or None."""
+    if not headers:
+        return None
+    v = next((headers[k] for k in headers if str(k).lower() == "retry-after"), None)
+    if v is None:
+        return None
+    v = str(v).strip()
+    if re.fullmatch(r"\d+(?:\.\d+)?", v):
+        return float(v)
+    try:
+        t = email.utils.parsedate_to_datetime(v)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, t.timestamp() - time.time()) if t is not None else None
+
+
+def retrying(fetch, tries: int = RETRY_TRIES, net_tries: int = NET_TRIES, base: float = BACKOFF_BASE_S,
+             cap: float = BACKOFF_CAP_S, sleep=time.sleep, rand=random.random):
+    """fetch.py's patience, for many jobs on one machine sharing Semantic Scholar's rate limit:
+    429 and 5xx are tried again up to `tries` times, no answer at all `net_tries` times, after
+    an exponential wait with jitter (half of it random, so parallel jobs spread out), or after
+    Retry-After when the answer gives one (at most RETRY_AFTER_CAP_S). Returns (status, data);
+    get.waits lists the waits of the last request."""
     def get(url: str) -> tuple[int, object]:
-        d = delay
-        status, data = 0, None
-        for i in range(tries):
-            status, data = fetch(url)
-            if status == 429 or status == 0 or status >= 500:
-                if i + 1 < tries:
-                    sleep(d)
-                    d = min(d * 1.7, 90.0)
-                continue
-            return status, data
-        return status, data
+        n_rate = n_net = 0
+        get.waits = []
+        while True:
+            r = fetch(url)
+            status, data = r[0], r[1]
+            headers = r[2] if len(r) > 2 else None
+            if status == 0:
+                n_net += 1
+                again = n_net < net_tries
+            elif status == 429 or status >= 500:
+                n_rate += 1
+                again = n_rate < tries
+            else:
+                return status, data
+            if not again:
+                return status, data
+            d = min(cap, base * 2 ** (n_rate + n_net - 1))
+            wait = d / 2 + rand() * d / 2
+            ra = retry_after(headers)
+            if ra is not None:
+                wait = max(wait, min(ra, RETRY_AFTER_CAP_S) + rand())
+            get.waits.append(wait)
+            sleep(wait)
+    get.waits = []
     return get
 
 
@@ -111,11 +164,12 @@ class S2:
         if os.path.exists(cp):
             with open(cp, encoding="utf-8") as fh:
                 return json.load(fh)["data"]
-        status, data = self.fetch(url)
+        status, data = self.fetch(url)[:2]
         if status == 404:
             data = None
         elif status != 200:
-            raise OSError(f"Semantic Scholar answered {status or 'nothing'} for {path}")
+            what = {0: "nothing", 429: "429 (rate limited)"}.get(status, status)
+            raise OSError(f"Semantic Scholar answered {what} for {path}")
         tmp = cp + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump({"url": url, "data": data}, fh)
@@ -162,10 +216,6 @@ def squash(t) -> str:
     return re.sub(r"[^a-z0-9]", "", (t or "").lower()) if isinstance(t, str) else ""
 
 
-def ntext(t: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", unicodedata.normalize("NFKC", t or "").lower())
-
-
 def base_arxiv(a) -> str | None:
     return re.sub(r"v\d+$", "", a) if isinstance(a, str) and a else None
 
@@ -197,21 +247,39 @@ class Library:
             return self.by_title[t]
         return None
 
-    def in_text(self, body: str, exclude: set) -> list[str]:
-        """Library papers whose title is in the paper's text (build.py's fallback): titles of
-        22+ letters and digits only, and not when every occurrence is inside a longer library
-        title ("Improved <t>")."""
-        body = ntext(body)
-        nt = {p["id"]: ntext(p.get("title") or "") for p in self.papers}
-        found = []
-        for pid, t in nt.items():
-            if pid in exclude or len(t) < TEXT_MIN or t not in body:
+    def versions_of(self, paper: dict) -> set:
+        """Library papers that are this paper or another version of it (the same arXiv id, DOI
+        or title): never a link."""
+        return {p["id"] for p in self.papers if M.same_work(paper, p)}
+
+    def mentioned_in(self, body: str, exclude: set) -> dict[str, str]:
+        """{library id: "arxiv" | "doi" | "title"} of the library papers this text names: by
+        arXiv id (any version), DOI, or title (common/mentions.py: the first words of it, across
+        line breaks and hyphenation; never a short or generic title, and not when every
+        occurrence is inside a longer library title, "Improved <t>")."""
+        if not body:
+            return {}
+        sq = M.Squashed(body)
+        ids = M.arxiv_ids(body)
+        full = {p["id"]: M.squash(p.get("title") or "") for p in self.papers}
+        found = {}
+        for p in self.papers:
+            pid = p["id"]
+            if pid in exclude:
                 continue
-            longer = sum(body.count(T) * T.count(t) for q, T in nt.items()
-                         if q != pid and len(T) > len(t) and t in T)
-            if body.count(t) <= longer:
+            if base_arxiv(p.get("arxiv_id")) in ids:
+                found[pid] = "arxiv"
                 continue
-            found.append(pid)
+            if p.get("doi") and M.squash(p["doi"]) in sq.s and M.doi_in(body, p["doi"]):
+                found[pid] = "doi"
+                continue
+            keys = M.title_keys(p.get("title") or "")
+            if not keys or not any(k in sq.s for k in keys):
+                continue
+            longer = [L for q, L in full.items() if q != pid and q not in exclude and L != full[pid]
+                      and any(len(L) > len(k) and k in L for k in keys)]
+            if M.title_in(sq, p.get("title") or "", longer):
+                found[pid] = "title"
         return found
 
 
@@ -223,48 +291,99 @@ def label(title: str) -> str:
 
 # --- candidates ------------------------------------------------------------------------------
 
-def candidates(paper: dict, lib: Library, s2: S2 | None, text: str | None,
-               exclude: set) -> tuple[list[dict], dict]:
-    """[{"other": library id, "direction", "source", "influential"}], info. S2 first; the text
-    fallback when S2 has no references for the paper (not found, or an empty list)."""
+RANK = {"both": 0, "s2": 1, "text": 2}
+VIA_RANK = {"arxiv": 0, "doi": 1, "title": 2}
+
+
+def candidates(paper: dict, lib: Library, s2: S2 | None, text: str | None, exclude: set,
+               mentions: list | None = None) -> tuple[list[dict], dict]:
+    """[{"other": library id, "direction", "source": "s2" | "text" | "both", "influential",
+    "via"}], info. Both ways from Semantic Scholar, the paper's own text (what it names) and
+    `mentions` (the hub's answer: library papers whose text names this one), merged; a
+    Semantic Scholar that fails in any part leaves the rest standing (info["s2_error"])."""
     info: dict = {"s2_id": None, "resolved_via": None, "refs": 0, "cits": 0}
+    exclude = set(exclude)
+    versions = lib.versions_of(paper) - exclude
+    if versions:
+        info["versions"] = sorted(versions)
+        exclude |= versions
     out: dict[tuple, dict] = {}
     year = paper.get("year")
-    refs: list = []
+    errors: list[str] = []
+
+    def later(kind: str, other: str, oy) -> bool:
+        """An earlier paper is built on, a later one builds on it (build.py drops a "parent"
+        later than its child)."""
+        oy = oy or lib.by_id[other].get("year")
+        return bool(year and oy and ((kind == "builds_on" and oy > year) or
+                                     (kind == "built_on_by" and oy < year)))
+
+    def add(other: str, kind: str, source: str, influential: bool = False, via: str | None = None):
+        c = out.setdefault((other, kind), {"other": other, "direction": kind, "source": source,
+                                           "influential": False, "via": []})
+        if c["source"] != source:
+            c["source"] = "both"
+        c["influential"] = c["influential"] or influential
+        if via and via not in c["via"]:
+            c["via"].append(via)
+
     if s2 is not None:
-        rec, how = s2.resolve(paper)
+        rec = None
+        try:
+            rec, how = s2.resolve(paper)
+        except OSError as e:
+            errors.append(str(e))
         if rec:
             info["s2_id"], info["resolved_via"] = rec["paperId"], how
             year = year or rec.get("year")
-            refs = s2.edges(rec["paperId"], "references")
-            cits = s2.edges(rec["paperId"], "citations")
-            info["refs"], info["cits"] = len(refs), len(cits)
-            for kind, rows, key in (("builds_on", refs, "citedPaper"),
-                                    ("built_on_by", cits, "citingPaper")):
+            for kind, path, key, n in (("builds_on", "references", "citedPaper", "refs"),
+                                       ("built_on_by", "citations", "citingPaper", "cits")):
+                try:
+                    rows = s2.edges(rec["paperId"], path)
+                except OSError as e:
+                    errors.append(str(e))
+                    continue
+                info[n] = len(rows)
                 for row in rows:
                     cp = row.get(key)
                     other = lib.match(cp)
-                    if not other or other in exclude:
+                    if not other or other in exclude or later(kind, other, (cp or {}).get("year")):
                         continue
-                    oy = (cp or {}).get("year") or lib.by_id[other].get("year")
-                    # an earlier paper is built on, a later one builds on it (build.py drops a
-                    # "parent" later than its child)
-                    if year and oy and ((kind == "builds_on" and oy > year) or
-                                        (kind == "built_on_by" and oy < year)):
-                        continue
-                    k = (other, kind)
-                    c = out.setdefault(k, {"other": other, "direction": kind, "source": "s2",
-                                           "influential": False})
-                    c["influential"] = c["influential"] or bool(row.get("isInfluential"))
-    if not refs and text:
-        for other in lib.in_text(text, exclude):
-            oy = lib.by_id[other].get("year")
-            if year and oy and oy > year:
+                    add(other, kind, "s2", bool(row.get("isInfluential")), "s2")
+    if errors:
+        info["s2_error"] = "; ".join(errors)
+    if text:
+        named = lib.mentioned_in(text, exclude)
+        info["text_names"] = len(named)
+        for other, field in named.items():
+            if not later("builds_on", other, None):
+                add(other, "builds_on", "text", via="text:" + field)
+    if mentions is not None:
+        n = 0
+        for m in mentions:
+            other = m.get("paper_id") if isinstance(m, dict) else None
+            if other not in lib.by_id or other in exclude:
                 continue
-            out.setdefault((other, "builds_on"), {"other": other, "direction": "builds_on",
-                                                  "source": "text", "influential": False})
-    info["candidates"] = len(out)
-    return list(out.values()), info
+            n += 1
+            if not later("built_on_by", other, None):
+                add(other, "built_on_by", "text", via="mention:" + str(m.get("field") or "text"))
+        info["mentioned_by"] = n
+    # at most MAX_PER_DIRECTION each way: found both ways first, then Semantic Scholar's
+    # (influential first), then the texts' (an id before a title)
+    kept, dropped = [], {}
+    for kind in ("builds_on", "built_on_by"):
+        cs = sorted((c for c in out.values() if c["direction"] == kind),
+                    key=lambda c: (RANK[c["source"]], not c["influential"],
+                                   min((VIA_RANK.get(v.split(":")[-1], 3) for v in c["via"]), default=3), c["other"]))
+        kept += cs[:MAX_PER_DIRECTION]
+        if len(cs) > MAX_PER_DIRECTION:
+            dropped[kind] = [{"other": c["other"], "source": c["source"]} for c in cs[MAX_PER_DIRECTION:]]
+    if dropped:
+        info["dropped"] = dropped
+    info["candidates"] = len(kept)
+    info["sources"] = {k: {s: sum(1 for c in kept if c["direction"] == k and c["source"] == s)
+                           for s in ("s2", "text", "both")} for k in ("builds_on", "built_on_by")}
+    return kept, info
 
 
 # --- grading (judge2.py) ---------------------------------------------------------------------
@@ -375,19 +494,18 @@ def grade_all(cands: list[dict], this: dict, lib: Library, grade, cache_dir: str
 
 
 def find(paper: dict, claims: list[str], library: list[dict], fetch, grade, cache_dir: str,
-         exclude: set | None = None, text: str | None = None, progress=None) -> dict:
+         exclude: set | None = None, text: str | None = None, progress=None,
+         mentions: list | None = None) -> dict:
     """Everything for one paper: {"links": [...], "s2_id", "info"}. `fetch` None: no Semantic
-    Scholar (the text fallback only)."""
+    Scholar (the texts only). `mentions`: the hub's GET /api/cli/mentions answer (None: not
+    asked, or the hub could not say)."""
     lib = Library(library)
     exclude = set(exclude or ())
     s2 = S2(fetch, os.path.join(cache_dir, "s2")) if fetch else None
-    try:
-        cands, info = candidates(paper, lib, s2, text, exclude)
-    except OSError as e:
-        # Semantic Scholar unreachable: the text fallback alone, and say so
-        cands, info = candidates(paper, lib, None, text, exclude)
-        info["s2_error"] = str(e)
+    cands, info = candidates(paper, lib, s2, text, exclude, mentions)
     links, stats = grade_all(cands, dict(paper, claims=claims), lib, grade,
                              os.path.join(cache_dir, "grades"), progress) if cands else ([], {})
     info["grades"] = stats
+    info["candidate_list"] = [{"other": c["other"], "direction": c["direction"], "source": c["source"],
+                               "via": c["via"]} for c in cands]
     return {"links": links, "s2_id": info.get("s2_id"), "info": info}

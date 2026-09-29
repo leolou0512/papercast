@@ -1230,6 +1230,91 @@ def status(cfg) -> dict:
             "current": st.synced == _signature(db.conn()) and not st.fz_dirty}
 
 
+# ---------------------------------------------------------------- mentions (GET /api/cli/mentions)
+
+MENTIONS_MAX = 300          # papers answered at most; the rest are counted
+FIELD_ORDER = ("arxiv", "doi", "title")
+
+
+def _mention_query(words: list, span: int) -> str | None:
+    if not words:
+        return None
+    q = " ".join('"' + w + '"' for w in words)
+    return f"NEAR({q}, {span})" if len(words) > 1 else q
+
+
+def mentions(cfg, title: str | None = None, arxiv: str | None = None, doi: str | None = None,
+             exclude=()) -> dict:
+    """The library papers whose own text (paper.txt) mentions a paper, by its arXiv id, DOI or
+    title (papercast_cli.common.mentions' rules, the same the CLI uses the other way round):
+    {"mentions": [{"paper_id", "field": "arxiv" | "doi" | "title", "fields", "snippet"}],
+    "info": {"searched", "title", "excluded", "more"?, "indexing"?}}. The index narrows the
+    papers down (a phrase for an id, the title's plain words NEAR each other), then each one's
+    text is checked in Python. Never the paper itself, `exclude`, or another version of it (the
+    same arXiv id, DOI or title)."""
+    from papercast_cli.common import mentions as M
+    ax, dx = M.norm_arxiv(arxiv), M.norm_doi(doi)
+    title = " ".join((title or "").split())[:500]
+    st, sig = _fresh(cfg)
+    cat = catalog(db.conn(), sig)
+    me = {"title": title, "arxiv_id": ax, "doi": dx}
+    skip = {x for x in exclude if isinstance(x, str)}
+    skip |= {pid for pid, p in cat.papers.items() if M.same_work(me, p)}
+    why = M.refused(title) if title else "no title"
+    keys = [] if why else M.title_keys(title)
+    near = M.near_words(title) if keys else []
+    if keys and not near:
+        keys, why = [], "no plain words to search by"
+    # other papers' titles that hold this one's key ("Improved <title>"): a match inside one of
+    # them is a mention of that paper; never its own title or a version's
+    own = M.squash(title)
+    longer = [L for L in {M.squash(p["title"]) for pid, p in cat.papers.items() if pid not in skip}
+              if L != own and any(len(L) > len(k) and k in L for k in keys)]
+    info = {"title": why or "searched", "excluded": sorted(skip & set(cat.papers))}
+    if st.thread is not None and st.synced is None:
+        info["indexing"] = True
+    empty = _h([None])
+    with _conn(st) as sc:
+        rows = sc.execute("SELECT id, pid, sig_p FROM doc").fetchall()
+        pid_of = {r["id"]: r["pid"] for r in rows}
+        info["searched"] = sum(1 for r in rows if r["sig_p"] != empty and r["pid"] in cat.papers)
+        want = {}
+        if ax:
+            want["arxiv"] = _rows(sc, "p", '"' + " ".join(tokens(ax)) + '"*')
+        if dx:
+            want["doi"] = _rows(sc, "p", '"' + " ".join(tokens(dx)) + '"*')
+        if keys:
+            span = max(len(M.title_words(title)), len(near)) + 6
+            want["title"] = _rows(sc, "p", _mention_query(near, min(span, 40)))
+        cands = sorted(set().union(*want.values()) if want else set())
+        found = []
+        for rid in cands:
+            pid = pid_of.get(rid)
+            if pid is None or pid in skip or pid not in cat.papers:
+                continue
+            b = sc.execute("SELECT paper FROM doc WHERE id = ?", (rid,)).fetchone()
+            text = _unz(b[0]) if b is not None and b[0] else ""
+            if not text:
+                continue
+            spans = {}
+            if rid in want.get("arxiv", ()):
+                spans["arxiv"] = M.arxiv_in(text, ax)
+            if rid in want.get("doi", ()):
+                spans["doi"] = M.doi_in(text, dx)
+            if rid in want.get("title", ()):
+                spans["title"] = M.title_in(M.Squashed(text), title, longer)
+            fields = [f for f in FIELD_ORDER if spans.get(f)]
+            if fields:
+                found.append({"paper_id": pid, "field": fields[0], "fields": fields,
+                              "snippet": M.snippet(text, spans[fields[0]])})
+    found.sort(key=lambda m: (FIELD_ORDER.index(m["field"]), cat.papers[m["paper_id"]]["added"] or "", m["paper_id"]))
+    if len(found) > MENTIONS_MAX:
+        info["more"] = len(found) - MENTIONS_MAX
+        log.info("mentions of %r: %d papers, the first %d answered", title[:80], len(found), MENTIONS_MAX)
+        found = found[:MENTIONS_MAX]
+    return {"mentions": found, "info": info}
+
+
 def get_facets(req):
     req.send_json(200, facets(req.user["id"] if req.user else None))
 

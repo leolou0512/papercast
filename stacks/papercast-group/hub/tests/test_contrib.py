@@ -468,5 +468,111 @@ class ContribTest(unittest.TestCase):
         self.assertEqual(self.h.wait_checked(a, ep["id"])["state"], "waiting-for-gpu")
 
 
+SDE = "Score-Based Generative Modeling through Stochastic Differential Equations"
+
+
+class MentionsTest(unittest.TestCase):
+    """GET /api/cli/mentions: the library papers whose own text mentions a new paper, by its
+    arXiv id, DOI or title (across pdftotext's line breaks and hyphenation), never the paper
+    itself or another version of it, never by a generic title. Fake papers and texts."""
+
+    @classmethod
+    def setUpClass(cls):
+        from hub import search
+        cls.hub = h = H.Hub()
+        cls.u = h.user("Mia")
+        h.base_prompt()
+        filler = "Filler about sampling, noise levels and the rest of the method. " * 40
+
+        def paper(arxiv_id, title, text):
+            code, cl = h.claim(cls.u, arxiv_id=arxiv_id, title=title)
+            assert code == 201, (code, cl)
+            m = H.manifest(claim_id=cl["claim_id"], paper_over={"arxiv_id": arxiv_id, "title": title}, links=[])
+            m["files"]["paper_text"] = "paper.txt"
+            code, out = h.upload(cls.u, H.bundle(m, extra=[("paper.txt", (filler + text + filler).encode())]))
+            assert code == 201, (code, out)
+            assert h.wait_checked(cls.u, out["episode_id"])["state"] == "waiting-for-gpu"
+            return out["paper_id"]
+
+        # the title in a reference list, broken over lines and hyphenated by pdftotext, with the
+        # venue after it; a hyphen at a line's end inside "Score-based" is joined by the index
+        cls.by_title = paper("2201.00001", "A Later Fake Paper That Cites By Title",
+                             "References\n[12] Y. Song, J. Sohl-Dickstein. Score-\nbased generative model-\ning "
+                             "through Stochastic\nDifferential Equations. In ICLR, 2021.\n")
+        cls.by_arxiv = paper("2201.00002", "A Fake Paper That Cites By Arxiv Id",
+                             "[3] Song et al. Preprint, arXiv:2011.13456v2 [cs.LG], 2020.\n")
+        cls.by_doi = paper("2201.00003", "A Fake Paper That Cites By Its Doi",
+                           "[4] Song et al. https://doi.org/10.5555/SDE.\n2021.77 (2021).\n")
+        cls.scattered = paper("2201.00004", "A Fake Paper With The Words Apart",
+                              "Score matching is a generative idea. Modeling noise through time is stochastic; "
+                              "the differential view helps. Equations follow.\n")
+        cls.itself = paper("2011.13456", SDE, f"{SDE}\nYang Song. Abstract. We present a fake.\n")
+        cls.improved = paper("2201.00005", "Improved " + SDE, "We extend earlier work.\n")
+        cls.cites_improved = paper("2201.00006", "A Fake Paper That Cites Only The Improved One",
+                                   f"[7] Improved {SDE}. 2022.\n")
+        cls.deep = paper("2201.00007", "A Fake Paper About Deep Learning Things",
+                         "Deep learning is used. Deep Learning, by some authors, 2016. Deep neural network models.\n")
+        cls.viewer = h.user("Vic", "viewer")
+        search.idle(h.cfg)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.hub.close()
+
+    def ask(self, user=None, **q):
+        import urllib.parse
+        return self.hub.request("GET", "/api/cli/mentions?" + urllib.parse.urlencode(q),
+                                user=self.u if user is None else user)
+
+    def found(self, **q) -> dict:
+        code, out = self.ask(**q)
+        self.assertEqual(code, 200, out)
+        return {m["paper_id"]: m for m in out["mentions"]}
+
+    def test_title_arxiv_and_doi(self):
+        got = self.found(title=SDE, arxiv="2011.13456", doi="10.5555/sde.2021.77")
+        self.assertEqual(set(got), {self.by_title, self.by_arxiv, self.by_doi})
+        self.assertEqual((got[self.by_title]["field"], got[self.by_arxiv]["field"], got[self.by_doi]["field"]),
+                         ("title", "arxiv", "doi"))
+        self.assertIn("Scorebased generative modeling through Stochastic Differential Equations. In ICLR",
+                      got[self.by_title]["snippet"])
+        self.assertIn("arXiv:2011.13456v2", got[self.by_arxiv]["snippet"])
+        self.assertLess(len(got[self.by_title]["snippet"]), 260)
+        # each key alone
+        self.assertEqual(set(self.found(title=SDE)), {self.by_title})
+        self.assertEqual(set(self.found(arxiv="arXiv:2011.13456v1")), {self.by_arxiv})
+        self.assertEqual(set(self.found(doi="https://doi.org/10.5555/SDE.2021.77")), {self.by_doi})
+        self.assertEqual(self.found(doi="10.5555/sde.2021.7"), {})         # a shorter DOI is another one
+
+    def test_the_paper_itself_and_its_versions_are_left_out(self):
+        code, out = self.ask(title=SDE, arxiv="2011.13456")
+        self.assertIn(self.itself, out["info"]["excluded"])
+        self.assertNotIn(self.itself, {m["paper_id"] for m in out["mentions"]})
+        # another version (the same title, no arXiv id given) is left out too; `exclude` works
+        code, out = self.ask(title=SDE.upper())
+        self.assertIn(self.itself, out["info"]["excluded"])
+        self.assertNotIn(self.by_title, self.found(title=SDE, exclude=self.by_title))
+
+    def test_inside_a_longer_library_title_is_not_a_mention(self):
+        self.assertNotIn(self.cites_improved, self.found(title=SDE))
+        self.assertIn(self.cites_improved, self.found(title="Improved " + SDE))
+
+    def test_a_generic_title_is_refused(self):
+        code, out = self.ask(title="Deep Learning")
+        self.assertEqual((code, out["mentions"]), (200, []))
+        self.assertIn("significant words", out["info"]["title"])
+        code, out = self.ask(title="Deep Neural Network Models")
+        self.assertEqual((out["mentions"], out["info"]["title"]), ([], "only common words"))
+        self.assertEqual(set(self.found(title="Deep Learning", arxiv="2011.13456")), {self.by_arxiv})   # its id still counts
+
+    def test_auth_and_arguments(self):
+        self.assertEqual(self.ask(user={"token": "nope"}, title=SDE)[0], 401)
+        code, _ = self.hub.request("GET", "/api/cli/mentions?title=x", headers={"X-Test-User": self.u["email"]})
+        self.assertEqual(code, 401)                    # a browser's login is not the CLI's
+        self.assertEqual(self.ask(user=self.viewer, title=SDE)[0], 200)     # cli level: any role
+        code, out = self.ask()
+        self.assertEqual((code, out["error"]), (400, "no_keys"))
+
+
 if __name__ == "__main__":
     unittest.main()

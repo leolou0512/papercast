@@ -42,7 +42,9 @@ except ImportError:
 A, NIA, VIC = "alice@example.org", "nia@example.org", "vic@example.org"
 PUBLIC = "https://papercast.example"
 SCRIPT = ("# The idea\n\nA fake model learns to undo noise one small step at a time. Each step is a small denoiser.\n\n"
-          "A second paragraph says a little more. It has two sentences.\n")
+          "A second paragraph says a little more. It has two sentences.\n\n"
+          + "".join(f"Paragraph {w} goes on about nothing much, in plain made-up words. It is here so the page is long enough to scroll.\n\n"
+                    for w in ("three", "four", "five", "six", "seven", "eight", "nine", "ten")))
 STEPS = ["search", "play", "listened", "upnext", "transcript", "comments", "map", "link", "settings", "help"]
 # the control each step must spotlight, found on the page independently of the tour
 TARGETS = {
@@ -341,7 +343,7 @@ class TourPage(PageBase):
                 self.b.viewport(1280, 820)
                 time.sleep(0.2)
             if sid == "transcript":
-                self.js("document.getElementById('win').scrollTop += 40")
+                self.js("(m => (getComputedStyle(m).overflowY === 'auto' ? m : document.getElementById('win')).scrollTop += 40)(document.getElementById('p-mid'))")
                 time.sleep(0.2)
                 g2 = self.assertSpotlight(sid, where="after a scroll")
                 self.assertNotEqual(g2["r"][1], g["r"][1], "the window did not scroll")

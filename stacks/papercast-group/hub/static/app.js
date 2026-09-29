@@ -13,7 +13,7 @@
     cfg: null, me: {}, papers: new Map(), q: "", open: null, view: "list",
     es: null, lastId: "", esRetry: null, esFails: 0, offTimer: null,
     audioEp: null, audioPaper: null, audioReady: null, afterReady: null, dirty: false,
-    miniEp: null, speed: 1, swiped: null, swipeEnd: 0, flash: null,
+    barEp: null, barOpen: false, pane: "tr", speed: 1, swiped: null, swipeEnd: 0, flash: null,
     rows: new Map(), menu: null, lastFocus: null, scrubbing: null,
     build: "", reloadFor: "", typedAt: 0,
     sort: "added_desc", details: false,
@@ -747,7 +747,7 @@
     S.flash = null;
     renderStat();
     wantSnips();
-    renderMini();
+    renderPlayer();
     mapSync();
     if (S.more && S.nearEnd) checkEnd();
   }
@@ -931,7 +931,7 @@
     if (v === "settings") $("set-btn").setAttribute("aria-current", "page"); else $("set-btn").removeAttribute("aria-current");
   }
   async function openWin(id) {
-    if (S.open !== id) { S.open = id; S.details = false; closeExplainer(); closeMenu(); }
+    if (S.open !== id) { S.open = id; S.details = false; closeExplainer(); closeMenu(); setPane("tr"); }
     showView("paper");
     store.set("pcg.last", id);
     if (!S.papers.has(id)) {
@@ -943,7 +943,7 @@
     const c = chosen(S.papers.get(id));
     if (c && !isPlaying(S.audioEp)) loadAudio(c.id);
     renderWin();
-    $("win").scrollTop = 0; onScroll();
+    $("win").scrollTop = 0; $("p-mid").scrollTop = 0;
   }
   function closeWin() {
     S.open = null;
@@ -1033,9 +1033,7 @@
     lb.hidden = !anyAudio(p);
     lb.setAttribute("aria-checked", String(!!p.listened));
     lb.querySelector(".box").innerHTML = p.listened ? I.check : "";
-    $("player").hidden = !(c && c.has_audio);
     $("x-open").disabled = !(c && c.has_explainer);
-    titleInto($("s-title"), p);
     renderState(c);
     renderVersions(p, c);
     renderVoice(c);
@@ -1043,7 +1041,22 @@
     renderQueue();
     renderTranscript(c);
     if (S.social) S.social.paper(p, c);
-    onScroll();
+    renderTabs();
+  }
+
+  // Where the window is too narrow for the comments column (a phone), the transcript and the
+  // comments are two tabs under the versions.
+  function setPane(k) {
+    S.pane = k === "c" ? "c" : "tr";
+    $("paper").classList.toggle("pane-c", S.pane === "c");
+    $("pt-tr").setAttribute("aria-selected", String(S.pane === "tr"));
+    $("pt-c").setAttribute("aria-selected", String(S.pane === "c"));
+    if (S.pane === "tr" && isPlaying(T.eid)) { T.follow = true; keepInView(true); }
+    trNowBtn();
+  }
+  function renderTabs() {
+    const n = S.social && S.open ? S.social.count(S.open) : 0, t = n ? `Comments (${n})` : "Comments";
+    if ($("pt-c").textContent !== t) $("pt-c").textContent = t;
   }
 
   function renderState(c) {
@@ -1066,9 +1079,6 @@
       kids.push(big("The audio is missing", "danger"));
     } else {
       kids.push(big("Checking…"), detail("The hub is checking the upload."));
-    }
-    if (c.has_explainer) {
-      kids.push(el("div", { class: "act" }, el("button", { type: "button", class: "explain", html: `${I.doc}<span>Explainer</span>`, onclick: openExplainer })));
     }
     box.hidden = false;
     box.replaceChildren(...kids.filter(Boolean));
@@ -1145,7 +1155,7 @@
       const p = paperOf(pid) || {};
       try { navigator.mediaSession.metadata = new MediaMetadata({ title: displayTitle(p) || "Papers", artist: shortAuthors(p), album: whoLine(e) }); } catch (x) { /* old browser */ }
     }
-    renderMini();
+    renderPlayer();
     return true;
   }
   function unloadAudio() {
@@ -1155,7 +1165,7 @@
     const old = S.audioPaper;
     S.audioEp = null; S.audioPaper = null; S.audioReady = null;
     if (old) updateRow(old);
-    renderMini();
+    renderPlayer();
   }
   // To the hub while playing every 10 s, and at once on a pause, a seek or the end; a burst of
   // seeks is one request (half a second after the last). Leaving the page, it goes as a
@@ -1194,7 +1204,7 @@
   function openEp() { const p = S.papers.get(S.open); return p ? chosen(p) : null; }
   function togglePlay(eid) {
     const a = A();
-    const e = eid ? epById(eid) : openEp();
+    const e = eid ? epById(eid) : barEpisode();
     if (!e || !e.has_audio) return;
     if (S.audioEp === e.id && a.getAttribute("src")) {
       if (a.paused || a.ended) a.play().catch((x) => toast(`Cannot play: ${x.message}`)); else a.pause();
@@ -1212,37 +1222,14 @@
     });
   }
   function skip(delta) {
-    const e = openEp();
+    const e = barEpisode();
     if (!e || !e.has_audio) return;
     withAudio(e.id, (a) => { S.dirty = true; a.currentTime = Math.max(0, Math.min(a.duration || 0, a.currentTime + delta)); savePosition(true); renderPlayer(); });
   }
-  function renderPlayer() {
-    const e = openEp();
-    if (e && e.has_audio && S.view === "paper") {
-      const d = durOf(e), t = S.scrubbing !== null ? S.scrubbing * d : posOf(e), f = d ? Math.min(1, t / d) : 0;
-      const playing = isPlaying(e.id);
-      $("fill").style.width = `${f * 100}%`;
-      $("thumb").style.left = `${f * 100}%`;
-      $("p-el").textContent = hms(t);
-      $("p-rem").textContent = `−${hms(Math.max(0, d - t))}`;
-      const sc = $("scrub");
-      sc.setAttribute("aria-valuemax", String(Math.round(d)));
-      sc.setAttribute("aria-valuenow", String(Math.round(t)));
-      sc.setAttribute("aria-valuetext", `${hms(t)} of ${hms(d)}`);
-      const pb = $("p-play"), sp = $("s-play");
-      if (pb.dataset.on !== String(playing)) {
-        pb.dataset.on = String(playing);
-        pb.innerHTML = playing ? I.pause(24) : I.play(24); pb.setAttribute("aria-label", playing ? "Pause" : "Play");
-        sp.innerHTML = playing ? I.pause(16) : I.play(16); sp.setAttribute("aria-label", playing ? "Pause" : "Play");
-      }
-      $("s-sub").textContent = `${hms(t)} · ${Math.max(1, Math.round((d - t) / 60))} min left`;
-      $("s-prog").style.width = `${f * 100}%`;
-    }
-    renderMini();
-  }
-  // The mini player's episode: the one loaded in <audio>, else (after a reload) the one
-  // listened to most recently that is part-way through.
-  function miniEpisode() {
+  // The bar at the bottom plays one episode wherever the page is: the one loaded in <audio>,
+  // else (after a reload) the one listened to most recently that is part-way through. Opening a
+  // paper loads its version unless another one is playing; that paper then has its own Play.
+  function barEpisode() {
     const a = A();
     if (S.audioEp && a.getAttribute("src")) return epById(S.audioEp);
     let best = null, bestAt = -1;
@@ -1256,22 +1243,53 @@
     }
     return best;
   }
-  function renderMini() {
-    const e = miniEpisode();
-    const d = e ? durOf(e) : 0, t = e ? posOf(e) : 0;
-    const on = !!(e && (isPlaying(e.id) || (t > 0 && t < d - 2)));
-    S.miniEp = on ? e.id : null;
-    document.body.classList.toggle("has-mini", on);
-    $("mini").hidden = !on;
-    if (!on) return;
-    titleInto($("mini-title"), paperOf(S.epPaper.get(e.id)) || {});
-    $("mini-sub").textContent = `${Math.max(1, Math.round((d - t) / 60))} min left · ${whoLine(e)}`;
-    $("mini-prog").style.width = d ? `${100 * Math.min(1, t / d)}%` : "0";
-    const playing = isPlaying(e.id), mp = $("mini-play");
-    if (mp.dataset.on !== String(playing)) {
-      mp.dataset.on = String(playing);
-      mp.innerHTML = playing ? I.pause(22) : I.play(22); mp.setAttribute("aria-label", playing ? "Pause" : "Play");
+  function renderPlayer() {
+    const e = barEpisode(), bar = $("bar");
+    S.barEp = e ? e.id : null;
+    const was = !bar.hidden;
+    bar.hidden = !e;
+    document.body.classList.toggle("has-bar", !!e);
+    if (!e) { if (S.barOpen) openBar(false); } else {
+      const d = durOf(e), t = S.scrubbing !== null ? S.scrubbing * d : posOf(e), f = d ? Math.min(1, t / d) : 0;
+      const playing = isPlaying(e.id);
+      $("fill").style.width = `${f * 100}%`;
+      $("thumb").style.left = `${f * 100}%`;
+      $("b-prog").style.width = `${f * 100}%`;
+      $("p-el").textContent = hms(t);
+      $("p-rem").textContent = `−${hms(Math.max(0, d - t))}`;
+      const sc = $("scrub");
+      sc.setAttribute("aria-valuemax", String(Math.round(d)));
+      sc.setAttribute("aria-valuenow", String(Math.round(t)));
+      sc.setAttribute("aria-valuetext", `${hms(t)} of ${hms(d)}`);
+      const p = paperOf(S.epPaper.get(e.id)) || {};
+      if ($("bar-title").dataset.ep !== e.id || $("bar-title").textContent !== displayTitle(p)) { titleInto($("bar-title"), p); $("bar-title").dataset.ep = e.id; }
+      const sub = phone() ? `${Math.max(1, Math.round((d - t) / 60))} min left · ${whoLine(e)}` : whoLine(e);
+      if ($("bar-sub").textContent !== sub) $("bar-sub").textContent = sub;
+      const pb = $("p-play");
+      if (pb.dataset.on !== String(playing)) {
+        pb.dataset.on = String(playing);
+        pb.innerHTML = playing ? I.pause(20) : I.play(20); pb.setAttribute("aria-label", playing ? "Pause" : "Play");
+      }
     }
+    if (was !== !bar.hidden) barHeight();
+    // the open paper's own Play, while the bar has another one
+    const c = S.view === "paper" ? openEp() : null;
+    $("w-play").hidden = !(c && c.has_audio && (!e || c.id !== e.id));
+  }
+  // The window and the list end where the bar starts (the bar's own height, in this page's px).
+  function barHeight() {
+    const bar = $("bar");
+    document.body.style.setProperty("--bar-h", `${bar.hidden ? 0 : bar.offsetHeight}px`);
+  }
+  // On a phone the bar is one line (Play, the title, a thin line for how far); a tap on it opens
+  // the rest (the position, skips, speed, Up next), and a tap on the title then opens the paper.
+  function openBar(on) {
+    S.barOpen = !!on;
+    $("bar").classList.toggle("open", S.barOpen);
+    const x = $("bar-exp");
+    x.setAttribute("aria-expanded", String(S.barOpen));
+    x.innerHTML = S.barOpen ? PI.down2 : PI.up2;
+    barHeight();
   }
   function setSpeed(v) {
     S.speed = v;
@@ -1281,41 +1299,45 @@
   }
   function wirePlayer() {
     const a = A();
-    $("p-play").innerHTML = I.play(24); $("s-play").innerHTML = I.play(16); $("mini-play").innerHTML = I.play(22);
+    $("p-play").innerHTML = I.play(20); $("w-play").innerHTML = I.play(20);
     $("p-back").innerHTML = I.skip(15, false); $("p-fwd").innerHTML = I.skip(30, true);
     $("x-icon").innerHTML = I.doc;
-    $("p-play").addEventListener("click", () => togglePlay());
-    $("s-play").addEventListener("click", () => togglePlay());
+    $("bar-exp").innerHTML = PI.up2;
+    $("p-play").addEventListener("click", () => { if (S.barEp) togglePlay(S.barEp); });
+    $("w-play").addEventListener("click", () => { const c = openEp(); if (c) togglePlay(c.id); });
     $("p-back").addEventListener("click", () => skip(-15));
     $("p-fwd").addEventListener("click", () => skip(30));
     $("p-speed").addEventListener("click", () => setSpeed(SPEEDS[(SPEEDS.indexOf(S.speed) + 1) % SPEEDS.length]));
-    $("mini").addEventListener("click", (e) => {
-      if (e.target.closest("#mini-play")) { if (S.miniEp) togglePlay(S.miniEp); return; }
-      if (S.miniEp) openPaper(S.epPaper.get(S.miniEp));
+    $("bar-open").addEventListener("click", () => {
+      if (phone() && !S.barOpen) { openBar(true); return; }
+      openBar(false);
+      if (S.barEp) openPaper(S.epPaper.get(S.barEp));
     });
-    $("mini").addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.id === "mini" && S.miniEp) openPaper(S.epPaper.get(S.miniEp)); });
+    $("bar-exp").addEventListener("click", () => openBar(!S.barOpen));
+    if (window.ResizeObserver) new ResizeObserver(barHeight).observe($("bar"));
+    window.matchMedia("(max-width: 720px)").addEventListener("change", () => { if (!phone()) openBar(false); renderPlayer(); });
     const sc = $("scrub");
     const frac = (x) => { const r = sc.getBoundingClientRect(); return Math.max(0, Math.min(1, (x - r.left) / (r.width || 1))); };
     sc.addEventListener("pointerdown", (e) => { sc.setPointerCapture(e.pointerId); S.scrubbing = frac(e.clientX); renderPlayer(); });
     sc.addEventListener("pointermove", (e) => { if (S.scrubbing !== null && sc.hasPointerCapture(e.pointerId)) { S.scrubbing = frac(e.clientX); renderPlayer(); } });
     const commit = () => {
       if (S.scrubbing === null) return;
-      const e = openEp(), f = S.scrubbing;
+      const e = barEpisode(), f = S.scrubbing;
       S.scrubbing = null;
       if (e) seekTo(e, f * durOf(e));
     };
     sc.addEventListener("pointerup", commit);
     sc.addEventListener("pointercancel", () => { S.scrubbing = null; renderPlayer(); });
     sc.addEventListener("keydown", (ev) => {
-      const e = openEp();
+      const e = barEpisode();
       if (!e) return;
       const k = { ArrowLeft: -15, ArrowDown: -15, ArrowRight: 30, ArrowUp: 30 }[ev.key];
       if (k) { ev.preventDefault(); skip(k); } else if (ev.key === "Home") { ev.preventDefault(); seekTo(e, 0); } else if (ev.key === "End") { ev.preventDefault(); seekTo(e, durOf(e) - 1); }
     });
-    for (const ev of ["play", "pause", "durationchange", "ended", "seeked"]) a.addEventListener(ev, () => { renderPlayer(); if (S.audioPaper) updateRow(S.audioPaper); });
+    for (const ev of ["play", "pause", "durationchange", "ended", "seeked", "emptied"]) a.addEventListener(ev, () => { renderPlayer(); if (S.audioPaper) updateRow(S.audioPaper); });
     a.addEventListener("timeupdate", () => {
       savePosition(false);
-      if (S.audioPaper === S.open) renderPlayer(); else renderMini();
+      renderPlayer();
       const now = Date.now();
       if (now - lastRowTick > 5000 && S.audioPaper) { lastRowTick = now; updateRow(S.audioPaper); }
     });
@@ -1338,11 +1360,6 @@
     const saved = parseFloat(store.get("pcg.speed") || "1");
     setSpeed(SPEEDS.includes(saved) ? saved : 1);
   }
-  // The large player shrinks to the slim bar once it has scrolled away.
-  function onScroll() {
-    const w = $("win"), pz = $("pz"), e = openEp();
-    $("strip").classList.toggle("on", S.view === "paper" && !!(e && e.has_audio) && w.scrollTop > pz.offsetTop + pz.offsetHeight - 72);
-  }
 
   // ------------------------------------------------------------------ up next
   // Each person's queue of episodes, kept on the hub so it follows them from the laptop to the
@@ -1359,6 +1376,8 @@
     grip: `<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="5.5" cy="3.5" r="1.3"/><circle cx="10.5" cy="3.5" r="1.3"/><circle cx="5.5" cy="8" r="1.3"/><circle cx="10.5" cy="8" r="1.3"/><circle cx="5.5" cy="12.5" r="1.3"/><circle cx="10.5" cy="12.5" r="1.3"/></svg>`,
     prev: `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 5-5 5 5"/></svg>`,
     next: `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 7.5 5 5 5-5"/></svg>`,
+    up2: `<svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 14 6-6 6 6"/></svg>`,
+    down2: `<svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 8 6 6 6-6"/></svg>`,
   };
   const queued = (eid) => Q.ids.includes(eid);
   // An answer older than one already seen (a read that left before a change and came back
@@ -1494,7 +1513,6 @@
       $("p-next-n").textContent = more > 0 ? `${more} more` : "";
       pn.setAttribute("aria-label", `Up next: ${displayTitle(fp) || "a paper"}${more > 0 ? `, and ${more} more` : ""}`);
     }
-    $("mini-q").hidden = !first;
     if (!$("q-overlay").hidden) drawQueue();
   }
   function drawQueue(focus) {
@@ -1589,10 +1607,9 @@
   }
   function wireQueue() {
     const a = A();
-    $("mini-q").innerHTML = PI.queue;
     $("q-close").innerHTML = I.close;
+    $("p-next").insertAdjacentHTML("afterbegin", PI.queue);
     $("p-next").addEventListener("click", openQueue);
-    $("mini-q").addEventListener("click", (e) => { e.stopPropagation(); openQueue(); });
     $("q-close").addEventListener("click", closeQueue);
     $("q-clear").addEventListener("click", qClear);
     $("q-overlay").addEventListener("click", (e) => { if (e.target === $("q-overlay")) closeQueue(); });
@@ -1605,20 +1622,22 @@
   // ------------------------------------------------------------------ transcript
   // The window's version's script as plain headings and paragraphs (text, never markup), each
   // sentence tied to its time: the voice worker's timings, else the hub's estimate (stretched to
-  // the audio's real length). The sentence being spoken is marked. While the person can see it,
-  // it is kept in view as it moves on; once they scroll away it is left alone, and "Back to now"
-  // brings it back. A tap on a sentence plays from there.
+  // the audio's real length). The sentence being spoken is marked. While this paper plays, the
+  // window rolls with it: the sentence stays about a third of the way down. Once the person
+  // scrolls away it is left alone until "Back to now", Play, a tap on a sentence, or their own
+  // scroll back to it. A tap on a sentence plays from there.
   const T = { key: null, eid: null, data: null, parts: [], texts: [], bySeg: new Map(), rep: [], cur: -1,
-    follow: false, autoUntil: 0, req: 0, q: "", hits: [], hit: -1, marked: [], findTimer: null };
+    follow: true, autoUntil: 0, req: 0, q: "", hits: [], hit: -1, marked: [], findTimer: null };
   function renderTranscript(c) {
     $("tr-body").classList.toggle("live", !!(c && c.has_audio));
     const key = c ? `${c.id}:${!!c.has_audio}` : null;      // voiced since: its timings may be new
     if (key === T.key) { trTick(); return; }
     T.key = key; T.eid = c ? c.id : null;
-    T.data = null; T.parts = []; T.texts = []; T.bySeg = new Map(); T.rep = []; T.cur = -1; T.follow = false;
+    T.data = null; T.parts = []; T.texts = []; T.bySeg = new Map(); T.rep = []; T.cur = -1; T.follow = true;
     T.hits = []; T.hit = -1; T.marked = [];
     $("tr-body").replaceChildren();
     $("tr").hidden = true;
+    $("paper").classList.remove("has-tr");
     $("tr-now").hidden = true;
     $("tr-count").textContent = "";
     if (!c) return;
@@ -1653,6 +1672,7 @@
     T.rep = segs.map((_, i) => (T.bySeg.has(i) ? (last = i) : last));
     $("tr-note").hidden = !T.data.estimated;
     $("tr").hidden = false;
+    $("paper").classList.add("has-tr");
     if ($("tr-q").value.trim()) trFind(false, true);
     trTick();
     trNowBtn();
@@ -1680,40 +1700,49 @@
     setCur(segAt(posOf(e) / trScale(e)));
   }
   const curEls = () => (T.cur >= 0 && T.bySeg.get(T.rep[T.cur])) || [];
+  const following = () => T.follow && isPlaying(T.eid);
+  const trShown = () => S.view === "paper" && !$("tr").hidden && $("tr").getClientRects().length > 0;
   function setCur(i) {
     if (i === T.cur) return;
     for (const s of curEls()) s.classList.remove("now");
     T.cur = i;
     for (const s of curEls()) s.classList.add("now");
-    if (T.follow) keepInView(false);
+    if (following()) keepInView(false);
     trNowBtn();
   }
-  // The part of the window a sentence is seen in: under the slim player bar when it shows.
+  // What scrolls the transcript: the middle column where the comments have a column of their
+  // own (app.css), else the window.
+  function trScroller() {
+    const m = $("p-mid");
+    return getComputedStyle(m).overflowY === "auto" ? m : $("win");
+  }
+  // The part of it a sentence is seen in: under the phone's top bar, which stays.
   function trView() {
-    const r = $("win").getBoundingClientRect(), bar = $("strip").classList.contains("on") ? 56 : 0;
-    return { top: r.top + bar, bottom: r.bottom, h: Math.max(1, r.height - bar) };
+    const r = trScroller().getBoundingClientRect(), pt = document.querySelector("#paper > .phone-top");
+    const top = pt && pt.getClientRects().length && getComputedStyle(pt).position === "sticky" ? Math.max(r.top, pt.getBoundingClientRect().bottom) : r.top;
+    return { top, bottom: r.bottom, h: Math.max(1, r.bottom - top) };
   }
   function curVisible() {
     const els = curEls();
-    if (!els.length || S.view !== "paper" || $("tr").hidden) return false;
+    if (!els.length || !trShown()) return false;
     const v = trView(), a = els[0].getBoundingClientRect(), b = els[els.length - 1].getBoundingClientRect();
     return b.bottom > v.top + 8 && a.top < v.bottom - 8;
   }
   const motion = () => (window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth");
   function scrollWinTo(node, at) {
-    const w = $("win"), v = trView(), r = node.getBoundingClientRect();
+    const w = trScroller(), v = trView(), r = node.getBoundingClientRect();
     T.autoUntil = Date.now() + 1000;        // this scroll is the page's own, not the person's
     w.scrollTo({ top: Math.max(0, w.scrollTop + r.top - (v.top + v.h * at)), behavior: motion() });
   }
   function keepInView(force) {
     const els = curEls();
-    if (!els.length || S.view !== "paper" || $("tr").hidden) return;
+    if (!els.length || !trShown()) return;
     const v = trView(), r = els[0].getBoundingClientRect();
-    if (!force && r.top >= v.top + v.h * 0.12 && r.bottom <= v.bottom - v.h * 0.2) return;
-    scrollWinTo(els[0], 0.3);
+    if (!force && r.top >= v.top + v.h * 0.22 && r.top <= v.top + v.h * 0.42 && r.bottom <= v.bottom - 8) return;
+    scrollWinTo(els[0], 0.32);
   }
   function trNowBtn() {
-    $("tr-now").hidden = !(T.data && T.cur >= 0 && !T.follow && !curVisible());
+    $("tr-now").hidden = !(T.data && T.cur >= 0 && !following() && !curVisible());
   }
   function playFrom(e, t) {
     const a = A();
@@ -1773,17 +1802,22 @@
   function wireTranscript() {
     const w = $("win"), a = A(), q = $("tr-q");
     $("tr-prev").innerHTML = PI.prev; $("tr-next").innerHTML = PI.next;
-    // What the person does to scroll ends the page's own scroll at once.
-    const theirs = () => { T.autoUntil = 0; };
+    // What the person does to scroll ends the page's own scroll at once (the comments column
+    // scrolls on its own, and does not count).
+    const theirs = (e) => { if (e && e.target && e.target.closest && e.target.closest("#comments, #bar")) return; T.autoUntil = 0; };
     for (const ev of ["wheel", "touchstart", "pointerdown"]) w.addEventListener(ev, theirs, { passive: true });
-    document.addEventListener("keydown", (e) => { if (/^(Arrow|Page|Home|End| )/.test(e.key)) theirs(); });
+    document.addEventListener("keydown", (e) => { if (/^(Arrow|Page|Home|End| )/.test(e.key)) theirs(e); });
     // Scrolled by the person: the page follows the sentence again once they can see it.
-    w.addEventListener("scroll", () => {
+    const scrolled = () => {
       if (!T.data) return;
       if (Date.now() >= T.autoUntil) T.follow = curVisible();
       trNowBtn();
-    }, { passive: true });
+    };
+    for (const x of [w, $("p-mid")]) x.addEventListener("scroll", scrolled, { passive: true });
     for (const ev of ["timeupdate", "seeked", "loadedmetadata", "durationchange", "emptied"]) a.addEventListener(ev, trTick);
+    // Play follows the sentence again.
+    a.addEventListener("play", () => { if (S.audioEp !== T.eid) return; T.follow = true; trTick(); keepInView(false); trNowBtn(); });
+    a.addEventListener("pause", trNowBtn);
     $("tr-body").addEventListener("click", (ev) => {
       const s = ev.target.closest(".tr-s");
       if (!s || !T.data) return;
@@ -1830,7 +1864,8 @@
       api, me: () => S.me, isAdmin, phone, toast, hms, avatar: avatarNode,
       typed: () => { S.typedAt = Date.now(); },
       openPaper: (pid) => openPaper(pid),
-      rowChanged: (pid) => updateRow(pid),
+      rowChanged: (pid) => { updateRow(pid); if (pid === S.open) renderTabs(); },
+      showComments: () => setPane("c"),
       // the open paper's version in the player, and where it is
       position: () => { const e = openEp(); return e && e.has_audio ? { eid: e.id, s: posOf(e) } : null; },
       seek: seekPlay,
@@ -1854,6 +1889,7 @@
       open: (pid) => { history.replaceState(null, "", `#p=${pid}`); openFromHash(true); },
       list: () => { closeMenu(); closeQueue(); if (S.view !== "list") goList(); },
       openMap, closeMap: () => closeMap(), closeMenu, map: () => S.map,
+      pane: (k) => setPane(k),
       idle: () => $("overlay").hidden && $("q-overlay").hidden && !S.menu && document.visibilityState === "visible",
     };
   }
@@ -2772,7 +2808,7 @@
 
   // ------------------------------------------------------------------ start
   async function start() {
-    $("back").innerHTML = I.back; $("s-back").innerHTML = I.back; $("set-back").innerHTML = I.back;
+    $("back").innerHTML = I.back; $("set-back").innerHTML = I.back;
     $("w-more").innerHTML = I.more; $("w-more-phone").innerHTML = I.more;
     $("x-close").innerHTML = I.close;
     $("sort-btn").innerHTML = I.sort;
@@ -2795,7 +2831,8 @@
     wireQueue();
     wireTranscript();
     $("back").addEventListener("click", goList);
-    $("s-back").addEventListener("click", goList);
+    $("pt-tr").addEventListener("click", () => setPane("tr"));
+    $("pt-c").addEventListener("click", () => setPane("c"));
     $("set-back").addEventListener("click", goList);
     $("set-btn").addEventListener("click", () => { if (S.view === "settings") goList(); else location.hash = "settings"; });
     $("w-more").addEventListener("click", (e) => { e.stopPropagation(); openMenu(e.currentTarget, "win", winMenu()); });
@@ -2803,7 +2840,6 @@
     $("x-open").addEventListener("click", openExplainer);
     $("x-close").addEventListener("click", closeExplainer);
     $("overlay").addEventListener("click", (e) => { if (e.target === $("overlay")) closeExplainer(); });
-    $("win").addEventListener("scroll", onScroll, { passive: true });
     document.addEventListener("click", (e) => { if (S.menu && !S.menu.node.contains(e.target) && !S.menu.anchor.contains(e.target)) closeMenu(); });
     document.addEventListener("pointerdown", (e) => {
       if (S.swiped && !e.target.closest(`.row[data-id="${S.swiped}"]`)) closeSwipe();

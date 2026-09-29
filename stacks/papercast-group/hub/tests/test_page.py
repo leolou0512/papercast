@@ -278,6 +278,64 @@ class Page(PageBase):
         r.episode(gone, cls.bob, state="rejected")
         cls.order = [cls.speak, cls.wait, cls.two] + cls.many[::-1]
 
+    def test_0_the_player_bar(self):
+        """The player is a bar along the bottom of the page, the whole width; the list and the
+        window end where it starts. It plays, pauses and seeks; it stays while they scroll and
+        while another paper is open, which then has its own Play; its title opens its paper."""
+        b = self.b
+        audio = "document.getElementById('audio')"
+        rect = lambda sel: b.js(f"(r => [r.left, r.top, r.right, r.bottom])(document.querySelector({json.dumps(sel)}).getBoundingClientRect())")
+        try:
+            self.home(C)
+            self.open(self.two)
+            b.wait_js(f"!document.getElementById('bar').hidden && {audio}.duration > 20", 10, "the bar, loaded")
+            vw, vh = b.js("[innerWidth, innerHeight]")
+            bar = rect("#bar")
+            self.assertEqual(b.js("getComputedStyle(document.getElementById('bar')).position"), "fixed")
+            self.assertEqual([round(v) for v in (bar[0], bar[2], bar[3])], [0, vw, vh], "the bar is not along the bottom")
+            self.assertAlmostEqual(rect(".app")[3], bar[1], delta=1, msg="the list and the window do not end at the bar")
+            self.assertEqual(self.text("#bar-title"), "Two Versions Of One Fake Paper")
+            self.assertEqual(self.text("#bar-sub"), "by Alice · derivations")
+            self.assertTrue(b.js("document.getElementById('w-play').hidden"), "the bar has this paper: no second Play")
+            # play, pause
+            b.js(f"{audio}.muted = true; document.getElementById('p-play').click()")
+            b.wait_js(f"!{audio}.paused && {audio}.currentTime > 0.3 && document.getElementById('p-play').getAttribute('aria-label') === 'Pause'", 10, "playing")
+            b.js("document.getElementById('p-play').click()")
+            b.wait_js(f"{audio}.paused && document.getElementById('p-play').getAttribute('aria-label') === 'Play'", 5, "paused")
+            # seek: pressed at three quarters of the line
+            x0, y0, w = b.js("(r => [r.left, r.top + r.height / 2, r.width])(document.querySelector('#scrub .track').getBoundingClientRect())")
+            for kind in ("mousePressed", "mouseReleased"):
+                b.call("Input.dispatchMouseEvent", type=kind, x=x0 + w * 0.75, y=y0, button="left", clickCount=1)
+            b.wait_js(f"Math.abs({audio}.currentTime - 0.75 * {audio}.duration) < 0.8"
+                      f" && document.getElementById('p-el').textContent === '0:' + String(Math.floor({audio}.currentTime)).padStart(2, '0')", 5, "sought")
+            # the middle and the list scroll under it; it stays
+            b.js("document.getElementById('p-mid').scrollTop = 200; document.getElementById('list-pane').scrollTop = 400")
+            self.assertEqual(rect("#bar"), bar)
+            # another paper open: the bar keeps the one playing, and the other paper has its own Play
+            b.js(f"document.getElementById('p-play').click()")
+            b.wait_js(f"!{audio}.paused", 5, "playing again")
+            self.open(self.many[0])
+            self.assertEqual(self.text("#bar-title"), "Two Versions Of One Fake Paper")
+            self.assertEqual(rect("#bar"), bar)
+            b.wait_js(f"!document.getElementById('w-play').hidden && !{audio}.paused", 3, "the open paper's own Play")
+            # the bar's title opens the paper that plays
+            b.js("document.getElementById('bar-open').click()")
+            b.wait_js(f"location.hash === '#p={self.two}' && document.getElementById('w-play').hidden", 5, "back to it from the bar")
+            self.open(self.many[0])
+            b.js("document.getElementById('w-play').click()")
+            b.wait_js("document.getElementById('bar-title').textContent === 'Fake paper n000'"
+                      " && document.getElementById('w-play').hidden", 5, "the open paper plays in the bar")
+            b.js(f"{audio}.pause()")
+            self.shot("desktop-bar")
+        finally:
+            # the page's last save goes as it is left: gone, then the positions forgotten
+            b.js(f"{audio}.pause()")
+            b.goto("about:blank")
+            time.sleep(0.8)
+            b.goto(self.base + "/")
+            b.js("localStorage.clear()")
+            self.r.q("DELETE FROM positions")
+
     def test_1_list_pages_of_50_with_makers(self):
         """The first 50 rows, 50 more as the list is scrolled to its end, nothing on screen
         moving; each row says who made the version that plays; search finds makers too."""
@@ -404,7 +462,7 @@ class Page(PageBase):
             # the first save came as it started; the pause's is the one that stays
             r.wait(lambda: pos(self.carol, self.va) and abs(pos(self.carol, self.va)[0][0] - at) < 0.3, 5, "the position on the hub")
             self.assertEqual(pos(self.bob, self.va), [])                          # Carol's alone
-            # the row and the mini player say how much is left
+            # the row says how much is left
             b.wait_js(f"document.querySelector('{ROW.format(self.two)} .row-sub .st').textContent === '1 min left'", 5, "row")
             # a fresh load resumes where she paused
             self.load(f"p={self.two}")
@@ -722,16 +780,22 @@ class Page(PageBase):
             self.open(self.wait)
             b.wait_js("!document.getElementById('w-state').hidden", 5, "waiting")
             self.assertTargets("a paper waiting for the GPU")
-            # playing, paused, back on the list: the mini player
+            # playing, paused, back on the list: the player bar, one line, then opened
             self.open(self.two)
             b.js("document.getElementById('audio').muted = true; document.getElementById('p-play').click()")
             b.wait_js("document.getElementById('audio').currentTime > 0.5", 10, "playing")
             b.js("document.getElementById('p-play').click()")
             b.js("document.getElementById('back').click()")
-            b.wait_js("getComputedStyle(document.getElementById('mini')).display === 'flex'"
-                      " && getComputedStyle(document.getElementById('win')).visibility === 'hidden'", 5, "mini player")
-            self.assertTargets("the mini player")
+            b.wait_js("!document.getElementById('bar').hidden"
+                      " && getComputedStyle(document.getElementById('win')).visibility === 'hidden'", 5, "the bar on the list")
+            self.assertTargets("the player bar")
             self.shot("phone-list")
+            b.js("document.getElementById('bar-exp').click()")
+            b.wait_js("document.getElementById('bar').classList.contains('open') && document.getElementById('scrub').getClientRects().length > 0"
+                      " && document.getElementById('p-speed').getClientRects().length > 0", 3, "the bar opened")
+            self.assertTargets("the player bar, opened")
+            self.no_side_scroll("the player bar, opened")
+            b.js("document.getElementById('bar-exp').click()")
             # settings, every tab
             r.token(self.alice, "alice-laptop")
             for t in ("prefs", "devices", "users", "base"):

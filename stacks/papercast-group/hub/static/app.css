@@ -58,7 +58,7 @@ body {
 button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
 button:disabled { cursor: default; opacity: .5; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible,
-.row-in:focus-visible, .scrub:focus-visible, .mini:focus-visible {
+.row-in:focus-visible, .scrub:focus-visible {
   outline: 2px solid var(--accent); outline-offset: 2px;
 }
 .t { font-variant-numeric: tabular-nums; }
@@ -66,9 +66,12 @@ svg { display: block; }
 [hidden] { display: none !important; }
 
 /* ---------- layout ---------- */
-.app { display: grid; grid-template-columns: 340px 1fr; height: 100vh; height: 100dvh; }
+/* The list and the window above the player bar (--bar-h: its height, set by app.js). Fixed
+   insets, not 100vh, so the page fits the screen at any zoom. The window is a size container:
+   its own width decides whether the comments get a column (660 px and up) or a tab. */
+.app { position: fixed; top: 0; left: 0; right: 0; bottom: var(--bar-h, 0px); display: grid; grid-template-columns: 340px minmax(0, 1fr); }
 .list-pane { background: var(--side); overflow-y: auto; position: relative; }
-.window { overflow-y: auto; position: relative; background: var(--bg); display: flex; flex-direction: column; }
+.window { overflow-y: auto; position: relative; background: var(--bg); display: flex; flex-direction: column; container: win / size; }
 .paper, .settings { display: flex; flex-direction: column; min-height: 100%; flex: none; }
 
 /* ---------- list ---------- */
@@ -228,21 +231,9 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; padding: 0 1
 /* under the rows: when it nears the bottom of the list, the next rows are drawn */
 .rows-end { height: 1px; margin-top: -1px; }
 
-/* mini player: phone list only */
-.mini {
-  display: none; position: fixed; left: 0; right: 0; bottom: 0; z-index: 5; height: 64px;
-  padding-bottom: env(safe-area-inset-bottom);
-  background: var(--surface); align-items: center; gap: 12px; padding-left: 8px; padding-right: 16px; cursor: pointer;
-}
-.mini .prog { position: absolute; left: 0; top: 0; height: 2px; background: var(--accent); width: 0; }
-.mini .mp-play { width: 44px; height: 44px; display: grid; place-items: center; color: var(--text); flex: none; }
-.mini .mp-text { min-width: 0; flex: 1; }
-.mini .mp-title { font-size: 14px; line-height: 19px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.mini .mp-sub { font-size: 13px; line-height: 16px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-
-/* toast */
+/* toast: over the list's corner, above the player bar */
 .toast {
-  position: fixed; left: 16px; bottom: 16px; width: 308px; z-index: 70;
+  position: fixed; left: 16px; bottom: calc(var(--bar-h, 0px) + 16px); width: 308px; z-index: 70;
   display: flex; align-items: center; gap: 16px; padding: 12px 12px 12px 16px; min-height: 52px;
   background: var(--toast-bg); color: var(--toast-fg); border-radius: 8px; font-size: 14px; line-height: 20px;
   box-shadow: 0 6px 20px rgba(0,0,0,.22);
@@ -253,72 +244,66 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; padding: 0 1
 
 /* ---------- window ---------- */
 .phone-top { display: none; }
-.strip-anchor { position: sticky; top: 0; height: 0; z-index: 8; }
-.strip {
-  position: absolute; left: 0; right: 0; top: 0; height: 56px; background: var(--surface);
-  padding: 0 32px;
-  opacity: 0; pointer-events: none; transition: opacity .15s ease;
-}
-.strip-in { max-width: 720px; margin: 0 auto; height: 56px; display: flex; align-items: center; gap: 12px; }
-.strip.on { opacity: 1; pointer-events: auto; }
-.strip .s-back { display: none; }
-.strip .s-play {
-  width: 44px; height: 44px; border: 4px solid transparent; background-clip: padding-box; margin: -4px; border-radius: 50%;
-  background-color: var(--accent); color: var(--on-accent); display: grid; place-items: center; flex: none;
-}
-.strip .s-text { min-width: 0; flex: 1; }
-.strip .s-title { font-size: 14px; line-height: 19px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.strip .s-sub { font-size: 13px; line-height: 16px; color: var(--text-2); }
-.strip .s-prog { position: absolute; left: 0; bottom: 0; height: 2px; background: var(--accent); width: 0; }
-
 .col { max-width: 720px; margin: 0 auto; width: 100%; }
 .pz { background: var(--surface); padding: 32px 32px 24px; }
-.pz-head { display: flex; align-items: flex-start; gap: 16px; }
+.pz-head { display: flex; align-items: flex-start; gap: 12px; }
 .pz-head .grow { flex: 1; min-width: 0; }
 .pz h2 { font-size: 24px; line-height: 30px; font-weight: 700; margin: 0; letter-spacing: -0.01em; overflow-wrap: anywhere; }
 .byline { font-size: 16px; line-height: 24px; color: var(--text-2); margin: 4px 0 0; overflow-wrap: anywhere; }
 .maker { font-size: 14px; line-height: 20px; color: var(--text-2); margin: 2px 0 0; overflow-wrap: anywhere; }
 .maker:empty { display: none; }
-.details { font-size: 14px; line-height: 20px; color: var(--text-2); margin: 8px 0 0; overflow-wrap: anywhere; }
+.details { font-size: 14px; line-height: 20px; color: var(--text-2); margin: 6px 0 0; overflow-wrap: anywhere; }
 .pz .icon-btn:hover { background: var(--sel); }
-.w-tags { font-size: 14px; line-height: 20px; color: var(--text-2); margin: 8px 0 0; overflow-wrap: anywhere; }
-.lbox { display: flex; align-items: center; gap: 10px; height: 44px; margin: 0 0 -12px; padding-right: 8px; font-size: 14px; color: var(--text-2); }
+.w-tags { font-size: 14px; line-height: 20px; color: var(--text-2); margin: 6px 0 0; overflow-wrap: anywhere; }
+.lbox { display: flex; align-items: center; gap: 10px; height: 44px; margin: 0; padding-right: 8px; font-size: 14px; color: var(--text-2); }
 .lbox .box { width: 18px; height: 18px; border-radius: 4px; box-shadow: inset 0 0 0 1.5px var(--text-2); display: grid; place-items: center; color: var(--on-accent); }
 .lbox[aria-checked="true"] { color: var(--text); }
 .lbox[aria-checked="true"] .box { background: var(--accent); box-shadow: none; }
 
-.scrub { margin: 12px 0 -12px; height: 44px; position: relative; cursor: pointer; touch-action: none; }
-.scrub .track { position: absolute; left: 0; right: 0; top: 20px; height: 4px; border-radius: 2px; background: var(--track); }
-.scrub .fill { position: absolute; left: 0; top: 20px; height: 4px; border-radius: 2px; background: var(--accent); width: 0; }
-.scrub .thumb { position: absolute; top: 16px; left: 0; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%; background: var(--accent); }
-.times { display: flex; justify-content: space-between; font-size: 13px; line-height: 16px; font-weight: 500; color: var(--text-2); margin-top: 4px; }
+/* The paper's head, compact: its title and authors, who made this version and its voice, then
+   Listened and the explainer. Play here only while the bar has another paper. */
+#pz { padding: 20px 32px 12px; }
+#pz h2 { font-size: 22px; line-height: 28px; }
+#pz .byline { font-size: 14px; line-height: 20px; margin-top: 2px; }
+.w-play {
+  width: 44px; height: 44px; border-radius: 50%; flex: none; display: grid; place-items: center;
+  background: var(--accent); color: var(--on-accent);
+}
+.w-play:hover { filter: brightness(1.06); }
+.pz-who { display: flex; flex-wrap: wrap; align-items: center; column-gap: 16px; margin-top: 2px; }
+.pz-who .maker { margin: 0; }
+.pz-acts { display: flex; align-items: center; flex-wrap: wrap; column-gap: 24px; margin-top: 2px; }
+.explain {
+  display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 10px; margin: 0 -10px; border-radius: 6px;
+  font-size: 14px; font-weight: 500; color: var(--text);
+}
+.explain:hover:not(:disabled) { background: var(--sel); }
+.explain:disabled { display: none; }
 
-.controls { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; margin-top: 16px; }
-.controls .left { justify-self: start; }
-.controls .right { justify-self: end; }
-.controls .mid { display: flex; align-items: center; gap: 32px; }
-.skip { width: 44px; height: 44px; display: grid; place-items: center; border-radius: 50%; color: var(--text); }
-.skip:hover { background: var(--sel); }
-.play { width: 56px; height: 56px; border-radius: 50%; background: var(--accent); color: var(--on-accent); display: grid; place-items: center; }
-.play:hover { filter: brightness(1.06); }
-.speed, .explain { height: 44px; border: 4px solid transparent; background-clip: padding-box; border-radius: 10px; }
-.speed { min-width: 64px; font-size: 14px; font-weight: 600; text-align: left; padding: 0 8px; margin: -4px 0 -4px -12px; }
-.speed:hover, .explain:hover:not(:disabled) { background-color: var(--sel); }
-.explain { display: flex; align-items: center; gap: 8px; padding: 0 8px; margin: -4px -12px -4px 0; font-size: 14px; font-weight: 500; }
-.explain:disabled { visibility: hidden; }
-
-.pz-state { margin-top: 24px; }
+.pz-state { margin-top: 12px; }
 .pz-state .big { font-size: 18px; line-height: 24px; font-weight: 600; }
 .pz-state .big.warn { color: var(--warn); }
 .pz-state .big.danger { color: var(--danger); }
 .pz-state .detail { font-size: 14px; line-height: 20px; color: var(--text-2); margin-top: 4px; overflow-wrap: anywhere; }
 .pz-state .bar { height: 4px; border-radius: 2px; background: var(--track); margin-top: 12px; position: relative; overflow: hidden; }
 .pz-state .bar i { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: var(--text-2); border-radius: 2px; }
-.pz-state .act { margin-top: 20px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
-.pz-state .act .explain { margin-left: auto; }
 
 /* the versions of one paper: who made each, and which one plays */
 .versions { padding: 8px 32px 32px; }
+#versions { padding: 0 32px 4px; }
+#versions .sec-h { margin: 12px 0 6px; }
+#vlist { flex-direction: row; flex-wrap: wrap; gap: 8px; }
+#vlist .ver {
+  display: inline-flex; align-items: center; gap: 8px; width: auto; max-width: 100%; min-height: 44px;
+  margin: 0; padding: 0 14px 0 12px; border-radius: 22px; box-shadow: inset 0 0 0 1px var(--input-line);
+}
+#vlist .ver .mark { width: 16px; height: 16px; flex: none; }
+#vlist .ver[aria-checked="true"] { box-shadow: inset 0 0 0 1.5px var(--accent); }
+#vlist .ver[aria-checked="true"] .mark { box-shadow: inset 0 0 0 5px var(--accent); }
+#vlist .ver .v-main { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+#vlist .ver .v-who, #vlist .ver .v-sum { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#vlist .ver .v-who { font-size: 14px; }
+#vlist .ver .v-sum { min-width: 0; }
 .sec-h { font-size: 13px; line-height: 16px; font-weight: 600; color: var(--text-2); margin: 16px 0 4px; }
 .vlist { display: flex; flex-direction: column; }
 .ver {
@@ -434,7 +419,7 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; padding: 0 1
 
 /* ---------- phone ---------- */
 @media (max-width: 720px) {
-  .app { display: block; height: 100dvh; }
+  .app { display: block; }
   .list-pane { height: 100%; background: var(--bg); }
   .row-in { background: var(--bg); padding-right: 16px; grid-template-columns: 44px minmax(0, 1fr) 44px; }
   .tick { width: 44px; height: 44px; margin: 0; }
@@ -442,40 +427,112 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; padding: 0 1
   .row.sel .row-in { background: var(--bg); }
   .row-in:hover { background: var(--bg); }
   .field { font-size: 16px; }
-  body.has-mini .mini { display: flex; }
-  body.open .mini { display: none; }
+  /* room for a toast under the last row */
   .rows { padding-bottom: 96px; }
-  /* room for the mini player and a toast above it, so no row stays under them */
-  body.has-mini .rows { padding-bottom: 160px; }
-  .toast { left: 8px; right: 8px; width: auto; bottom: 16px; }
-  body.has-mini:not(.open) .toast { bottom: calc(72px + env(safe-area-inset-bottom)); }
+  .toast { left: 8px; right: 8px; width: auto; bottom: calc(var(--bar-h, 0px) + 8px); }
 
   .window {
-    position: fixed; inset: 0; z-index: 10; transform: translateX(100%); visibility: hidden;
+    position: fixed; top: 0; left: 0; right: 0; bottom: var(--bar-h, 0px); z-index: 10; transform: translateX(100%); visibility: hidden;
     transition: transform .25s ease, visibility 0s linear .25s;
   }
   body.open .window { transform: none; visibility: visible; transition: transform .25s ease; }
   .phone-top { display: flex; justify-content: space-between; align-items: center; height: 48px; padding: 4px 4px 0; background: var(--surface); }
+  #paper > .phone-top { position: sticky; top: 0; z-index: 6; }     /* Back and ⋯ stay while the transcript rolls */
   .icon-btn { width: 44px; height: 44px; margin: -4px; }
   .s-in { font-size: 16px; }         /* 16 px: the phone does not zoom in on it */
   .head-btns { gap: 12px; }
   .phone-top .icon-btn { margin: 0; }
   .menu button, .menu a { height: 44px; }
   .pz { padding: 4px 16px 20px; }
+  #pz { padding: 4px 16px 8px; }
   .set-head { padding-bottom: 0; }
-  .pz h2 { font-size: 20px; line-height: 26px; }
+  .pz h2, #pz h2 { font-size: 20px; line-height: 26px; }
   .pz-head .icon-btn { display: none; }
   .byline { font-size: 14px; line-height: 20px; }
-  .controls .mid { gap: 16px; }
-  .explain .x-icon { display: none; }
-  .strip { padding: 0 16px 0 4px; }
-  .strip .s-back { display: grid; }
   .versions { padding: 4px 16px 32px; }
+  #versions { padding: 0 16px 4px; }
+  .ptabs { padding: 0 16px; }
   .set-body { padding: 4px 16px 48px; }
   .editor { height: 40vh; }
   .scrim { padding: 0; place-items: stretch; }
   .sheet { width: 100%; height: 100vh; height: 100dvh; border-radius: 0; }
   .sheet-h { padding: 8px 8px 4px 16px; }
+}
+
+/* ---------- the player: a bar along the bottom of the page, the whole width ---------- */
+/* Spotify's: the episode on the left (a tap opens its paper), Play with the skips over the
+   position in the middle, Up next and the speed on the right. It stays while the list and the
+   window scroll and while another paper is open. On a phone it is one line (Play, the title,
+   how far as a thin line); the chevron or a tap on the title opens the rest. */
+.bar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, min(600px, 44%)) minmax(0, 1fr); align-items: center; column-gap: 24px;
+  padding: 4px 16px calc(2px + env(safe-area-inset-bottom));
+  background: var(--surface); border-top: 1px solid var(--hairline);
+}
+.b-prog { display: none; }
+.b-now { min-width: 0; display: flex; align-items: center; }
+.b-open {
+  display: flex; flex-direction: column; justify-content: center; min-width: 44px; max-width: 100%; min-height: 44px;
+  padding: 2px 8px; margin-left: -8px; border-radius: 6px; text-align: left;
+}
+.b-open:hover { background: var(--sel); }
+.b-title, .b-sub { display: block; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.b-title { font-size: 14px; line-height: 19px; font-weight: 600; }
+.b-sub { font-size: 13px; line-height: 17px; color: var(--text-2); }
+.b-mid { min-width: 0; display: flex; flex-direction: column; }
+.b-ctl { display: flex; align-items: center; justify-content: center; gap: 20px; }
+.skip { width: 44px; height: 44px; display: grid; place-items: center; border-radius: 50%; color: var(--text); }
+.skip svg { width: 28px; height: 28px; }
+.skip:hover { background: var(--sel); }
+.play {
+  width: 44px; height: 44px; border: 2px solid transparent; background-clip: padding-box; border-radius: 50%;
+  background-color: var(--accent); color: var(--on-accent); display: grid; place-items: center;
+}
+.play:hover { filter: brightness(1.06); }
+.b-seek { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.b-time { flex: none; min-width: 40px; font-size: 12px; line-height: 16px; font-weight: 500; color: var(--text-2); }
+#p-el { text-align: right; }
+.scrub { flex: 1; min-width: 0; height: 28px; position: relative; cursor: pointer; touch-action: none; }
+.scrub .track { position: absolute; left: 0; right: 0; top: 12px; height: 4px; border-radius: 2px; background: var(--track); }
+.scrub .fill { position: absolute; left: 0; top: 12px; height: 4px; border-radius: 2px; background: var(--accent); width: 0; }
+.scrub .thumb { position: absolute; top: 8px; left: 0; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%; background: var(--accent); }
+.b-right { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.speed { flex: none; height: 44px; min-width: 56px; padding: 0 8px; border-radius: 6px; font-size: 14px; font-weight: 600; }
+.speed:hover { background: var(--sel); }
+.b-exp { display: none; }
+
+@media (max-width: 720px) {
+  .bar {
+    grid-template-columns: 44px minmax(0, 1fr) 44px; grid-template-areas: "play now exp"; column-gap: 8px;
+    padding: 9px 8px calc(9px + env(safe-area-inset-bottom)); border-top: 0;
+  }
+  .b-mid, .b-ctl, .b-right { display: contents; }
+  .bar .play { grid-area: play; }
+  .b-now { grid-area: now; }
+  .bar .b-exp { display: grid; grid-area: exp; justify-self: end; margin: 0; color: var(--text-2); }
+  .bar .skip, .b-seek, .bar .upnext, .bar .speed { display: none; }
+  .b-prog { display: block; position: absolute; left: 0; top: 0; height: 2px; width: 0; background: var(--accent); pointer-events: none; }
+  .b-open { margin: 0; padding: 0 4px; }
+  .b-open:hover { background: none; }
+  /* opened: the title, the position, then speed, the skips and Play, then Up next */
+  .bar.open {
+    grid-template-columns: minmax(0, 1fr) 44px 56px 44px minmax(0, 1fr);
+    grid-template-areas: "now now now now exp" "seek seek seek seek seek" "speed back play fwd ." "next next next next next";
+    column-gap: 16px; row-gap: 2px; padding: 8px 16px calc(12px + env(safe-area-inset-bottom));
+    border-top: 1px solid var(--hairline);
+  }
+  .bar.open .b-prog { display: none; }
+  .bar.open .b-seek { display: flex; grid-area: seek; }
+  .bar.open .scrub { height: 44px; }
+  .bar.open .scrub .track, .bar.open .scrub .fill { top: 20px; }
+  .bar.open .scrub .thumb { top: 16px; }
+  .bar.open #p-back { display: grid; grid-area: back; }
+  .bar.open #p-fwd { display: grid; grid-area: fwd; }
+  .bar.open .play { width: 56px; height: 56px; }
+  .bar.open .speed { display: block; grid-area: speed; justify-self: start; margin-left: -8px; }
+  .bar.open .upnext { display: flex; grid-area: next; }
+  .bar.open .b-open { justify-self: start; }
 }
 
 /* ---------- up next and the transcript ---------- */
@@ -486,16 +543,16 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; padding: 0 1
 }
 :root[data-theme="dark"] { --now: #2A2A2A; --hl: rgba(255, 122, 69, .26); }
 
-/* the player's "Up next" line: what plays after this, a tap opens the queue */
+/* the bar's "Up next": what plays after this, a tap opens the queue */
 .upnext {
-  display: flex; align-items: center; gap: 10px; width: 100%; height: 44px; margin: 12px 0 -12px;
-  text-align: left; font-size: 14px; line-height: 20px; color: var(--text); min-width: 0;
+  display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; height: 44px; padding: 0 8px; border-radius: 6px;
+  text-align: left; font-size: 13px; line-height: 18px; color: var(--text);
 }
-.upnext .un-l { flex: none; font-size: 13px; font-weight: 600; color: var(--text-2); }
+.upnext svg { flex: none; color: var(--text-2); }
+.upnext .un-l { flex: none; font-weight: 600; color: var(--text-2); }
 .upnext .un-t { flex: 0 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.upnext .un-n { flex: none; font-size: 13px; color: var(--text-2); }
-.upnext:hover .un-t { text-decoration: underline; text-underline-offset: 2px; text-decoration-color: var(--quote); }
-.mini .mp-q { width: 44px; height: 44px; margin-right: -8px; display: grid; place-items: center; color: var(--text-2); flex: none; }
+.upnext .un-n { flex: none; color: var(--text-2); }
+.upnext:hover { background: var(--sel); }
 
 /* the Up next panel: a sheet like the explainer's, as tall as its rows */
 .q-sheet { width: min(520px, 100%); height: auto; max-height: calc(100vh - 64px); max-height: calc(100dvh - 64px); }
@@ -516,8 +573,9 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; padding: 0 1
 .q-row .icon-btn:hover:not(:disabled) { color: var(--text); }
 .q-empty { margin: 0; padding: 4px 24px 24px; font-size: 14px; line-height: 20px; color: var(--text-2); }
 
-/* the transcript: the script as it is spoken, under the versions */
-.tr { padding: 0 32px 48px; }
+/* the transcript: the script as it is spoken, under the versions; room under its end, so the last
+   sentences too roll up to a third of the way down */
+.tr { padding: 0 32px max(48px, 40cqh); }
 .tr-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 16px; margin: 16px 0 8px; }
 .tr-head .sec-h { margin: 0; }
 .tr-note { font-weight: 400; }
@@ -545,7 +603,7 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; padding: 0 1
 .tr-now:hover { filter: brightness(1.06); }
 
 @media (max-width: 720px) {
-  .tr { padding: 0 16px 32px; }
+  .tr { padding: 0 16px max(32px, 40cqh); }
   .tr-head { flex-wrap: wrap; }
   .tr-find { margin-left: 0; flex: 1 1 100%; width: 100%; max-width: 100%; min-width: 0; }
   .tr-find .field { flex: 1; width: auto; min-width: 0; }
@@ -560,8 +618,28 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; padding: 0 1
   .q-empty { padding: 4px 16px 24px; }
 }
 
+/* ---------- the window's columns: the transcript in the middle, the comments on the right ---------- */
+/* By the window's own width (a container query, so the page's zoom counts): 660 CSS px and up,
+   the middle (the head, the versions, the transcript) scrolls on its own beside the comments'
+   column (social.css); narrower (a phone, or a big zoom), the window scrolls, and the transcript
+   and the comments are two tabs. */
+.ptabs { display: none; gap: 24px; padding: 0 32px; border-bottom: 1px solid var(--hairline); }
+@container win (min-width: 660px) {
+  .paper { display: grid; grid-template-columns: minmax(0, 1fr) clamp(280px, 30cqw, 340px); height: 100cqh; min-height: 0; }
+  .paper > .p-mid { grid-column: 1; grid-row: 1; min-width: 0; height: 100cqh; overflow-y: auto; position: relative; }
+}
+@container win (max-width: 659.98px) {
+  #paper.has-tr .ptabs { display: flex; }
+  #paper.has-tr:not(.pane-c) > .comments { display: none; }
+  #paper.has-tr.pane-c #tr { display: none; }
+  #paper.has-tr .tr-head .sec-h { display: none; }
+  #paper.has-tr .tr-find { margin-left: 0; flex: 1 1 100%; min-width: 0; }
+  #paper.has-tr .tr-find .field { flex: 1; width: auto; min-width: 0; }
+}
+
 /* ---------- voices: the window's "Voice: … Change", its chooser, Settings > Voice ---------- */
 .vline { display: flex; flex-wrap: wrap; align-items: center; white-space: pre-wrap; min-height: 44px; margin: -6px 0 0; }
+.pz-who .vline { margin: 0; }
 .vline .vbtn { color: var(--accent); font-weight: 500; margin: 0; padding: 0 4px; min-width: 44px; }
 .vline .verr { color: var(--danger); }
 .vchoose { padding-top: 0; padding-bottom: 8px; }

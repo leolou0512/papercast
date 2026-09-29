@@ -656,6 +656,52 @@ class Page(PageBase):
         b.wait_js(f"!({dot}) && {unread} === 1", 5, "seen again")
         b.js("localStorage.clear()")
 
+    def test_9_a_column_right_of_the_transcript(self):
+        """On a wide screen the comments are a slim column on the right, as tall as the window,
+        the box to write in at its foot; its list scrolls on its own, the transcript not with it;
+        a time in it still plays from there."""
+        b = self.b
+        for i in range(14):
+            self.api_post(f"Comment {i} at 0:0{i % 10}, long enough to take a couple of lines in a slim column.", user=B if i % 2 else CAROL)
+        script = self.r.cfg.episodes / self.e30 / "script.md"          # a transcript, long enough to scroll
+        script.write_text("# Opening\n\n" + "".join(f"Paragraph {w} of plain made-up words about nothing much. It is only here to be long.\n\n"
+                                                      for w in ("one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten")))
+        try:
+            self.comments_open(self.t30, A)
+            b.wait_js("!document.getElementById('tr').hidden", 5, "the transcript")
+            b.wait_js("document.querySelectorAll('#c-list .c-item').length === 14", 5, "the comments")
+            box = lambda sel: b.js(f"(r => [r.left, r.top, r.right, r.bottom])(document.querySelector({json.dumps(sel)}).getBoundingClientRect())")
+            col, mid, win, vw = box("#comments"), box("#p-mid"), box("#win"), b.js("innerWidth")
+            self.assertTrue(280 <= col[2] - col[0] <= 341, f"the column is {col[2] - col[0]} px wide")
+            self.assertAlmostEqual(col[2], vw, delta=1, msg="not at the right edge")
+            self.assertAlmostEqual(mid[2], col[0], delta=1, msg="not right of the middle")
+            self.assertEqual([round(col[1]), round(col[3])], [round(win[1]), round(win[3])], "not as tall as the window")
+            self.assertAlmostEqual(box(".c-compose")[3], col[3], delta=1, msg="the box is not at the column's foot")
+            self.assertEqual(b.js("getComputedStyle(document.getElementById('ptabs')).display"), "none")
+            # it opens at the newest; the list scrolls, the middle and the window stay
+            lst = "document.getElementById('c-list')"
+            self.assertGreater(b.js(f"{lst}.scrollHeight"), b.js(f"{lst}.clientHeight") + 100)
+            self.assertAlmostEqual(b.js(f"{lst}.scrollTop + {lst}.clientHeight"), b.js(f"{lst}.scrollHeight"), delta=2)
+            b.js("document.getElementById('p-mid').scrollTop = 120")
+            x, y = b.js(f"(r => [r.left + r.width / 2, r.top + r.height / 2])({lst}.getBoundingClientRect())")
+            b.call("Input.dispatchMouseEvent", type="mouseWheel", x=x, y=y, deltaX=0, deltaY=-600)
+            b.wait_js(f"{lst}.scrollTop + {lst}.clientHeight < {lst}.scrollHeight - 300", 5, "the list scrolled")
+            b.pump(0.3)
+            self.assertEqual(b.js("[document.getElementById('p-mid').scrollTop, document.getElementById('win').scrollTop]"), [120, 0])
+            # and to its top, and no further: the middle does not take the rest of the wheel
+            b.call("Input.dispatchMouseEvent", type="mouseWheel", x=x, y=y, deltaX=0, deltaY=-20000)
+            b.wait_js(f"{lst}.scrollTop === 0", 5, "the list's top")
+            b.pump(0.3)
+            self.assertEqual(b.js("document.getElementById('p-mid').scrollTop"), 120)
+            self.shot("desktop-comments-column")
+            # a time in a comment plays from there
+            b.js("document.getElementById('audio').muted = true; document.querySelector('#c-list .c-time[data-t=\"5\"]').click()")
+            b.wait_js(f"(a => a.getAttribute('src') === '/audio/{self.e30}.mp3' && !a.paused && a.currentTime >= 5)(document.getElementById('audio'))", 10, "playing from 0:05")
+        finally:
+            script.unlink(missing_ok=True)
+            b.js("document.getElementById('audio').pause(); localStorage.clear(); sessionStorage.clear()")
+            self.r.q("DELETE FROM positions")
+
     def test_z_phone_tap_targets(self):
         b, r = self.b, self.r
         st, n, _ = r.req("POST", "/api/board/notice", {"body": "Reading group Thursday 3 pm, notes at https://example.org/notes"}, user=A)
@@ -677,6 +723,9 @@ class Page(PageBase):
             b.js("document.getElementById('list-pane').scrollTop = 0")
             self.open(self.t30)
             b.wait_js("getComputedStyle(document.getElementById('win')).visibility === 'visible' && document.querySelectorAll('#c-list .c-item').length === 3", 10, "comments")
+            # no transcript here: no tabs, the comments under the paper's head (test_player has the tabs)
+            self.assertEqual(b.js("getComputedStyle(document.getElementById('ptabs')).display"), "none")
+            self.assertNotEqual(b.js("getComputedStyle(document.getElementById('comments')).display"), "none")
             self.assertTargets("comments")
             self.no_side_scroll("comments")
             b.js(f"document.querySelector('.c-item[data-id=\"{top['id']}\"] [data-act=reply]').click()")

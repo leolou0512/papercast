@@ -47,12 +47,6 @@
     <div class="sstat" id="sstat" role="status" hidden></div>
     <ul class="rows" id="rows"></ul>
     <div class="rows-end" id="rows-end" aria-hidden="true"></div>
-    <div class="mini" id="mini" role="button" tabindex="0" aria-label="Open the paper that is playing" hidden>
-      <div class="prog" id="mini-prog"></div>
-      <button type="button" class="mp-play" id="mini-play" aria-label="Play"></button>
-      <div class="mp-text"><div class="mp-title" id="mini-title"></div><div class="mp-sub t" id="mini-sub"></div></div>
-      <button type="button" class="mp-q" id="mini-q" aria-label="Up next" aria-haspopup="dialog" hidden></button>
-    </div>
   </aside>
 
   <main class="window" id="win">
@@ -62,61 +56,47 @@
         <button type="button" class="icon-btn" id="back" aria-label="Back to papers"></button>
         <button type="button" class="icon-btn" id="w-more-phone" aria-label="More"></button>
       </div>
-      <div class="strip-anchor"><div class="strip" id="strip">
-        <div class="strip-in">
-          <button type="button" class="icon-btn s-back" id="s-back" aria-label="Back to papers"></button>
-          <button type="button" class="s-play" id="s-play" aria-label="Play"></button>
-          <div class="s-text"><div class="s-title" id="s-title"></div><div class="s-sub t" id="s-sub"></div></div>
-        </div>
-        <div class="s-prog" id="s-prog"></div>
-      </div></div>
-      <section class="pz" id="pz"><div class="col">
-        <div class="pz-head">
-          <div class="grow">
-            <h2 id="w-title"></h2>
-            <p class="byline" id="w-by"></p>
-            <p class="maker" id="w-maker"></p>
-            <p class="details" id="w-details" hidden></p>
-            <div class="w-tags" id="w-tags" hidden></div>
-            <button type="button" class="lbox" id="w-listened" role="checkbox" aria-checked="false" hidden><span class="box" aria-hidden="true"></span><span>Listened</span></button>
-          </div>
-          <button type="button" class="icon-btn" id="w-more" aria-label="More"></button>
-        </div>
-        <div class="player" id="player" hidden>
-          <div class="scrub" id="scrub" role="slider" tabindex="0" aria-label="Position" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0">
-            <div class="track"></div><div class="fill" id="fill"></div><div class="thumb" id="thumb"></div>
-          </div>
-          <div class="times t"><span id="p-el">0:00</span><span id="p-rem">&minus;0:00</span></div>
-          <div class="controls">
-            <div class="left"><button type="button" class="speed t" id="p-speed" aria-label="Playback speed">1&times;</button></div>
-            <div class="mid">
-              <button type="button" class="skip" id="p-back" aria-label="Back 15 seconds"></button>
-              <button type="button" class="play" id="p-play" aria-label="Play"></button>
-              <button type="button" class="skip" id="p-fwd" aria-label="Forward 30 seconds"></button>
+      <div class="p-mid" id="p-mid">
+        <section class="pz" id="pz"><div class="col">
+          <div class="pz-head">
+            <div class="grow">
+              <h2 id="w-title"></h2>
+              <p class="byline" id="w-by"></p>
             </div>
-            <div class="right"><button type="button" class="explain" id="x-open" disabled><span class="x-icon" id="x-icon"></span><span>Explainer</span></button></div>
+            <button type="button" class="w-play" id="w-play" aria-label="Play" hidden></button>
+            <button type="button" class="icon-btn" id="w-more" aria-label="More"></button>
           </div>
-          <button type="button" class="upnext" id="p-next" aria-haspopup="dialog" hidden><span class="un-l">Up next</span><span class="un-t" id="p-next-t"></span><span class="un-n t" id="p-next-n"></span></button>
-        </div>
-        <div class="pz-state" id="w-state" hidden></div>
-      </div></section>
-      <section class="versions" id="versions" hidden><div class="col">
-        <h3 class="sec-h">Versions</h3>
-        <div class="vlist" id="vlist" role="radiogroup" aria-label="Versions"></div>
-      </div></section>
-      <section class="tr" id="tr" hidden><div class="col">
-        <div class="tr-head">
-          <h3 class="sec-h">Transcript <span class="tr-note" id="tr-note" hidden>· timing estimated</span></h3>
-          <div class="tr-find">
-            <input class="field" type="search" id="tr-q" placeholder="Find in transcript" aria-label="Find in transcript" autocomplete="off" enterkeyhint="search">
-            <span class="tr-count t" id="tr-count" role="status"></span>
-            <button type="button" class="icon-btn" id="tr-prev" aria-label="Previous match" disabled></button>
-            <button type="button" class="icon-btn" id="tr-next" aria-label="Next match" disabled></button>
+          <div class="pz-who"><p class="maker" id="w-maker"></p></div>
+          <p class="details" id="w-details" hidden></p>
+          <div class="w-tags" id="w-tags" hidden></div>
+          <div class="pz-acts">
+            <button type="button" class="lbox" id="w-listened" role="checkbox" aria-checked="false" hidden><span class="box" aria-hidden="true"></span><span>Listened</span></button>
+            <button type="button" class="explain" id="x-open" disabled><span class="x-icon" id="x-icon"></span><span>Explainer</span></button>
           </div>
+          <div class="pz-state" id="w-state" hidden></div>
+        </div></section>
+        <section class="versions" id="versions" hidden><div class="col">
+          <h3 class="sec-h">Versions</h3>
+          <div class="vlist" id="vlist" role="radiogroup" aria-label="Versions"></div>
+        </div></section>
+        <div class="ptabs" id="ptabs" role="tablist" aria-label="Transcript and comments">
+          <button type="button" class="tab" id="pt-tr" role="tab" aria-selected="true" aria-controls="tr">Transcript</button>
+          <button type="button" class="tab" id="pt-c" role="tab" aria-selected="false" aria-controls="comments">Comments</button>
         </div>
-        <div class="tr-body" id="tr-body"></div>
-        <div class="tr-now-wrap"><button type="button" class="tr-now" id="tr-now" hidden>Back to now</button></div>
-      </div></section>
+        <section class="tr" id="tr" hidden><div class="col">
+          <div class="tr-head">
+            <h3 class="sec-h"><span class="tr-h">Transcript</span> <span class="tr-note" id="tr-note" hidden>· timing estimated</span></h3>
+            <div class="tr-find">
+              <input class="field" type="search" id="tr-q" placeholder="Find in transcript" aria-label="Find in transcript" autocomplete="off" enterkeyhint="search">
+              <span class="tr-count t" id="tr-count" role="status"></span>
+              <button type="button" class="icon-btn" id="tr-prev" aria-label="Previous match" disabled></button>
+              <button type="button" class="icon-btn" id="tr-next" aria-label="Next match" disabled></button>
+            </div>
+          </div>
+          <div class="tr-body" id="tr-body"></div>
+          <div class="tr-now-wrap"><button type="button" class="tr-now" id="tr-now" hidden>Back to now</button></div>
+        </div></section>
+      </div>
     </div>
     <div class="settings" id="settings" hidden>
       <div class="phone-top">
@@ -132,6 +112,31 @@
   </main>
 </div>
 
+<footer class="bar" id="bar" hidden>
+  <div class="b-prog" id="b-prog" aria-hidden="true"></div>
+  <div class="b-now">
+    <button type="button" class="b-open" id="bar-open"><span class="b-title" id="bar-title"></span><span class="b-sub t" id="bar-sub"></span></button>
+  </div>
+  <div class="b-mid">
+    <div class="b-ctl">
+      <button type="button" class="skip" id="p-back" aria-label="Back 15 seconds"></button>
+      <button type="button" class="play" id="p-play" aria-label="Play"></button>
+      <button type="button" class="skip" id="p-fwd" aria-label="Forward 30 seconds"></button>
+    </div>
+    <div class="b-seek">
+      <span class="b-time t" id="p-el">0:00</span>
+      <div class="scrub" id="scrub" role="slider" tabindex="0" aria-label="Position" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0">
+        <div class="track"></div><div class="fill" id="fill"></div><div class="thumb" id="thumb"></div>
+      </div>
+      <span class="b-time t" id="p-rem">&minus;0:00</span>
+    </div>
+  </div>
+  <div class="b-right">
+    <button type="button" class="upnext" id="p-next" aria-haspopup="dialog" hidden><span class="un-l">Up next</span><span class="un-t" id="p-next-t"></span><span class="un-n t" id="p-next-n"></span></button>
+    <button type="button" class="speed t" id="p-speed" aria-label="Playback speed">1&times;</button>
+    <button type="button" class="icon-btn b-exp" id="bar-exp" aria-label="Player controls" aria-expanded="false"></button>
+  </div>
+</footer>
 <audio id="audio" preload="metadata"></audio>
 <div class="toast" id="toast" role="status" hidden><span class="msg-t" id="toast-msg"></span><button type="button" id="toast-act" hidden></button></div>
 <div id="map" hidden></div>

@@ -48,9 +48,9 @@
 }
 @keyframes tour-in { from { opacity: 0; } }
 
-/* "Tour again": for three days, low in the corner of the list */
+/* "Tour again": for three days, low in the corner of the list, above the player bar */
 .tour-again {
-  position: fixed; z-index: 20; bottom: 16px; left: 340px; transform: translateX(calc(-100% - 16px));
+  position: fixed; z-index: 20; bottom: calc(var(--bar-h, 0px) + 16px); left: 340px; transform: translateX(calc(-100% - 16px));
   height: 44px; padding: 0 14px; border: 6px solid transparent; border-width: 6px 0; background-clip: padding-box;
   border-radius: 16px / 22px; background-color: var(--sel); color: var(--text-2); font-size: 13px; font-weight: 500;
 }
@@ -83,8 +83,7 @@ body.touring .tour-again { display: none; }
 .help-only { margin: 6px 8px 4px 0; font-size: 14px; line-height: 20px; }
 
 @media (max-width: 720px) {
-  .tour-again { left: auto; right: 16px; transform: none; bottom: calc(16px + env(safe-area-inset-bottom)); }
-  body.has-mini .tour-again { bottom: calc(80px + env(safe-area-inset-bottom)); }
+  .tour-again { left: auto; right: 16px; transform: none; bottom: calc(var(--bar-h, 0px) + 16px); }
   body.open .tour-again { display: none; }
   .help .icon-btn { margin: 0; }
   .help-code { font-size: 12px; }

@@ -180,6 +180,8 @@
       const b = shown($("w-more")) || shown($("w-more-phone"));
       if (b) b.click();
     }
+    // On a phone the transcript and the comments are two tabs: the one the step points into.
+    const pane = (k) => { if (ctx.pane) ctx.pane(k); };
     const upNext = () => [...document.querySelectorAll(".menu [role=menuitem]")].find((b) => /Up next$/.test(b.textContent.trim())) || null;
     const linkTo = () => shown(document.querySelector("#map .pm-card .pm-linkto"));
     // The map, with a paper picked in a graph this person may change, so its card shows Link to…
@@ -207,14 +209,14 @@
       { id: "search", text: () => "Search inside papers, or filter", prep: onList,
         at: () => shown(document.querySelector("#list-pane .search")) },
       { id: "play", need: "audio", text: () => "Play the episode", prep: () => inPaper(T.audio),
-        at: () => shown($("p-play")) },
+        at: () => shown($("w-play")) || shown($("p-play")) },
       { id: "listened", need: "audio", text: () => "Tick it when you’ve listened", prep: () => inPaper(T.audio),
         at: () => shown($("w-listened")) },
       { id: "upnext", need: "audio", text: () => (/^Add/.test((upNext() || {}).textContent || "") ? "Add it to Up next" : "Up next"),
         prep: async () => { await inPaper(T.audio); openMore(); }, at: upNext },
-      { id: "transcript", need: "paper", text: () => "Tap a sentence to play from there", prep: () => inPaper(T.paper), wait: 2500,
+      { id: "transcript", need: "paper", text: () => "Tap a sentence to play from there", prep: () => inPaper(T.paper).then(() => pane("tr")), wait: 2500,
         at: () => ($("tr-body").classList.contains("live") ? shown(document.querySelector("#tr-body .tr-p .tr-s")) : null) },
-      { id: "comments", need: "paper", text: () => "Comment on the paper", prep: () => inPaper(T.paper), wait: 2000,
+      { id: "comments", need: "paper", text: () => "Comment on the paper", prep: () => inPaper(T.paper).then(() => pane("c")), wait: 2000,
         at: () => shown($("c-text")) },
       { id: "map", text: () => "The map of how papers connect", prep: onList, at: () => shown($("map-btn")) },
       { id: "link", need: "paper", text: () => "Link two papers", prep: inMap, wait: 3000, at: linkTo },
@@ -335,7 +337,7 @@
       go(T.i - 1, -1);
     }
 
-    // Wholly in view (and in its scrolling pane, clear of the window's slim player bar)?
+    // Wholly in view (and in its scrolling pane, clear of the phone's top bar in the window)?
     function inView(t) {
       const r = t.getBoundingClientRect();
       if (r.top < EDGE || r.bottom > window.innerHeight - EDGE || r.left < 0 || r.right > window.innerWidth) return false;

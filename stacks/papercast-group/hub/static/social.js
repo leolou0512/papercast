@@ -117,9 +117,10 @@
 
     // ================================================================ comments
     // One discussion per paper; each comment names the version it was written about, so its
-    // times play that version. Newest last, the box to write in under them.
+    // times play that version. Newest last, the box to write in under them: on a wide screen a
+    // column right of the transcript, its list scrolling on its own (it opens at the newest).
     const C = {
-      pid: null, p: null, chosen: null, eps: new Map(), list: new Map(), loaded: false, seq: 0, pending: null,
+      pid: null, p: null, chosen: null, eps: new Map(), list: new Map(), loaded: false, seq: 0, pending: null, fresh: false,
       nodes: new Map(), replyTo: null, editing: null, armed: null, armTimer: null, focus: null, counts: new Map(),
     };
     const sec = el("section", { class: "comments", id: "comments", hidden: true, "aria-labelledby": "c-h" });
@@ -198,7 +199,7 @@
       C.p = p; C.chosen = c || null;
       C.eps = new Map((p.episodes || []).map((e) => [e.id, e]));
       if (p.id !== C.pid) {
-        C.pid = p.id; C.list = new Map(); C.loaded = false; C.pending = [];
+        C.pid = p.id; C.list = new Map(); C.loaded = false; C.pending = []; C.fresh = true;
         for (const n of C.nodes.values()) n.root.remove();
         C.nodes.clear(); cList.replaceChildren();
         C.replyTo = null; C.editing = null; C.armed = null;
@@ -245,8 +246,11 @@
       C.pending = null;
       setCount(pid, [...C.list.values()].filter((c) => !c.deleted).length);
       render();
+      if (C.fresh) { C.fresh = false; toEnd(); }
       showFocus();
     }
+    // The newest in view (the list scrolls on its own only in the column).
+    function toEnd() { cList.scrollTop = cList.scrollHeight; }
     function take(c) {
       if (!c || c.paper_id !== C.pid) return;
       const old = C.list.get(c.id);
@@ -406,7 +410,7 @@
           { body, episode_id: C.chosen ? C.chosen.id : null });
         if (C.pid === pid) {
           if (cText.value === body) cText.value = "";
-          take(c); render();
+          take(c); render(); toEnd();
         }
         tab.del(draftKey(pid, "new"));
       } catch (e) { cMsg.className = "c-msg err"; cMsg.textContent = e.message; }
@@ -441,6 +445,7 @@
       const n = C.nodes.get(C.focus.cid);
       C.focus = null;
       if (!n) return;
+      if (ctx.showComments) ctx.showComments();
       n.item.scrollIntoView({ block: "center" });
       n.item.classList.add("c-flash");
       setTimeout(() => n.item.classList.remove("c-flash"), 1600);

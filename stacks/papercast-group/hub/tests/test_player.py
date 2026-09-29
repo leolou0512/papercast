@@ -9,9 +9,10 @@ else an estimate from script.md (sentences as common/checks.sentences cuts them,
 of the audio in proportion to its characters); the transcript tying the script's words to them.
 The page, in a real headless Chrome against the real hub (the auth stand-in of web_rig.py, as
 PCG_AUTH=header): Play next and Add to Up next in the menus, the Up next panel (arrows, drag,
-remove, clear), the next episode playing at the end (from the window and from the mini player),
-window.papercastQueue, the transcript's sentence moving with currentTime, tap to seek, Back to
-now, find; no console errors and no CSP violations; 44 x 44 px taps on a phone.
+remove, clear), the next episode playing at the end (from the window and from the player bar on
+a phone's list), window.papercastQueue, the transcript's sentence moving with currentTime and the
+transcript rolling with it while it plays (and not once scrolled by hand, until Back to now or
+Play), tap to seek, find; no console errors and no CSP violations; 44 x 44 px taps on a phone.
 
 Fake titles, people and scripts only. The browser part skips without a headless Chrome or
 `websocket-client`."""
@@ -370,11 +371,22 @@ SEG = "document.querySelector('#tr-body .tr-s[data-seg=\"{}\"]')"
 NOW = "(document.querySelector('#tr-body .tr-s.now') || {dataset: {}}).dataset.seg"
 
 
+# What scrolls the transcript: the middle column beside the comments, else (a phone) the window.
+SCROLLER = ("((m) => getComputedStyle(m).overflowY === 'auto' ? m : document.getElementById('win'))"
+            "(document.getElementById('p-mid'))")
+
+
 def in_view(node: str) -> str:
-    """JS: is this node on screen in the window (under the slim player bar when it shows)?"""
-    return ("((n) => { if (!n) return false; const w = document.getElementById('win').getBoundingClientRect();"
-            " const top = w.top + (document.getElementById('strip').classList.contains('on') ? 56 : 0), r = n.getBoundingClientRect();"
+    """JS: is this node on screen where the transcript scrolls (under the phone's top bar)?"""
+    return (f"((n) => {{ if (!n) return false; const w = {SCROLLER}.getBoundingClientRect(), pt = document.querySelector('#paper > .phone-top');"
+            " const top = pt && pt.getClientRects().length ? Math.max(w.top, pt.getBoundingClientRect().bottom) : w.top, r = n.getBoundingClientRect();"
             f" return r.bottom > top + 8 && r.top < w.bottom - 8; }})({node})")
+
+
+def at_third(node: str) -> str:
+    """JS: is this node's top between a fifth and a half of the way down that view (rolling)?"""
+    return (f"((n) => {{ if (!n) return false; const w = {SCROLLER}.getBoundingClientRect(), r = n.getBoundingClientRect();"
+            f" return r.top > w.top + w.height * 0.18 && r.top < w.top + w.height * 0.5; }})({node})")
 
 
 # every CSP violation the page meets, from before its first script
@@ -533,15 +545,15 @@ class PlayerPage(tp.PageBase):
         b.wait_js(f"location.hash === '#p={self.short[1]}' && document.getElementById('w-title').textContent === 'Short fake paper two'", 5, "window followed")
         self.assertEqual(self.text("#p-next-t"), "Short fake paper three")
         b.wait_js(f"document.querySelector('{tp.ROW.format(self.short[0])} .row-sub .st').textContent === 'Played'", 5, "the first played")
-        # on a phone, from the list: the mini player goes on to the next
+        # on a phone, from the list: the player bar goes on to the next
         try:
             self.phone()
             b.js("document.getElementById('back').click()")
-            b.wait_js("getComputedStyle(document.getElementById('mini')).display === 'flex' && !document.body.classList.contains('open')", 5, "mini player")
-            self.assertFalse(b.js("document.getElementById('mini-q').hidden"))
+            b.wait_js("!document.getElementById('bar').hidden && !document.body.classList.contains('open')", 5, "the bar on the list")
+            self.assertFalse(b.js("document.getElementById('p-next').hidden"))
             b.js(f"{AUDIO}.currentTime = {AUDIO}.duration - 0.4")
             b.wait_js(f"{src} === '/audio/{e3}.mp3' && !{AUDIO}.paused && {AUDIO}.currentTime > 0.1", 10, "the last one playing")
-            b.wait_js("document.getElementById('mini-title').textContent === 'Short fake paper three' && document.getElementById('mini-q').hidden", 5, "mini")
+            b.wait_js("document.getElementById('bar-title').textContent === 'Short fake paper three' && document.getElementById('p-next').hidden", 5, "the bar")
             self.r.wait(lambda: self.queue() == [], 5, "queue empty")
             self.assertFalse(b.js("document.body.classList.contains('open')"))        # the list stays
             # the end of the last: nothing more
@@ -583,16 +595,16 @@ class PlayerPage(tp.PageBase):
         self.assertTrue(b.js("document.getElementById('tr-note').hidden"))          # real timings
         self.assertEqual(b.js(NOW), "0")
         # the mark moves with currentTime
-        for k in (5, 21):
+        for k in (5, 41):
             b.js(f"{AUDIO}.currentTime = {segs[k]['start'] + 0.05}")
             b.wait_js(f"{NOW} === '{k}'", 5, f"sentence {k}")
-        # nobody asked to follow, and it is out of sight: Back to now
+        # not playing, so the window stays; the sentence is out of sight: Back to now
         b.wait_js("!document.getElementById('tr-now').hidden", 3, "Back to now shows")
-        self.assertFalse(b.js(in_view(SEG.format(21))))
-        top = b.js("document.getElementById('win').scrollTop")
+        self.assertFalse(b.js(in_view(SEG.format(41))))
+        top = b.js(f"{SCROLLER}.scrollTop")
         b.js("document.getElementById('tr-now').click()")
-        b.wait_js(in_view(SEG.format(21)) + " && document.getElementById('tr-now').hidden", 5, "back to now")
-        self.assertGreater(b.js("document.getElementById('win').scrollTop"), top)
+        b.wait_js(in_view(SEG.format(41)) + " && document.getElementById('tr-now').hidden", 5, "back to now")
+        self.assertGreater(b.js(f"{SCROLLER}.scrollTop"), top)
         # a tap on a sentence plays from there
         b.js(f"{AUDIO}.muted = true")
         b.js(f"{SEG.format(23)}.click()")
@@ -609,11 +621,11 @@ class PlayerPage(tp.PageBase):
         self.mouse("mouseWheel", x, y, deltaX=0, deltaY=-2500)
         b.wait_js(f"!{in_view(cur)} && !document.getElementById('tr-now').hidden", 5, "scrolled away")
         time.sleep(0.3)
-        top = b.js("document.getElementById('win').scrollTop")
+        top = b.js(f"{SCROLLER}.scrollTop")
         b.js(f"{AUDIO}.currentTime = {segs[90]['start'] + 0.05}")
         b.wait_js(f"Number({NOW}) >= 90", 5, "sentence 90")
         time.sleep(0.8)
-        self.assertEqual(b.js("document.getElementById('win').scrollTop"), top)
+        self.assertEqual(b.js(f"{SCROLLER}.scrollTop"), top)
         self.assertFalse(b.js("document.getElementById('tr-now').hidden"))
         b.js("document.getElementById('tr-now').click()")
         b.wait_js(in_view(cur) + " && document.getElementById('tr-now').hidden", 5, "back to now again")
@@ -687,6 +699,45 @@ class PlayerPage(tp.PageBase):
         self.open(self.short[0])
         b.wait_js("document.getElementById('tr').hidden && document.getElementById('w-title').textContent === 'Short fake paper one'", 5, "none")
 
+    def test_7_the_transcript_rolls_while_it_plays(self):
+        """Playing, the window rolls with the sentence (about a third of the way down), the
+        comments' column staying where it is; scrolled by hand, it stops, and Back to now shows;
+        Play (after a pause) follows again."""
+        b = self.b
+        segs = self.timed["segments"]
+        cur = "document.querySelector('#tr-body .tr-s.now')"
+        col = "(r => [r.left, r.top, r.right, r.bottom])(document.getElementById('comments').getBoundingClientRect())"
+        self.home(A)
+        self.open(self.read)
+        b.wait_js(f"!document.getElementById('tr').hidden && {AUDIO}.duration > 20", 10, "transcript")
+        # the middle scrolls on its own, left of the comments
+        self.assertEqual(b.js("getComputedStyle(document.getElementById('p-mid')).overflowY"), "auto")
+        self.assertLessEqual(b.js("document.getElementById('tr').getBoundingClientRect().right"), b.js(f"{col}[0]") + 1)
+        c0 = b.js(col)
+        b.js(f"{AUDIO}.muted = true; document.getElementById('p-play').click()")
+        b.wait_js(f"!{AUDIO}.paused", 5, "playing")
+        b.js(f"{AUDIO}.currentTime = {segs[40]['start'] + 0.05}")
+        b.wait_js(f"Number({NOW}) >= 40 && {at_third(cur)} && document.getElementById('tr-now').hidden", 5, "rolled to it")
+        top = b.js(f"{SCROLLER}.scrollTop")
+        time.sleep(1.5)             # six more sentences: the view went on with them
+        b.wait_js(f"!{AUDIO}.paused && Number({NOW}) >= 45 && {at_third(cur)} && {SCROLLER}.scrollTop > {top}", 5, "rolling")
+        self.assertEqual(b.js(col), c0, "the comments' column moved")
+        self.assertEqual(b.js("document.getElementById('win').scrollTop"), 0, "the window scrolled, not the middle")
+        # scrolled by hand: it stays put, and Back to now shows
+        x, y = self.center("document.getElementById('tr-body')")
+        self.mouse("mouseWheel", x, y, deltaX=0, deltaY=-1500)
+        b.wait_js(f"!{in_view(cur)} && !document.getElementById('tr-now').hidden", 5, "scrolled away")
+        time.sleep(0.3)
+        top = b.js(f"{SCROLLER}.scrollTop")
+        time.sleep(1.0)
+        self.assertEqual(b.js(f"{SCROLLER}.scrollTop"), top, "it rolled on after the person scrolled")
+        # a pause, then Play: it follows again
+        b.js("document.getElementById('p-play').click()")
+        b.wait_js(f"{AUDIO}.paused", 3, "paused")
+        b.js("document.getElementById('p-play').click()")
+        b.wait_js(f"!{AUDIO}.paused && {at_third(cur)} && document.getElementById('tr-now').hidden", 5, "Play follows again")
+        b.js(f"{AUDIO}.pause()")
+
     def test_z_phone(self):
         """On a phone: every control, with the transcript and Up next, takes a 44 x 44 px tap."""
         b = self.b
@@ -705,6 +756,21 @@ class PlayerPage(tp.PageBase):
                       " && !document.getElementById('p-next').hidden", 10, "window")
             targets("the window with Up next and the transcript")
             self.no_side_scroll("the window with the transcript")
+            # the transcript and the comments are two tabs here; the bar is one line along the bottom
+            vh = b.js("innerHeight")
+            bar = b.js("(r => [r.top, r.bottom, r.height])(document.getElementById('bar').getBoundingClientRect())")
+            self.assertEqual(round(bar[1]), vh)
+            self.assertLessEqual(bar[2], 72, "the phone's bar is more than one line")
+            self.assertAlmostEqual(b.js("document.getElementById('win').getBoundingClientRect().bottom"), bar[0], delta=1)
+            self.assertTrue(b.js("document.getElementById('b-prog').getClientRects().length > 0 && !document.getElementById('scrub').getClientRects().length"),
+                            "one line: the thin line for how far, no seek bar")
+            self.assertEqual(b.js("[getComputedStyle(document.getElementById('ptabs')).display, getComputedStyle(document.getElementById('comments')).display]"), ["flex", "none"])
+            b.js("document.getElementById('pt-c').click()")
+            b.wait_js("getComputedStyle(document.getElementById('comments')).display !== 'none' && getComputedStyle(document.getElementById('tr')).display === 'none'", 3, "the comments' tab")
+            targets("the comments' tab")
+            self.no_side_scroll("the comments' tab")
+            b.js("document.getElementById('pt-tr').click()")
+            b.wait_js("getComputedStyle(document.getElementById('tr')).display !== 'none'", 3, "the transcript's tab")
             b.js("{ const f = document.getElementById('tr-q'); f.value = 'plain fake'; f.dispatchEvent(new Event('input')); }")
             b.wait_js("!document.getElementById('tr-next').disabled", 5, "found")
             targets("find in the transcript")
@@ -722,22 +788,25 @@ class PlayerPage(tp.PageBase):
             self.assertEqual(self.menu()[:3], ["Play next", "Add to Up next", "Details"])
             targets("the window's menu")
             b.js("document.getElementById('w-more-phone').click()")
+            b.js("document.getElementById('bar-exp').click()")
+            b.wait_js("document.getElementById('bar').classList.contains('open')", 3, "the bar opened")
+            targets("the window with the bar opened")
             b.js("document.getElementById('p-next').click()")
             b.wait_js("!document.getElementById('q-overlay').hidden", 3, "panel")
             targets("the Up next panel")
             self.no_side_scroll("the Up next panel")
             self.shot("phone-up-next")
             b.js("document.getElementById('q-close').click()")
-            # the mini player's Up next
+            # the bar's Up next, from the list
             b.js(f"{AUDIO}.muted = true; document.getElementById('p-play').click()")
             b.wait_js(f"!{AUDIO}.paused", 5, "playing")
             b.js("document.getElementById('back').click()")
-            b.wait_js("getComputedStyle(document.getElementById('mini')).display === 'flex'"
-                      " && getComputedStyle(document.getElementById('win')).visibility === 'hidden'", 5, "mini player")
-            targets("the mini player with Up next")
-            b.js("document.getElementById('mini-q').click()")
-            b.wait_js("!document.getElementById('q-overlay').hidden && document.body.classList.contains('open') === false", 3, "panel from the mini player")
-            targets("the Up next panel from the mini player")
+            b.wait_js("!document.getElementById('bar').hidden && document.getElementById('bar').classList.contains('open')"
+                      " && getComputedStyle(document.getElementById('win')).visibility === 'hidden'", 5, "the bar on the list")
+            targets("the opened bar with Up next")
+            b.js("document.getElementById('p-next').click()")
+            b.wait_js("!document.getElementById('q-overlay').hidden && document.body.classList.contains('open') === false", 3, "panel from the bar")
+            targets("the Up next panel from the bar")
             x, y = self.center(f"document.querySelector('#q-list .q-row[data-ep=\"{e1}\"] .q-down')")
             self.mouse("mousePressed", x, y, button="left", buttons=1, clickCount=1)
             self.mouse("mouseReleased", x, y, button="left", buttons=0, clickCount=1)

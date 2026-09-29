@@ -1,4 +1,4 @@
-/* papercast-group: comments under the player and the board above the list (social.js). The
+/* papercast-group: comments beside the transcript and the board above the list (social.js). The
    page's own colours and type (app.css); no cards, no shadows. Every control is a 44 x 44 px tap
    (test_social.py, as test_page.py); links inside a person's text are inline, in .md blocks. */
 
@@ -56,8 +56,28 @@ a.bd-link:hover, button.bd-link:hover { background: var(--sel); }
 .bd-msg:empty { display: none; }
 .c-body a, .bd-ntext a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; text-decoration-thickness: 1px; }
 
-/* ---------- comments, under the player ---------- */
+/* ---------- comments: a column right of the transcript, or a tab (app.css, by the window's width) ---------- */
 .comments { padding: 0 32px 48px; }
+/* the column: as tall as the window; its list scrolls on its own (to its end and no further),
+   the box to write in under it */
+@container win (min-width: 660px) {
+  .paper > .comments {
+    grid-column: 2; grid-row: 1; height: 100cqh; padding: 0;
+    display: flex; flex-direction: column; border-left: 1px solid var(--hairline); background: var(--bg);
+  }
+  .comments > .col { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; max-width: none; margin: 0; }
+  .comments .c-head { flex: none; margin: 0; padding: 6px 8px 0 16px; }
+  .comments .c-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 16px 8px; }
+  .comments .c-compose { flex: none; margin: 0; padding: 10px 16px 12px; border-top: 1px solid var(--hairline); }
+  .comments .c-compose .c-text { min-height: 64px; }
+  .comments .c-compose .c-row { margin-top: 6px; }
+}
+/* a tab: its name says Comments, so the heading goes (Comment at stays) */
+@container win (max-width: 659.98px) {
+  #paper.has-tr .c-head .sec-h { display: none; }
+  #paper.has-tr .c-head { justify-content: flex-end; }
+  #paper.has-tr .c-head:has(> .c-at[hidden]) { display: none; }
+}
 .c-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; margin-top: 8px; }
 .c-head .sec-h { margin: 0; }
 .c-at { margin: 0; padding: 0 8px; min-width: 44px; color: var(--accent); font-weight: 500; font-variant-numeric: tabular-nums; }

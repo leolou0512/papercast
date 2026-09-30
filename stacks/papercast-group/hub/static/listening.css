@@ -75,3 +75,5 @@
   .gp-row { grid-template-columns: minmax(0, 1fr); }
 }
 .save-row.sw-line { margin-top: 0; }
+.set-body .ls-note { margin: 0; }
+.save-row.ls-del { margin-top: 8px; }

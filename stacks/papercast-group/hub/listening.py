@@ -3,14 +3,23 @@ for everyone detailing how much they've listened per day per week etc in the sty
 heatmap for contribution").
 
   GET /api/listening/me?tz=<min>      your days, totals, streaks, the last 12 weeks, `shown`
-  GET /api/listening/group?tz=<min>   every member shown to the group, most minutes in the last
-                                      30 days first: {"people": [{"user", "days", "last30_s"}]}
-  PUT /api/me/listening-visibility    {"shown": bool}: whether the group sees yours (default: shown)
+  GET /api/listening/group?tz=<min>   every member who turned "Show mine to the group" on, most
+                                      minutes in the last 30 days first:
+                                      {"people": [{"user", "days", "last30_s"}]}
+  PUT /api/me/listening-visibility    {"shown": bool}: whether the group sees yours (default: not)
+  DELETE /api/me/listening            all of yours: the days, the per-episode state, the finished
+                                      episodes, the switch (back to off)
 
 `tz` is the page's Date.getTimezoneOffset() (minutes, UTC minus local); it says which day is
 "today". A day is {"YYYY-MM-DD": [seconds, episodes]}, only days with something in them, for the
-last DAYS_BACK days. A hidden person is left out of the group for everyone, admins too; their own
-answer (me) is always theirs.
+last DAYS_BACK days. Sharing is opt-in (UK GDPR, 2026-09-30): only the people in listen_shown are
+in the group, for everyone, admins too; nobody else's appears; their own answer (me) is always
+theirs. The hidden-list this replaced (listen_hidden) is dropped at the first start after the
+change, so everyone starts hidden and nobody is carried over as shown.
+
+Retention: days, finished episodes and per-episode state older than RETAIN_DAYS (365) go, at the
+hub's start and once a day after (prune()). Taking someone off the list (accounts.disallow) or an
+admin disabling the account deletes all of theirs at once (forget()).
 
 Recording (record(), called by web.put_position in its transaction for every position it keeps).
 The page sends, with each position, `rate` (the playback speed), `playing` (whether the audio is
@@ -23,24 +32,29 @@ a seek or a skip forward counts only the time that passed, a jump back counts no
 the audio heard. An update not newer than the last one (a retry, a late request) changes nothing,
 so retries are harmless. Seconds go to the listener's local day (the update's `tz`; UTC when
 the page sends none), split at midnight when an interval spans it. An episode counts once per
-person, on the day its position first reaches the last FINISH_S seconds (FINISH_FRAC of a short
-one) after at least FINISH_HEARD_S of it was heard (half, for a short one): dragging to the end
-is not finishing.
+person (while its listen_finished row is kept), on the day its position first reaches the last
+FINISH_S seconds (FINISH_FRAC of a short one) after at least FINISH_HEARD_S of it was heard
+(half, for a short one): dragging to the end is not finishing.
 
 History: nothing was recorded before this module, so the days start at its deploy. The one thing
 kept from before is the Listened tick's date: at the first start, each tick then on the hub
 counts as one episode (no minutes) on its UTC day (meta key BACKFILL_KEY; once)."""
 from __future__ import annotations
 
+import logging
 import re
 import threading
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from . import avatars, db
 from .app import HTTPError
 
+log = logging.getLogger("pcg.listening")
+
 DAYS_BACK = 371                 # 53 weeks: the year's heatmap, whatever day of the week today is
+RETAIN_DAYS = 365               # older than this is deleted (prune())
+PRUNE_S = 86400                 # prune() again after this, while the hub runs
 GROUP_DAYS = 30                 # the group's order: minutes in the last 30 days
 WEEKS = 12                      # the per-week bars
 FINISH_S = 30.0
@@ -77,10 +91,14 @@ CREATE TABLE IF NOT EXISTS listen_finished (   -- an episode counted: once per p
   at TEXT NOT NULL,
   PRIMARY KEY (user_id, episode_id)
 );
-CREATE TABLE IF NOT EXISTS listen_hidden (     -- people who hid theirs from the group
+CREATE TABLE IF NOT EXISTS listen_shown (      -- people who turned "Show mine to the group" on
   user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   at TEXT NOT NULL
-)
+);
+DROP TABLE IF EXISTS listen_hidden;            -- the old hidden-list (shown by default): nobody carried over
+CREATE INDEX IF NOT EXISTS listen_days_day ON listen_days(day);
+CREATE INDEX IF NOT EXISTS listen_finished_day ON listen_finished(day);
+CREATE INDEX IF NOT EXISTS listen_last_at ON listen_last(at_ms)
 """
 
 _ready: set = set()
@@ -106,6 +124,54 @@ def ensure_schema() -> None:
 def start(cfg) -> None:
     ensure_schema()
     backfill()
+    prune()
+    _start_pruner()
+
+
+# ---------------------------------------------------------------- retention and deletion
+
+TABLES = ("listen_days", "listen_last", "listen_finished", "listen_shown")
+_pruner_started = False
+_pruner_lock = threading.Lock()
+
+
+def prune() -> int:
+    """Delete what is older than RETAIN_DAYS: days before the cutoff, episodes finished on them,
+    and per-episode state last updated before it. The rows deleted."""
+    ensure_schema()
+    cutoff = _today(0) - timedelta(days=RETAIN_DAYS)
+    cut_ms = int(datetime(cutoff.year, cutoff.month, cutoff.day, tzinfo=timezone.utc).timestamp() * 1000)
+    with db.transaction() as c:
+        n = c.execute("DELETE FROM listen_days WHERE day < ?", (cutoff.isoformat(),)).rowcount
+        n += c.execute("DELETE FROM listen_finished WHERE day < ?", (cutoff.isoformat(),)).rowcount
+        n += c.execute("DELETE FROM listen_last WHERE at_ms < ?", (cut_ms,)).rowcount
+    if n:
+        log.info("listening: %d rows older than %d days deleted", n, RETAIN_DAYS)
+    return n
+
+
+def _prune_loop() -> None:
+    while True:
+        time.sleep(PRUNE_S)
+        try:
+            prune()
+        except Exception:
+            log.exception("listening prune")
+
+
+def _start_pruner() -> None:
+    global _pruner_started
+    with _pruner_lock:
+        if _pruner_started:
+            return
+        _pruner_started = True
+    threading.Thread(target=_prune_loop, name="listening-prune", daemon=True).start()
+
+
+def forget(c, uid: int) -> int:
+    """Every listening row of this person (in the caller's transaction): the rows deleted."""
+    ensure_schema()
+    return sum(c.execute(f"DELETE FROM {t} WHERE user_id = ?", (uid,)).rowcount for t in TABLES)
 
 
 def backfill() -> int:
@@ -253,7 +319,7 @@ def streaks(days: set, today: date) -> dict:
 
 def shown(c, uid: int) -> bool:
     ensure_schema()
-    return c.execute("SELECT 1 FROM listen_hidden WHERE user_id = ?", (uid,)).fetchone() is None
+    return c.execute("SELECT 1 FROM listen_shown WHERE user_id = ?", (uid,)).fetchone() is not None
 
 
 def me_view(c, uid: int, tz: int) -> dict:
@@ -276,11 +342,12 @@ def me_view(c, uid: int, tz: int) -> dict:
 
 
 def _members(c, cfg):
-    """Everyone in the group: not disabled, and with passwords, still on the group's list."""
+    """Everyone the group sees: turned sharing on, not disabled, and with passwords, still on
+    the group's list."""
     listed = (" AND EXISTS (SELECT 1 FROM allowed_emails a WHERE a.email = lower(u.email))"
               if cfg.auth == "password" else "")
     return c.execute(f"""SELECT u.id, u.name FROM users u WHERE u.disabled = 0{listed}
-                         AND NOT EXISTS (SELECT 1 FROM listen_hidden h WHERE h.user_id = u.id)
+                         AND EXISTS (SELECT 1 FROM listen_shown h WHERE h.user_id = u.id)
                          ORDER BY u.id""").fetchall()
 
 
@@ -326,14 +393,24 @@ def put_visibility(req):
     uid = req.user["id"]
     with db.transaction() as c:
         if v:
-            c.execute("DELETE FROM listen_hidden WHERE user_id = ?", (uid,))
+            c.execute("INSERT OR IGNORE INTO listen_shown(user_id, at) VALUES (?, ?)", (uid, db.now()))
         else:
-            c.execute("INSERT OR IGNORE INTO listen_hidden(user_id, at) VALUES (?, ?)", (uid, db.now()))
+            c.execute("DELETE FROM listen_shown WHERE user_id = ?", (uid,))
     req.send_json(200, {"shown": shown(db.conn(), uid)})
+
+
+def delete_mine(req):
+    """Delete my listening history: all of the caller's rows. Twice is the same."""
+    from . import web
+    web._mutation(req)
+    with db.transaction() as c:
+        forget(c, req.user["id"])
+    req.send_json(200, {"deleted": True})
 
 
 ROUTES = [
     ("GET", r"^/api/listening/me$", get_me, "viewer"),
     ("GET", r"^/api/listening/group$", get_group, "viewer"),
     ("PUT", r"^/api/me/listening-visibility$", put_visibility, "viewer"),
+    ("DELETE", r"^/api/me/listening$", delete_mine, "viewer"),
 ]

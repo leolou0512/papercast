@@ -177,6 +177,15 @@ class PasswordTest(unittest.TestCase):
         self.assertEqual(s, 200, j)
         return [e for e in j["events"] if kind is None or e["kind"] == kind]
 
+    def listening(self, uid) -> int:
+        """Some listening of theirs (hub/listening.py), shown to the group: the rows now kept."""
+        from hub import listening
+        c = db.conn()
+        if uid is not None and not c.execute("SELECT 1 FROM listen_shown WHERE user_id = ?", (uid,)).fetchone():
+            c.execute("INSERT INTO listen_days(user_id, day, seconds, episodes) VALUES (?, ?, 600, 1)", (uid, listening._today(0).isoformat()))
+            c.execute("INSERT INTO listen_shown(user_id, at) VALUES (?, ?)", (uid, db.now()))
+        return sum(c.execute(f"SELECT count(*) FROM {t} WHERE user_id = ?", (uid,)).fetchone()[0] for t in listening.TABLES)
+
     def device(self, who, name="laptop"):
         s, st, _ = self.r("POST", "/api/cli/login/start", {"device": name})
         s, j, _ = self.r("POST", "/api/cli/login/approve", {"code": st["code"], "approve": True}, **who)
@@ -266,8 +275,11 @@ class PasswordTest(unittest.TestCase):
             s, j, _ = self.r("DELETE", "/api/admin/allowed", body, **self.leo)
             self.assertEqual((s, j["error"]), (400, "confirm"), confirm)
         self.assertEqual(self.me(who)[0], 200)                  # nothing happened yet
+        self.assertEqual(self.listening(uid), 2)
         s, j, _ = self.r("DELETE", "/api/admin/allowed", {"email": "rm101@ic.ac.uk", "confirm": "  DeLeTe "}, **self.leo)
         self.assertEqual((s, j["user_id"]), (200, uid))
+        self.assertEqual(db.conn().execute("SELECT count(*) FROM listen_days WHERE user_id = ?", (uid,)).fetchone()[0], 0)
+        self.assertEqual(db.conn().execute("SELECT count(*) FROM listen_shown WHERE user_id = ?", (uid,)).fetchone()[0], 0)   # their listening went
         self.assertEqual(self.me(who)[0], 401)                  # the session ended
         self.assertEqual(self.r("GET", "/api/cli/me", token=token)[0], 401)     # and the device
         self.assertEqual(self.login("rm101", NEW_PW)[1]["error"], "bad_login")   # no sign-in: like an unknown account
@@ -854,8 +866,14 @@ class PasswordTest(unittest.TestCase):
 
     def test_disabling_ends_the_sessions(self):
         uid, who = self.person("ds101")
+        other, _ = self.person("ds102")
+        self.assertEqual((self.listening(uid), self.listening(other)), (2, 2))
         self.assertEqual(self.r("PUT", f"/api/admin/users/{uid}", {"disabled": True}, **self.leo)[0], 200)
         self.assertEqual(self.me(who)[0], 401)
+        # their listening history went with it (not anyone else's)
+        self.assertEqual(sum(db.conn().execute(f"SELECT count(*) FROM {t} WHERE user_id = ?", (uid,)).fetchone()[0]
+                             for t in ("listen_days", "listen_last", "listen_finished", "listen_shown")), 0)
+        self.assertEqual(db.conn().execute("SELECT count(*) FROM listen_days WHERE user_id = ?", (other,)).fetchone()[0], 1)
         s, j, _ = self.login("ds101", NEW_PW)
         self.assertEqual((s, j["error"]), (403, "disabled"))
         self.assertEqual(self.r("PUT", f"/api/admin/users/{uid}", {"disabled": False}, **self.leo)[0], 200)

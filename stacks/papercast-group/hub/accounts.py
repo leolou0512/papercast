@@ -442,7 +442,7 @@ def end_everything(c, uid, *, tokens: bool) -> None:
 
 def disallow(cfg, email: str, *, by=None, ip=None) -> dict:
     """Take `email` off the ledger and disable its account (sessions, devices and links end;
-    what the person made stays theirs). The last admin stays."""
+    their listening history is deleted; what the person made stays theirs). The last admin stays."""
     e = email.strip().lower() if isinstance(email, str) else ""
     with db.transaction() as c:
         if c.execute("SELECT 1 FROM allowed_emails WHERE email = ?", (e,)).fetchone() is None:
@@ -454,6 +454,8 @@ def disallow(cfg, email: str, *, by=None, ip=None) -> dict:
         if u is not None:
             c.execute("UPDATE users SET disabled = 1 WHERE id = ?", (u["id"],))
             end_everything(c, u["id"], tokens=True)
+            from . import listening
+            listening.forget(c, u["id"])
         log_event("removed", user_id=u["id"] if u else None, email=e, actor_id=by, ip=ip, c=c)
     return {"email": e, "user_id": u["id"] if u else None}
 

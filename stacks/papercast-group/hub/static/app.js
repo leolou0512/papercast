@@ -2084,22 +2084,39 @@
     slackPref(body);
   }
 
-  // Whether the group sees your listening (hub/listening.py): on by default, saved at once.
+  // Whether the group sees your listening (hub/listening.py): off until you turn it on, saved at
+  // once; the one line on what is kept (it must say what hub/listening.py does: RETAIN_DAYS); and
+  // deleting all of yours, two presses as with Sign out everywhere.
+  const LS_NOTE = "Records minutes and episodes per day. Only you see them unless this is on. Kept 12 months.";
   function listeningSwitch() {
-    const sw = el("button", { type: "button", class: "sw-row", id: "ls-shown", role: "switch", "aria-checked": "true", disabled: true },
+    const sw = el("button", { type: "button", class: "sw-row", id: "ls-shown", role: "switch", "aria-checked": "false", disabled: true },
       el("span", { class: "sw", "aria-hidden": "true" }), el("span", { text: "Show mine to the group" }));
     const msg = el("span", { class: "ok", id: "ls-shown-msg", role: "status" });
-    let on = true;
+    const DEL = "Delete my listening history";
+    const del = el("button", { type: "button", class: "text-btn danger", id: "ls-delete", text: DEL });
+    const delMsg = el("span", { class: "ok", id: "ls-delete-msg", role: "status" });
+    let on = false;
     const draw = () => sw.setAttribute("aria-checked", String(on));
-    api("GET", `/api/listening/me?tz=${new Date().getTimezoneOffset()}`).then((j) => { on = j.shown !== false; draw(); sw.disabled = false; }, (e) => { msg.className = "err"; msg.textContent = e.message; });
+    api("GET", `/api/listening/me?tz=${new Date().getTimezoneOffset()}`).then((j) => { on = j.shown === true; draw(); sw.disabled = false; }, (e) => { msg.className = "err"; msg.textContent = e.message; });
     sw.addEventListener("click", async () => {
       const want = !on;
-      on = want; draw(); sw.disabled = true; msg.className = "ok"; msg.textContent = "";
+      on = want; draw(); sw.disabled = true; msg.className = "ok"; msg.textContent = ""; delMsg.textContent = "";
       try { on = (await api("PUT", "/api/me/listening-visibility", { shown: want })).shown; draw(); msg.textContent = "Saved"; }
       catch (e) { on = !want; draw(); msg.className = "err"; msg.textContent = e.message; }
       sw.disabled = false;
     });
-    return [el("p", { class: "pref-h sec", text: "Listening" }), el("div", { class: "save-row sw-line" }, sw, msg)];
+    let armed = false;
+    del.addEventListener("click", async () => {
+      delMsg.className = "ok"; delMsg.textContent = "";
+      if (!armed) { armed = true; del.textContent = "Delete now"; return; }
+      del.disabled = true;
+      try { await api("DELETE", "/api/me/listening"); on = false; draw(); msg.textContent = ""; delMsg.textContent = "Deleted"; }
+      catch (e) { delMsg.className = "err"; delMsg.textContent = e.message; }
+      armed = false; del.textContent = DEL; del.disabled = false;
+    });
+    return [el("p", { class: "pref-h sec", text: "Listening" }), el("div", { class: "save-row sw-line" }, sw, msg),
+      el("p", { class: "muted ls-note", id: "ls-note", text: LS_NOTE }),
+      el("div", { class: "save-row ls-del" }, del, delMsg)];
   }
 
   // papercast add's Slack question (hub/slack.py): this person's answer on Enter, saved at once.

@@ -846,6 +846,9 @@ def admin_user_put(req, uid):
         c.execute(f"UPDATE users SET {', '.join(k + ' = ?' for k in f)} WHERE id = ?", (*f.values(), u["id"]))
         if f.get("disabled") == 1 and not u["disabled"]:
             c.execute("UPDATE users SET session_v = session_v + 1 WHERE id = ?", (u["id"],))   # every session ends
+        if f.get("disabled") == 1:
+            from . import listening
+            listening.forget(c, u["id"])                # and their listening history goes
         if req.cfg.auth == "password":
             for k, what in (("role", "role"), ("disabled", "disabled")):
                 if k in f and f[k] != (u[k] if k == "role" else int(u["disabled"])):

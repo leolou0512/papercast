@@ -448,7 +448,7 @@ class ListeningPage(tp.PageBase):
             self.assertNotEqual(c["lv0"], c["lv4"], theme)
             self.assertTrue(self.b.js("document.documentElement.dataset.theme") == theme)
             self.shot(f"listening-{theme}")
-        # the accent in full is the darkest shade in a light theme and the brightest in a dark one
+        # GitHub's greens: the fullest shade is the darkest in a light theme and the brightest in a dark one
         lum = ("(c => { const k = c.startsWith('color(') ? 255 : 1, m = c.match(/[\\d.]+/g).map(Number);"
                " return k * (0.2126 * m[0] + 0.7152 * m[1] + 0.0722 * m[2]); })")
         self.page("dark")
@@ -457,6 +457,9 @@ class ListeningPage(tp.PageBase):
         self.page("light")
         light = self.b.js(f"[{lum}(getComputedStyle(document.querySelector('#ls-year rect.lv0')).fill), {lum}(getComputedStyle(document.querySelector('#ls-year rect.lv4')).fill)]")
         self.assertGreater(light[0], light[1])
+        self.assertEqual(self.b.js("getComputedStyle(document.querySelector('#ls-year rect.lv4')).fill"), "rgb(33, 110, 57)")
+        self.page("dark")
+        self.assertEqual(self.b.js("getComputedStyle(document.querySelector('#ls-year rect.lv4')).fill"), "rgb(57, 211, 83)")
 
     def test_3_on_a_phone(self):
         b = self.b

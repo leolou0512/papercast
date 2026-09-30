@@ -1,13 +1,11 @@
-/* papercast-group: the Listening page (listening.js). The heatmap's five shades are the theme's
-   own: none is the text colour faintly over the page, the four others the accent over the page
-   at 35, 60 and 82 per cent and in full, so every theme (dark ones too) has its ramp. */
+/* papercast-group: the Listening page (listening.js). The heatmap's shades are GitHub's greens
+   (Leo, 2026-09-30: "green like github"), its light ramp on light themes and its dark ramp on dark
+   ones; an empty day is the text colour faintly over the page, so it sits on every theme. */
 .listening { display: flex; flex-direction: column; min-height: 100%; flex: none;
   --hm0: color-mix(in srgb, var(--text) 9%, var(--bg));
-  --hm1: color-mix(in srgb, var(--accent) 35%, var(--bg));
-  --hm2: color-mix(in srgb, var(--accent) 60%, var(--bg));
-  --hm3: color-mix(in srgb, var(--accent) 82%, var(--bg));
-  --hm4: var(--accent);
+  --hm1: #9BE9A8; --hm2: #40C463; --hm3: #30A14E; --hm4: #216E39;
 }
+:root[data-scheme="dark"] .listening { --hm1: #0E4429; --hm2: #006D32; --hm3: #26A641; --hm4: #39D353; }
 .ls-head { padding-bottom: 24px; }
 .ls-body { padding: 16px 32px 48px; flex: 1; }
 .ls-body .muted { color: var(--text-2); font-size: 14px; line-height: 20px; }
@@ -45,7 +43,7 @@
 
 .wk-box { max-width: 460px; }
 .wk { display: block; width: 100%; height: auto; }
-.wk-bar { fill: var(--accent); }
+.wk-bar { fill: var(--hm3); }
 .wk-bar:hover { fill: var(--hm3); }
 .wk-base { fill: var(--hairline); }
 .wk-n, .wk-t { font: 10px var(--sans); fill: var(--text-2); }

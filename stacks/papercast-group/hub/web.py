@@ -5,7 +5,9 @@
                                           q searches everything (search.py), the rest filter
   GET    /api/papers/<id>                 one paper, as in the library
   PUT    /api/papers/<id>/listened        {"listened": bool}: this user's tick, never automatic
-  PUT    /api/episodes/<id>/position      {"s": seconds, "at": ms since the epoch}: newest wins
+  PUT    /api/episodes/<id>/position      {"s": seconds, "at": ms since the epoch}: newest wins; with
+                                          "rate", "playing", "tab", "tz" it also counts the time
+                                          heard (listening.py)
   DELETE /api/episodes/<id>               maker or admin: hidden at once, undo for 30 days
   POST   /api/episodes/<id>/undelete
   GET    /api/prefs, PUT /api/prefs       {"settings", "note"}, checked by common/prefs.py
@@ -34,7 +36,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import avatars, db, events, search, voices
+from . import avatars, db, events, listening, search, voices
 from .app import HTTPError
 
 try:
@@ -308,7 +310,7 @@ def put_position(req, eid):
         at = now
     at = int(at)
     with db.transaction() as c:
-        e = c.execute("SELECT deleted_at FROM episodes WHERE id = ?", (eid,)).fetchone()
+        e = c.execute("SELECT deleted_at, duration_s FROM episodes WHERE id = ?", (eid,)).fetchone()
         if not e or e["deleted_at"]:
             raise HTTPError(404, "not_found", "no such episode")
         old = c.execute("SELECT updated_at FROM positions WHERE user_id = ? AND episode_id = ?",
@@ -319,6 +321,7 @@ def put_position(req, eid):
             kept = False
             c.execute("INSERT OR REPLACE INTO positions(user_id, episode_id, seconds, updated_at) VALUES (?, ?, ?, ?)",
                       (_uid(req), eid, round(min(float(s), 1e6), 1), _iso_ms(at)))
+            listening.record(c, _uid(req), eid, float(s), at, b, e["duration_s"])     # the time heard (listening.py)
     req.send_json(200, {"ok": True, "kept_newer": kept})
 
 

@@ -53,6 +53,8 @@ stacks/papercast-group/
   hub/layout.py                 settled positions (ground state)        (A5)
   hub/static/map.js map.css     the map with editing                    (A6)
   hub/avatars.py                profile pictures: upload checks, storage, serving
+  hub/listening.py              listening time per person per day, the Listening dashboard's API
+  hub/static/listening.js listening.css   the Listening page: heatmaps, totals, weeks, the group
   hub/static/avatar.js          the pictures (or initials) next to names on the page
   hub/tests/test_<module>.py    each owner's tests
   prompts/base-guideline.md     base prompt v1 (group)                  (A9)

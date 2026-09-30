@@ -9,11 +9,13 @@
 <link rel="stylesheet" href="/app.css">
 <link rel="stylesheet" href="/social.css">
 <link rel="stylesheet" href="/tour.css">
+<link rel="stylesheet" href="/listening.css">
 <link rel="stylesheet" href="/themes.css">
 <script src="/theme.js"></script>
 <script src="/avatar.js" defer></script>
 <script src="/social.js" defer></script>
 <script src="/tour.js" defer></script>
+<script src="/listening.js" defer></script>
 <script src="/app.js" defer></script>
 </head>
 <body>
@@ -25,6 +27,9 @@
       <div class="head-btns">
         <button type="button" class="icon-btn help-btn" id="help-btn" aria-label="Help" title="Help" aria-haspopup="dialog" aria-expanded="false">
           <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10" cy="10" r="7.8"/><path d="M7.8 7.9a2.3 2.3 0 1 1 3.3 2.1c-.7.3-1.1.8-1.1 1.5v.2"/><circle cx="10" cy="14.1" r=".5" fill="currentColor"/></svg>
+        </button>
+        <button type="button" class="icon-btn" id="listen-btn" aria-label="Listening" title="Listening">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><rect x="2" y="2" width="4.4" height="4.4" rx="1" opacity=".3"/><rect x="7.8" y="2" width="4.4" height="4.4" rx="1"/><rect x="13.6" y="2" width="4.4" height="4.4" rx="1" opacity=".6"/><rect x="2" y="7.8" width="4.4" height="4.4" rx="1"/><rect x="7.8" y="7.8" width="4.4" height="4.4" rx="1" opacity=".3"/><rect x="13.6" y="7.8" width="4.4" height="4.4" rx="1"/><rect x="2" y="13.6" width="4.4" height="4.4" rx="1" opacity=".6"/><rect x="7.8" y="13.6" width="4.4" height="4.4" rx="1"/><rect x="13.6" y="13.6" width="4.4" height="4.4" rx="1" opacity=".3"/></svg>
         </button>
         <button type="button" class="icon-btn" id="map-btn" aria-label="Paper map" title="Paper map">
           <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M6.4 6.9 8.7 12.4M13.6 6.2 11.3 12.2M7.4 5.2h5.2"/><circle cx="5.4" cy="5.2" r="2"/><circle cx="14.6" cy="4.6" r="2"/><circle cx="10" cy="14.6" r="2.4"/></svg>
@@ -109,6 +114,13 @@
         <div class="tabs" id="set-tabs" role="tablist" aria-label="Settings"></div>
       </div></section>
       <section class="set-body"><div class="col" id="set-body"></div></section>
+    </div>
+    <div class="listening" id="listening" hidden>
+      <div class="phone-top">
+        <button type="button" class="icon-btn" id="ls-back" aria-label="Back to papers"></button>
+      </div>
+      <section class="pz ls-head"><div class="col"><h2>Listening</h2></div></section>
+      <section class="ls-body"><div class="col" id="ls-body"></div></section>
     </div>
   </main>
 </div>

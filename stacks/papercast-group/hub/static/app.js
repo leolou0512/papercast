@@ -921,6 +921,7 @@
   function openFromHash(force) {
     const s = /^#settings(?:=([a-z]+))?$/.exec(location.hash);
     if (s) return openSettings(s[1]);
+    if (location.hash === "#listening") return openListening();
     const m = /(?:^|[#&])p=(p_[a-z0-9]{4,32})/.exec(location.hash);
     const id = m ? m[1] : null;
     if (!id) return closeWin();
@@ -932,8 +933,21 @@
     $("nothing").hidden = v !== "list";
     $("paper").hidden = v !== "paper";
     $("settings").hidden = v !== "settings";
+    $("listening").hidden = v !== "listening";
     document.body.classList.toggle("open", v !== "list");
     if (v === "settings") $("set-btn").setAttribute("aria-current", "page"); else $("set-btn").removeAttribute("aria-current");
+    if (v === "listening") $("listen-btn").setAttribute("aria-current", "page"); else $("listen-btn").removeAttribute("aria-current");
+    if (v !== "listening" && S.listening) S.listening.hide();
+  }
+  // Listening (listening.js, hub/listening.py): read from the hub each time it opens.
+  function openListening() {
+    S.open = null;
+    closeExplainer(); closeMenu();
+    showView("listening");
+    document.title = "Listening · Papers";
+    renderList();
+    if (S.listening) S.listening.render($("ls-body"));
+    $("win").scrollTop = 0;
   }
   async function openWin(id) {
     if (S.open !== id) { S.open = id; S.details = false; closeExplainer(); closeMenu(); setPane("tr"); }
@@ -1134,7 +1148,7 @@
       if (then && S.audioReady === eid) then(a); else if (then) S.afterReady = then;
       return true;
     }
-    if (S.audioEp) { savePosition(true); const old = S.audioPaper; a.pause(); S.audioEp = null; S.audioPaper = null; if (old) updateRow(old); }
+    if (S.audioEp) { savePosition(true, false, true); const old = S.audioPaper; a.pause(); S.audioEp = null; S.audioPaper = null; if (old) updateRow(old); }
     S.audioEp = eid; S.audioPaper = pid; S.audioReady = null; S.afterReady = null; S.dirty = false;
     a.src = src;
     a.playbackRate = S.speed;
@@ -1165,7 +1179,7 @@
   }
   function unloadAudio() {
     const a = A();
-    savePosition(true);
+    savePosition(true, false, true);
     a.pause(); a.removeAttribute("src"); a.load();
     const old = S.audioPaper;
     S.audioEp = null; S.audioPaper = null; S.audioReady = null;
@@ -1175,10 +1189,14 @@
   // To the hub while playing every 10 s, and at once on a pause, a seek or the end; a burst of
   // seeks is one request (half a second after the last). Leaving the page, it goes as a
   // keepalive request, so it arrives after the tab has gone.
+  // Each also says what hub/listening.py counts the time heard by: the speed, whether it is
+  // playing as it is taken (not at a pause, the end, leaving, or switching to another), this
+  // page load (a random id: time counts only between two of the same tab's) and the time zone.
   let putWant = null, putTimer = null;
-  function putPosition(eid, s, at, leaving) {
+  const TAB = (() => { try { return Array.from(crypto.getRandomValues(new Uint32Array(2)), (x) => x.toString(36)).join("-"); } catch (e) { return `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`; } })();
+  function putPosition(eid, s, at, leaving, more) {
     if (putWant && putWant.eid !== eid) flushPosition(false);
-    putWant = { eid, s, at };
+    putWant = Object.assign({ eid, s, at }, more || {});
     if (leaving) { flushPosition(true); return; }
     if (!putTimer) putTimer = setTimeout(() => flushPosition(false), 500);
   }
@@ -1186,9 +1204,12 @@
     clearTimeout(putTimer); putTimer = null;
     const w = putWant;
     putWant = null;
-    if (w) api("PUT", `/api/episodes/${w.eid}/position`, { s: w.s, at: w.at }, { keepalive: !!leaving }).catch(() => {});
+    if (w) {
+      api("PUT", `/api/episodes/${w.eid}/position`, { s: w.s, at: w.at, rate: w.rate, playing: !!w.playing, tab: TAB,
+        tz: new Date(w.at).getTimezoneOffset(), d: w.d }, { keepalive: !!leaving }).catch(() => {});
+    }
   }
-  function savePosition(force, leaving) {
+  function savePosition(force, leaving, stopping) {
     const a = A(), eid = S.audioEp;
     // Saved only once it was played or moved here: opening a paper must not change its place.
     if (!eid || !S.dirty || S.audioReady !== eid || !a.getAttribute("src") || !isFinite(a.currentTime) || a.readyState < 1) {
@@ -1202,7 +1223,8 @@
     if (e) { e.position_s = s; e.position_at = now; }
     if (force || now - lastSaved > 10000) {
       lastSaved = now;
-      putPosition(eid, s, now, leaving);
+      putPosition(eid, s, now, leaving, { rate: a.playbackRate || 1, playing: !leaving && !stopping && !a.paused && !a.ended,
+        d: isFinite(a.duration) && a.duration > 0 ? a.duration : undefined });
     }
   }
   function withAudio(eid, fn) { loadAudio(eid, fn); }
@@ -1346,7 +1368,8 @@
       const now = Date.now();
       if (now - lastRowTick > 5000 && S.audioPaper) { lastRowTick = now; updateRow(S.audioPaper); }
     });
-    a.addEventListener("playing", () => { if (S.audioReady === S.audioEp) S.dirty = true; });
+    // Saved as it starts playing too: the time heard counts from there (hub/listening.py).
+    a.addEventListener("playing", () => { if (S.audioReady === S.audioEp) { S.dirty = true; savePosition(true); } });
     // A reload waiting for the pause goes 1.5 s after it: the position is saved, and a quick
     // pause and play again is not cut off.
     a.addEventListener("pause", () => { savePosition(true); if (S.reloadFor) setTimeout(maybeReload, 1500); });
@@ -2056,8 +2079,27 @@
       ...groups,
       el("div", { class: "pref" }, el("p", { class: "pref-h", text: "Note" }), note, count),
       sumLine,
-      el("div", { class: "save-row" }, save, msg));
+      el("div", { class: "save-row" }, save, msg),
+      ...(passwordMode() ? [] : listeningSwitch()));        // with passwords it is in Account
     slackPref(body);
+  }
+
+  // Whether the group sees your listening (hub/listening.py): on by default, saved at once.
+  function listeningSwitch() {
+    const sw = el("button", { type: "button", class: "sw-row", id: "ls-shown", role: "switch", "aria-checked": "true", disabled: true },
+      el("span", { class: "sw", "aria-hidden": "true" }), el("span", { text: "Show mine to the group" }));
+    const msg = el("span", { class: "ok", id: "ls-shown-msg", role: "status" });
+    let on = true;
+    const draw = () => sw.setAttribute("aria-checked", String(on));
+    api("GET", `/api/listening/me?tz=${new Date().getTimezoneOffset()}`).then((j) => { on = j.shown !== false; draw(); sw.disabled = false; }, (e) => { msg.className = "err"; msg.textContent = e.message; });
+    sw.addEventListener("click", async () => {
+      const want = !on;
+      on = want; draw(); sw.disabled = true; msg.className = "ok"; msg.textContent = "";
+      try { on = (await api("PUT", "/api/me/listening-visibility", { shown: want })).shown; draw(); msg.textContent = "Saved"; }
+      catch (e) { on = !want; draw(); msg.className = "err"; msg.textContent = e.message; }
+      sw.disabled = false;
+    });
+    return [el("p", { class: "pref-h sec", text: "Listening" }), el("div", { class: "save-row sw-line" }, sw, msg)];
   }
 
   // papercast add's Slack question (hub/slack.py): this person's answer on Enter, saved at once.
@@ -2261,6 +2303,7 @@
       ...pictureSection(),
       el("p", { class: "pref-h sec", text: "Appearance" }), look,
       el("p", { class: "pref-h sec", text: "Size" }), sizeSeg,
+      ...listeningSwitch(),
       el("p", { class: "pref-h sec", text: "Change password" }), form,
       el("p", { class: "pref-h sec", text: "Sign out" }),
       el("div", { class: "save-row" }, out, all));
@@ -2899,7 +2942,7 @@
 
   // ------------------------------------------------------------------ start
   async function start() {
-    $("back").innerHTML = I.back; $("set-back").innerHTML = I.back;
+    $("back").innerHTML = I.back; $("set-back").innerHTML = I.back; $("ls-back").innerHTML = I.back;
     $("w-more").innerHTML = I.more; $("w-more-phone").innerHTML = I.more;
     $("x-close").innerHTML = I.close;
     $("sort-btn").innerHTML = I.sort;
@@ -2908,6 +2951,7 @@
     if (window.PcgAvatar) window.PcgAvatar.seed(S.cfg.avatars);       // everyone's profile picture
     S.build = S.cfg.build || "";        // the build this page's code came with
     S.social = window.PaperSocial ? window.PaperSocial.mount(socialCtx()) : null;     // comments and the board
+    S.listening = window.PaperListening ? window.PaperListening.mount({ api, avatar: avatarNode }) : null;
     wireList();
     S.q = tab.get("pcg.q") || "";
     S.f = readFilters();
@@ -2925,6 +2969,8 @@
     $("pt-tr").addEventListener("click", () => setPane("tr"));
     $("pt-c").addEventListener("click", () => setPane("c"));
     $("set-back").addEventListener("click", goList);
+    $("ls-back").addEventListener("click", goList);
+    $("listen-btn").addEventListener("click", () => { if (S.view === "listening") goList(); else location.hash = "listening"; });
     $("set-btn").addEventListener("click", () => { if (S.view === "settings") goList(); else location.hash = "settings"; });
     $("w-more").addEventListener("click", (e) => { e.stopPropagation(); openMenu(e.currentTarget, "win", winMenu()); });
     $("w-more-phone").addEventListener("click", (e) => { e.stopPropagation(); openMenu(e.currentTarget, "win", winMenu()); });

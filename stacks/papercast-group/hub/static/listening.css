@@ -1,0 +1,79 @@
+/* papercast-group: the Listening page (listening.js). The heatmap's five shades are the theme's
+   own: none is the text colour faintly over the page, the four others the accent over the page
+   at 35, 60 and 82 per cent and in full, so every theme (dark ones too) has its ramp. */
+.listening { display: flex; flex-direction: column; min-height: 100%; flex: none;
+  --hm0: color-mix(in srgb, var(--text) 9%, var(--bg));
+  --hm1: color-mix(in srgb, var(--accent) 35%, var(--bg));
+  --hm2: color-mix(in srgb, var(--accent) 60%, var(--bg));
+  --hm3: color-mix(in srgb, var(--accent) 82%, var(--bg));
+  --hm4: var(--accent);
+}
+.ls-head { padding-bottom: 24px; }
+.ls-body { padding: 16px 32px 48px; flex: 1; }
+.ls-body .muted { color: var(--text-2); font-size: 14px; line-height: 20px; }
+.ls-body .err { color: var(--danger); font-size: 14px; line-height: 20px; overflow-wrap: anywhere; }
+.ls-body .sec-h { margin: 24px 0 8px; }
+
+.ls-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 8px; }
+.ls-stat { background: var(--surface); border-radius: 10px; padding: 10px 14px 12px; display: flex; flex-direction: column; min-width: 0; }
+.ls-l { font-size: 13px; line-height: 18px; color: var(--text-2); }
+.ls-v { font-size: 22px; line-height: 28px; font-weight: 700; letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ls-s { font-size: 13px; line-height: 18px; color: var(--text-2); }
+.ls-s:empty { display: none; }
+
+/* the year: scaled to the column; below 620 px (a phone) it keeps that width and its box scrolls */
+.hm-box { padding-bottom: 8px; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scrollbar-width: thin; }
+.hm { display: block; width: 100%; height: auto; min-width: 620px; }
+.hm.small { min-width: 0; }
+.hm .lv0, .hm-key.lv0 { fill: var(--hm0); background: var(--hm0); }
+.hm .lv1, .hm-key.lv1 { fill: var(--hm1); background: var(--hm1); }
+.hm .lv2, .hm-key.lv2 { fill: var(--hm2); background: var(--hm2); }
+.hm .lv3, .hm-key.lv3 { fill: var(--hm3); background: var(--hm3); }
+.hm .lv4, .hm-key.lv4 { fill: var(--hm4); background: var(--hm4); }
+.hm rect:hover { stroke: var(--text); stroke-width: 1; }
+.hm-t { font: 10px var(--sans); fill: var(--text-2); }
+.hm-legend { display: flex; align-items: center; justify-content: flex-end; gap: 3px; margin-top: 6px; font-size: 12px; line-height: 16px; color: var(--text-2); }
+.hm-legend span:first-child { margin-right: 3px; }
+.hm-legend span:last-child { margin-left: 3px; }
+.hm-key { width: 10px; height: 10px; border-radius: 2px; }
+.hm-tip {
+  position: fixed; z-index: 40; pointer-events: none; display: flex; flex-direction: column; white-space: nowrap;
+  padding: 6px 10px; border-radius: 6px; background: var(--toast-bg); color: var(--toast-fg);
+  font-size: 13px; line-height: 18px; box-shadow: 0 4px 16px rgba(0, 0, 0, .18);
+}
+.hm-tip b { font-weight: 600; }
+
+.wk-box { max-width: 460px; }
+.wk { display: block; width: 100%; height: auto; }
+.wk-bar { fill: var(--accent); }
+.wk-bar:hover { fill: var(--hm3); }
+.wk-base { fill: var(--hairline); }
+.wk-n, .wk-t { font: 10px var(--sans); fill: var(--text-2); }
+.wk-n { text-anchor: middle; }
+.wk-n { fill: var(--text); }
+
+.gp-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.gp-cap { font-size: 13px; line-height: 16px; color: var(--text-2); }
+.gp { list-style: none; margin: 0; padding: 0; }
+.gp-row { display: grid; grid-template-columns: 250px minmax(0, 1fr); align-items: center; column-gap: 16px; row-gap: 8px;
+  padding: 12px 0; border-bottom: 1px solid var(--hairline); }
+.gp-who { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.gp-name { flex: 1; min-width: 0; font-size: 15px; line-height: 20px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gp-n { font-size: 13px; line-height: 18px; color: var(--text-2); white-space: nowrap; }
+.gp-hm { min-width: 0; }
+
+/* Settings: whether the group sees yours */
+.sw-row { display: flex; align-items: center; gap: 12px; min-height: 44px; font-size: 14px; line-height: 20px; color: var(--text); text-align: left; }
+.sw-row .sw { width: 36px; height: 22px; border-radius: 11px; background: var(--track); position: relative; flex: none; transition: background .15s; }
+.sw-row .sw::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: var(--bg); transition: transform .15s; }
+.sw-row[aria-checked="true"] .sw { background: var(--accent); }
+.sw-row[aria-checked="true"] .sw::after { transform: translateX(14px); background: var(--on-accent); }
+
+@media (max-width: 720px) {
+  .ls-head { padding-bottom: 16px; }
+  .ls-body { padding: 8px 16px 48px; }
+  .ls-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .ls-v { font-size: 20px; line-height: 26px; }
+  .gp-row { grid-template-columns: minmax(0, 1fr); }
+}
+.save-row.sw-line { margin-top: 0; }

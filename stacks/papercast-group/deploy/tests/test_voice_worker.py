@@ -301,6 +301,21 @@ class TestWorker(WorkerCase):
         self.assertEqual(len(self.hub.uploads), 3)
         self.assertIn("voiced again; its job directory starts afresh", self.log())
 
+    def test_a_replaced_script_is_fetched_again_never_the_old_copy(self):
+        """hub/scriptswap.py: the same voice, a new script. The hub not answering for the script
+        right after the claim must not make the worker voice the copy of the old one it has."""
+        self.hub.add("e_aaaaaaaaaaaa", "Twice", SCRIPT)
+        env = self.env(self.voice())
+        self.assertEqual(self.worker(env, "--exit-when-idle").wait(timeout=60), 0, self.log())
+        new = SCRIPT.replace("# ", "# Rewritten: ", 1) + "\nA paragraph the rewrite added.\n"
+        self.hub.add("e_aaaaaaaaaaaa", "Twice", new)
+        self.hub.fail_next("GET", "script", 503, 503)
+        self.assertEqual(self.worker(env, "--exit-when-idle").wait(timeout=60), 0, self.log())
+        self.assertEqual(len(self.hub.uploads), 2)
+        self.assertEqual((self.jobs / "e_aaaaaaaaaaaa" / "voice" / "script.md").read_text(), new)
+        self.assertNotIn("voicing the script already here", self.log())
+        self.assertIn("voiced again; its job directory starts afresh", self.log())
+
     # ---- a custom voice's preview (hub/customvoice.py): an episode-shaped job, vp-<user id>
 
     def custom(self, uid: int, description: str, seed: int) -> dict:

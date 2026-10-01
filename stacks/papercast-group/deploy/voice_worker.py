@@ -448,7 +448,8 @@ class Worker:
         """A claim for an episode whose job directory holds another voicing: another voice (job.json
         says), or the same one already delivered to the hub (a voice change back, a redo). Its
         status says done and its chunks are the old voice's, so the directory starts over
-        (voice.log is kept)."""
+        (voice.log is kept). Its script.md goes too: the claim's script is fetched again, never
+        the old copy voiced while the hub cannot be reached (a replaced script, scriptswap.py)."""
         jj = read_json(vdir / "job.json")
         if jj is None:
             return
@@ -467,7 +468,7 @@ class Worker:
             if self.adoptable(vdir):
                 raise Failed("voice_busy", f"a voice process (pid {pid}) still works in {vdir}")
         log(f"{eid}: {'another voice' if other else 'voiced again'}; its job directory starts afresh")
-        for name in ("job.json", "status.json", "uploaded.json", "metrics.json", "cancel", "use-cpu"):
+        for name in ("job.json", "status.json", "uploaded.json", "metrics.json", "cancel", "use-cpu", "script.md"):
             try:
                 os.unlink(vdir / name)
             except FileNotFoundError:

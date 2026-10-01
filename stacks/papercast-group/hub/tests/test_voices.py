@@ -842,5 +842,328 @@ class PreviewThroughTheWorker(CustomVoices):
         self.assertEqual(self.claim_nothing(), 204, "not tried again")
 
 
+# ---------------------------------------------------------------- a replaced script (scriptswap.py)
+
+NEW_EXTRA = "The rewritten version says the zyxquorum schedule matters most."
+
+
+class ScriptSwap(VoicesBase):
+    """PUT /api/cli/episodes/<id>/script: its maker or an admin only; the upload's checks; a
+    version not voiced yet takes the new script at once, in its place in the queue; a voiced
+    one is voiced again in its voice through the queue while its old audio, timings, script and
+    explainer play on, and they all swap when the new MP3 lands; positions kept and clamped;
+    comments, Listened and links kept; the history; the search."""
+
+    def replace(self, eid, who, text, want=200, **extra):
+        code, out = self.h.request("PUT", f"/api/cli/episodes/{eid}/script", {"script": text, **extra}, user=who)
+        self.assertEqual(code, want, out)
+        return out
+
+    def ep(self, eid):
+        return db.conn().execute("SELECT * FROM episodes WHERE id = ?", (eid,)).fetchone()
+
+    def job(self, eid):
+        return db.conn().execute("SELECT * FROM voice_jobs WHERE episode_id = ?", (eid,)).fetchone()
+
+    def changes(self, eid):
+        return db.conn().execute("SELECT * FROM script_changes WHERE episode_id = ? ORDER BY id", (eid,)).fetchall()
+
+    def read(self, eid, name):
+        return (self.h.cfg.episodes / eid / name).read_text(encoding="utf-8")
+
+    def test_only_its_maker_or_an_admin(self):
+        maker, other = self.h.user("Mia"), self.h.user("Oli")
+        viewer, admin = self.h.user("Vic", "viewer"), self.h.user("Ari", "admin")
+        eid = self.episode(maker)
+        new = H.script(2600, extra=NEW_EXTRA)
+        self.assertEqual(self.replace(eid, other, new, want=403)["error"], "not_yours")
+        self.assertEqual(self.replace(eid, viewer, new, want=403)["error"], "forbidden")
+        self.assertEqual(self.h.request("PUT", f"/api/cli/episodes/{eid}/script", {"script": new})[0], 401)
+        self.assertEqual(self.replace("e_nosuchepisode", admin, new, want=404)["error"], "no_such_episode")
+        self.assertEqual(self.changes(eid), [])
+        self.assertTrue(self.replace(eid, admin, new)["changed"])
+        self.assertEqual(self.read(eid, "script.md"), new)
+        self.assertEqual(self.changes(eid)[0]["by_user"], admin["id"])
+        out = self.replace(eid, maker, H.script(2700, extra=NEW_EXTRA))
+        self.assertEqual((out["changed"], out["how"]), (True, "queue"))
+
+    def test_the_checks_refuse_a_bad_script_and_a_dry_run_changes_nothing(self):
+        maker = self.h.user("Kit")
+        eid = self.episode(maker)
+        old = self.read(eid, "script.md")
+        short = H.script(300)
+        out = self.replace(eid, maker, short, want=422)
+        self.assertEqual(out["error"], "checks_failed")
+        self.assertTrue(out["problems"] and any("minute" in p for p in out["problems"]), out["problems"])
+        self.assertEqual(self.replace(eid, maker, "x", want=422, explainer_html="<p>no doctype</p>")["error"], "checks_failed")
+        self.assertIn("explainer.html must start with <!doctype html>",
+                      self.replace(eid, maker, H.script(2600), want=422, explainer_html="<p>nope</p>")["problems"])
+        self.assertEqual(self.replace(eid, maker, "  ", want=400)["error"], "no_script")
+        # a dry run: what the checks say, nothing changed
+        out = self.replace(eid, maker, short, dry_run=True)
+        self.assertEqual((out["dry_run"], out["ok"], out["changed"]), (True, False, False))
+        self.assertIn("would be refused", out["message"])
+        good = H.script(2600, extra=NEW_EXTRA)
+        before_job = dict(self.job(eid))
+        out = self.replace(eid, maker, good, dry_run=True)
+        self.assertEqual((out["ok"], out["changed"], out["how"], out["problems"]), (True, False, "queue", []))
+        self.assertGreater(out["words"], 2600)
+        self.assertIn("would take the old one's place", out["message"])
+        self.assertEqual(self.read(eid, "script.md"), old)
+        self.assertEqual(self.changes(eid), [])
+        self.assertEqual(dict(self.job(eid)), before_job)
+        self.assertEqual(self.ep(eid)["script_rev"], 1)
+        # the same script it has: no change
+        out = self.replace(eid, maker, old)
+        self.assertEqual((out["changed"], out["how"]), (False, "unchanged"))
+        self.assertEqual(self.changes(eid), [])
+
+    def test_a_version_waiting_for_its_first_voice_takes_it_in_the_queue(self):
+        a, b = self.h.user("Ada"), self.h.user("Bob")
+        ea, eb = self.episode(a), self.episode(b)
+        before = dict(self.job(ea))
+        old = self.read(ea, "script.md")
+        new = H.script(2800, extra=NEW_EXTRA)
+        out = self.replace(ea, a, new)
+        self.assertEqual((out["changed"], out["how"], out["queue_position"], out["state"]), (True, "queue", 1, "waiting-for-gpu"))
+        self.assertEqual(self.read(ea, "script.md"), new)
+        (ch,) = self.changes(ea)
+        self.assertEqual((ch["state"], ch["how"], ch["script_rev"], ch["words"]), ("done", "queue", 2, out["words"]))
+        self.assertEqual((self.h.cfg.episodes / ea / "history" / str(ch["id"]) / "script.md").read_text(), old)
+        job = self.job(ea)
+        self.assertEqual((job["state"], job["queued_at"], job["user_id"]), ("queued", before["queued_at"], a["id"]))
+        e = self.ep(ea)
+        self.assertEqual((e["script_rev"], e["words"], e["state"]), (2, out["words"], "waiting-for-gpu"))
+        # the worker gets the new one, in the place the old one had
+        job = self.claim(ea)
+        code, body = self.worker("GET", job["script_url"])
+        self.assertEqual((code, body.decode()), (200, new))
+        # being voiced: refused until it is done
+        out = self.replace(ea, a, H.script(2700), want=409)
+        self.assertEqual((out["error"], out["retry"]), ("busy", True))
+        self.assertEqual(self.upload(ea)[0], 200)
+        # a failed first voicing starts afresh with the new script
+        job = self.claim(eb)
+        self.assertEqual(self.worker("POST", f"/api/voice/{eb}/failed", {"error": "gpu_oom"})[0], 200)
+        self.assertEqual(self.ep(eb)["state"], "failed")
+        out = self.replace(eb, b, H.script(2700, extra=NEW_EXTRA))
+        self.assertEqual((out["how"], out["state"]), ("queue", "waiting-for-gpu"))
+        job = self.job(eb)
+        self.assertEqual((job["state"], job["attempts"], job["error"]), ("queued", 0, None))
+        # the history, and the script it replaced for an undo
+        code, h = self.h.request("GET", f"/api/cli/episodes/{ea}/script", user=a)
+        self.assertEqual((code, h["script"], h["script_rev"], h["waiting"]), (200, new, 2, None))
+        self.assertEqual([(c["id"], c["state"], c["by_name"]) for c in h["changes"]], [(ch["id"], "done", "Ada")])
+        code, prev = self.h.request("GET", f"/api/cli/episodes/{ea}/script?before={ch['id']}", user=a)
+        self.assertEqual((code, prev["script"]), (200, old))
+        self.assertNotIn("explainer_html", prev)
+
+    def test_a_voiced_version_plays_on_until_its_new_audio_lands(self):
+        maker, listener, late = self.h.user("Max"), self.h.user("Lou", "viewer"), self.h.user("Liz", "viewer")
+        old_t = timings(5, per=19.0)
+        eid = self.voiced(maker, old_t)                     # 100 s of audio
+        pid = self.ep(eid)["paper_id"]
+        d = self.h.cfg.episodes / eid
+        old_script, old_html = self.read(eid, "script.md"), self.read(eid, "explainer.html")
+        _c, tr_before = self.web("GET", f"/api/episodes/{eid}/transcript", listener)
+        self.assertEqual(self.web("PUT", f"/api/episodes/{eid}/position", listener, {"s": 50.0, "at": 1_700_000_000_000})[0], 200)
+        self.assertEqual(self.web("PUT", f"/api/episodes/{eid}/position", late, {"s": 80.0, "at": 1_700_000_000_000})[0], 200)
+        self.assertEqual(self.web("PUT", f"/api/papers/{pid}/listened", listener, {"listened": True})[0], 200)
+        code, cm = self.web("POST", f"/api/papers/{pid}/comments", listener, {"body": "Nice one", "episode_id": eid})
+        self.assertIn(code, (200, 201), cm)
+        new = H.script(2600, extra=NEW_EXTRA)
+        new_html = H.EXPLAINER_HTML.replace("ok", "the new explainer")
+        self.assertEqual(self.web("GET", "/api/library?q=zyxquorum", maker)[1]["papers"], [])
+        out = self.replace(eid, maker, new, explainer_html=new_html)
+        self.assertEqual((out["changed"], out["how"], out["voice"], out["queue_position"], out["state"]),
+                         (True, "revoice", {"id": "clear-female", "name": "Clear female, measured"}, 1, "ready"))
+        self.assertIn("voiced again in Clear female", out["message"])
+        # the same again: no change; nothing else moves while it waits
+        self.assertEqual(self.replace(eid, maker, new, explainer_html=new_html)["how"], "unchanged")
+        self.assertEqual((self.read(eid, "script.md"), self.read(eid, "explainer.html")), (old_script, old_html))
+        self.assertEqual((self.read(eid, "script.next.md"), self.read(eid, "explainer.next.html")), (new, new_html))
+        self.assertEqual(self.web("GET", f"/api/episodes/{eid}/transcript", listener)[1], tr_before)
+        self.assertEqual(self.web("GET", f"/x/{eid}/explainer.html", listener)[1].decode(), old_html)
+        self.assertEqual(self.web("GET", "/api/library?q=zyxquorum", maker)[1]["papers"], [], "searched once in place")
+        v = self.lib_voice(eid, maker)
+        self.assertTrue(v["has_audio"])
+        self.assertEqual((v["voice"]["pending"]["id"], v["voice"]["pending"]["script"], v["voice"]["pending"]["cancel"]),
+                         ("clear-female", True, False))
+        code, err = self.web("DELETE", f"/api/episodes/{eid}/voice", maker)
+        self.assertEqual((code, err["error"]), (409, "script_waiting"))
+        # choosing another voice meanwhile: recorded in it, the new script still with it; back again
+        self.assertEqual(self.web("PUT", f"/api/episodes/{eid}/voice", maker, {"voice": "warm-male"})[1]["pending"]["cancel"], True)
+        self.assertEqual(self.web("DELETE", f"/api/episodes/{eid}/voice", maker)[1]["pending"]["id"], "clear-female")
+        self.assertEqual(self.web("PUT", f"/api/episodes/{eid}/voice", maker, {"voice": "clear-female"})[1]["pending"]["id"],
+                         "clear-female", "the voice it has: the new script stays in line")
+        # the worker: the same voice, the new script; the old audio plays meanwhile
+        job = self.claim(eid)
+        self.assertIsNone(job["voice"])
+        code, body = self.worker("GET", job["script_url"])
+        self.assertEqual(body.decode(), new)
+        self.assertEqual(self.worker("PUT", f"/api/voice/{eid}/status", {"phase": "speaking", "progress": 0.4})[1]["state"], "ready")
+        self.assertEqual(self.web("GET", f"/audio/{eid}.mp3", listener)[1], MP3)
+        self.assertEqual(self.replace(eid, maker, H.script(2700), want=409)["error"], "busy")
+        new_t = timings(4, per=14.0)                        # the new audio is 60 s
+        self.assertEqual(self.worker("PUT", f"/api/voice/{eid}/timings", new_t)[1]["stored"], "next")
+        self.assertEqual(self.files(eid)["timings.json"]["segments"], old_t["segments"])
+        sub = events.subscribe(listener["id"])
+        try:
+            self.assertEqual(self.upload(eid, data=MP3_2, dur="60.0")[0], 200)
+            got = []
+            while not sub.q.empty():
+                got.append(sub.q.get_nowait())
+        finally:
+            events.unsubscribe(sub)
+        (swap,) = [x["voice_swap"] for _i, kind, x in got if kind == "episode" and x.get("voice_swap")]
+        self.assertEqual((swap["rev"], swap["from_rev"], swap["script"], swap["voice"]), (2, 1, True, "clear-female"))
+        # everything moved at once
+        self.assertEqual(self.web("GET", f"/audio/{eid}.mp3?v=2", listener)[1], MP3_2)
+        self.assertEqual((self.read(eid, "script.md"), self.read(eid, "explainer.html")), (new, new_html))
+        self.assertFalse((d / "script.next.md").exists() or (d / "explainer.next.html").exists())
+        self.assertEqual(self.files(eid)["timings.json"]["segments"], new_t["segments"])
+        (ch,) = self.changes(eid)
+        self.assertEqual((ch["state"], ch["how"], ch["voice"], ch["explainer"], ch["script_rev"], ch["audio_rev"]),
+                         ("done", "revoice", "clear-female", "html", 2, 2))
+        hist = d / "history" / str(ch["id"])
+        self.assertEqual(((hist / "script.md").read_text(), (hist / "explainer.html").read_text()), (old_script, old_html))
+        self.assertFalse((hist / "explainer.json").exists(), "only what it replaced")
+        tr = self.web("GET", f"/api/episodes/{eid}/transcript", listener)[1]
+        self.assertIn("zyxquorum", json.dumps(tr))
+        self.assertEqual(self.web("GET", f"/x/{eid}/explainer.html", listener)[1].decode(), new_html)
+        e = self.ep(eid)
+        self.assertEqual((e["script_rev"], e["words"], e["duration_s"], e["state"]), (2, ch["words"], 60.0, "ready"))
+        # positions kept, the one past the new end at the end; Listened and the comment kept
+        pos = dict(db.conn().execute("SELECT user_id, seconds FROM positions WHERE episode_id = ?", (eid,)).fetchall())
+        self.assertEqual(pos, {listener["id"]: 50.0, late["id"]: 60.0})
+        code, v = self.web("GET", f"/api/episodes/{eid}/voice?at=50&rev=1", listener)
+        self.assertEqual(v["at"], 50.0)
+        self.assertEqual(self.web("GET", f"/api/episodes/{eid}/voice?at=99&rev=1", listener)[1]["at"], 60.0)
+        lib = self.web("GET", "/api/library?q=", listener)[1]
+        (paper,) = [p for p in lib["papers"] if p["id"] == pid]
+        self.assertTrue(paper["listened"])
+        code, cms = self.web("GET", f"/api/papers/{pid}/comments", listener)
+        self.assertIn("Nice one", json.dumps(cms))
+        # the search finds the new words now
+        self.assertEqual([p["id"] for p in self.web("GET", "/api/library?q=zyxquorum", maker)[1]["papers"]], [pid])
+        # and the undo has what it needs
+        code, prev = self.h.request("GET", f"/api/cli/episodes/{eid}/script?before={ch['id']}", user=maker)
+        self.assertEqual((prev["script"], prev["explainer_html"]), (old_script, old_html))
+        self.assertEqual(self.claim_nothing(), 204)
+
+    def claim_nothing(self):
+        return self.worker("POST", "/api/voice/claim", {"worker": "w1"})[0]
+
+    def test_a_second_script_takes_the_first_ones_place_and_a_failed_voice_drops_it(self):
+        maker, admin = self.h.user("Ray"), self.h.user("Ari", "admin")
+        eid = self.voiced(maker, timings(3))
+        e2, e3 = self.voiced(maker), self.voiced(maker)
+        d = self.h.cfg.episodes / eid
+        old = self.read(eid, "script.md")
+        first, second = H.script(2600, extra=NEW_EXTRA), H.script(2900, extra=NEW_EXTRA)
+        self.replace(eid, admin, first, explainer_json=json.dumps({"points": ["A new point."]}))
+        q1 = self.job(eid)["queued_at"]
+        out = self.replace(eid, admin, second)
+        self.assertEqual(out["how"], "revoice")
+        self.assertEqual(self.job(eid)["queued_at"], q1, "its place in line")
+        self.assertEqual([c["state"] for c in self.changes(eid)], ["superseded", "waiting"])
+        self.assertEqual(self.changes(eid)[1]["explainer"], "json", "the first one's explainer rides on")
+        self.assertEqual(self.read(eid, "script.next.md"), second)
+        # an admin's script changes are not their voice changes (at most two of those)
+        for x in (e2, e3):
+            self.assertEqual(self.web("PUT", f"/api/episodes/{x}/voice", admin, {"voice": "warm-male"})[0], 200)
+        for x in (e2, e3):                              # out of the way: the fair order would hand them out first
+            self.assertEqual(self.web("DELETE", f"/api/episodes/{x}/voice", admin)[0], 200)
+        for attempt in (1, 2, 3):
+            job = self.claim(eid)
+            self.assertEqual(self.worker("GET", job["script_url"])[1].decode(), second)
+            self.assertEqual(self.worker("POST", f"/api/voice/{eid}/failed", {"error": "gpu_oom"})[1]["retry"], attempt < 3)
+        self.assertEqual([c["state"] for c in self.changes(eid)], ["superseded", "failed"])
+        self.assertIn("gpu_oom", self.changes(eid)[1]["error"])
+        self.assertFalse(any((d / n).exists() for n in ("script.next.md", "explainer.next.json")))
+        self.assertEqual(self.read(eid, "script.md"), old)
+        e = self.ep(eid)
+        self.assertEqual((e["state"], e["script_rev"]), ("ready", 1))
+        self.assertEqual(self.web("GET", f"/audio/{eid}.mp3", maker)[1], MP3)
+        self.assertIsNone(self.ep_view(eid, maker)["pending"])
+
+    def test_a_custom_voice_is_voiced_again_in_the_spec_it_has(self):
+        maker = self.h.user("Uma")
+        eid = self.voiced(maker)
+        spec = voices.custom_spec(maker["id"], "Adult male, 40s, soft Scottish accent. Deep, calm voice.", 7)
+        with db.transaction() as c:                       # its audio is in a custom voice its maker has since changed
+            c.execute("UPDATE episode_voice SET voice = 'custom', spec = ? WHERE episode_id = ?", (db.dumps(spec), eid))
+            c.execute("INSERT INTO user_custom_voice (user_id, description, seed, updated_at) VALUES (?, ?, ?, ?)",
+                      (maker["id"], "Young adult female, Irish accent. Warm, clear voice.", 42, db.now()))
+        out = self.replace(eid, maker, H.script(2600, extra=NEW_EXTRA))
+        self.assertEqual((out["how"], out["voice"]["id"], out["voice"]["name"]), ("revoice", "custom", "Uma’s custom voice"))
+        job = self.claim(eid)
+        self.assertEqual((job["voice"]["id"], job["voice"]["spec"]["voice"], job["voice"]["spec"]["seed"]),
+                         ("custom", spec["key"], 7))
+        self.assertEqual(self.upload(eid, data=MP3_2, dur="90", key=spec["key"])[0], 200)
+        row = voices._row(db.conn(), eid)
+        self.assertEqual((row["voice"], json.loads(row["spec"])["key"], row["want_spec"]), ("custom", spec["key"], None))
+
+    def test_the_command_line_batch_against_this_hub(self):
+        """papercast replace-script --batch (packages/papercast-cli) speaks this hub's API."""
+        import io
+        from papercast_cli import replace_script as R
+        from papercast_cli.api import Api
+        maker = self.h.user("Cal")
+        voiced = self.voiced(maker)
+        waiting, bad = self.episode(maker), self.episode(maker)
+        t = self.h.tmp
+        a, b = H.script(2600, extra=NEW_EXTRA), H.script(2700, extra=NEW_EXTRA)
+        (t / "a.md").write_text(a)
+        (t / "b.md").write_text(b)
+        (t / "c.md").write_text(H.script(300))
+        tsv = t / "batch.tsv"
+        tsv.write_text(f"{waiting}\ta.md\n{voiced}\tb.md\n{bad}\tc.md\n")
+        api = Api(f"http://127.0.0.1:{self.h.port}", maker["token"], retries=0)
+        out = io.StringIO()
+        counts = R.run_batch(api, tsv, dry_run=True, out=out)
+        self.assertEqual((counts["would"], counts["refused"]), (2, 1), out.getvalue())
+        self.assertEqual(self.changes(waiting) + self.changes(voiced), [])
+        counts = R.run_batch(api, tsv, out=out)
+        self.assertEqual((counts["replaced"], counts["refused"]), (2, 1), out.getvalue())
+        self.assertIn(f"{bad}  REFUSED: the hub's checks found", out.getvalue())
+        self.assertEqual((self.read(waiting, "script.md"), self.read(voiced, "script.next.md")), (a, b))
+        out = io.StringIO()
+        counts = R.run_batch(api, tsv, out=out)
+        self.assertEqual((counts["skipped"], counts["refused"]), (2, 1), out.getvalue())
+        it, ch = R.undo_item(api, waiting)
+        self.assertEqual(it["body"]["script"], H.script())
+
+
+class ScriptSwapThroughTheWorker(ScriptSwap):
+    """A replaced script voiced again by the real voice worker (deploy/voice_worker.py) with the
+    fake papercast-voice: the same voice, its job directory started afresh, the new script spoken."""
+
+    test_only_its_maker_or_an_admin = test_the_checks_refuse_a_bad_script_and_a_dry_run_changes_nothing = None
+    test_a_version_waiting_for_its_first_voice_takes_it_in_the_queue = None
+    test_a_voiced_version_plays_on_until_its_new_audio_lands = None
+    test_a_second_script_takes_the_first_ones_place_and_a_failed_voice_drops_it = None
+    test_a_custom_voice_is_voiced_again_in_the_spec_it_has = test_the_command_line_batch_against_this_hub = None
+    run_worker = PreviewThroughTheWorker.run_worker
+
+    def test_through_the_real_worker(self):
+        maker = self.h.user("Wes")
+        eid = self.episode(maker)
+        self.run_worker()
+        self.assertEqual(self.ep(eid)["state"], "ready")
+        vdir = self.h.cfg.episodes / eid / "voice"
+        old = self.read(eid, "script.md")
+        self.assertEqual((vdir / "script.md").read_text(), old)
+        new = H.script(2600, extra=NEW_EXTRA)
+        self.assertEqual(self.replace(eid, maker, new)["how"], "revoice")
+        log = self.run_worker()
+        self.assertIn("voiced again; its job directory starts afresh", log)
+        self.assertEqual((vdir / "script.md").read_text(), new)
+        self.assertEqual(self.read(eid, "script.md"), new)
+        self.assertEqual(self.changes(eid)[0]["state"], "done")
+        self.assertEqual(voices._row(db.conn(), eid)["rev"], 2)
+        self.assertIn("zyxquorum", json.dumps(self.web("GET", f"/api/episodes/{eid}/transcript", maker)[1]))
+
+
 if __name__ == "__main__":
     unittest.main()

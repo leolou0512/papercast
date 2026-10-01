@@ -463,6 +463,18 @@ def _apply_links(cfg, ep, links) -> None:
                     "links": links}, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+def check_episode_files(c, ep, epdir: Path) -> tuple:
+    """check_files on `epdir` as episode `ep` is judged: the length and never-wanted wording of
+    the base prompt it was made with, its maker's name in the listener-name class. The upload's
+    checks, and a replaced script's (scriptswap.py)."""
+    maker = c.execute("SELECT name FROM users WHERE id = ?", (ep["made_by"],)).fetchone()
+    base = _base_for(c, ep["base_version"])
+    lo, hi = minutes_range(base)
+    wdata = db.loads(base["wording"], None) if base is not None else None
+    return check_files(epdir, lo, hi, maker["name"] if maker else "",
+                       wdata if isinstance(wdata, dict) and wdata.get("classes") else None)
+
+
 def run_checks(cfg, eid: str) -> None:
     c = db.conn()
     ep = c.execute("SELECT * FROM episodes WHERE id = ?", (eid,)).fetchone()
@@ -470,12 +482,7 @@ def run_checks(cfg, eid: str) -> None:
         return
     epdir = cfg.episodes / eid
     manifest = json.loads((epdir / "bundle-manifest.json").read_text(encoding="utf-8"))
-    maker = c.execute("SELECT name FROM users WHERE id = ?", (ep["made_by"],)).fetchone()
-    base = _base_for(c, ep["base_version"])
-    lo, hi = minutes_range(base)
-    wdata = db.loads(base["wording"], None) if base is not None else None
-    problems, stats = check_files(epdir, lo, hi, maker["name"] if maker else "",
-                                  wdata if isinstance(wdata, dict) and wdata.get("classes") else None)
+    problems, stats = check_episode_files(c, ep, epdir)
     now = db.now()
     with db.transaction() as t:
         cur = t.execute("SELECT state FROM episodes WHERE id = ?", (eid,)).fetchone()

@@ -1658,7 +1658,7 @@
     follow: true, autoUntil: 0, req: 0, q: "", hits: [], hit: -1, marked: [], findTimer: null };
   function renderTranscript(c) {
     $("tr-body").classList.toggle("live", !!(c && c.has_audio));
-    const key = c ? `${c.id}:${!!c.has_audio}` : null;      // voiced since: its timings may be new
+    const key = c ? `${c.id}:${!!c.has_audio}:${(c.voice && c.voice.rev) || 1}` : null;   // voiced (again) since: new timings, maybe a new script
     if (key === T.key) { trTick(); return; }
     T.key = key; T.eid = c ? c.id : null;
     T.data = null; T.parts = []; T.texts = []; T.bySeg = new Map(); T.rep = []; T.cur = -1; T.follow = true;
@@ -2650,6 +2650,13 @@
     return `${n}${t >= 11 && t <= 13 ? "th" : u === 1 ? "st" : u === 2 ? "nd" : u === 3 ? "rd" : "th"}`;
   }
   function pendingText(pd) {
+    if (pd.script && pd.cancel === false) {      // a replaced script, recorded again in the voice it has
+      if (pd.state === "retrying") return "new script: it failed, trying again";
+      if (pd.state !== "working") return `new script waiting to be recorded${pd.position ? `, ${nth(pd.position)} in line` : ""}`;
+      if (pd.phase === "speaking") return `recording the new script, ${speakPct(pd)}%`;
+      if (pd.phase === "encoding") return "new script: making the MP3";
+      return "new script: waiting for the GPU";
+    }
     const who = pd.name || "the new voice";
     if (pd.state === "retrying") return `${who}: it failed, trying again`;
     if (pd.state !== "working") return `changing to ${who}${pd.position ? `, ${nth(pd.position)} in line` : ""}`;
@@ -2711,7 +2718,7 @@
     const pd = v.pending, kids = [el("span", { text: `Voice: ${v.name || "original"}` })];
     if (pd) {
       kids.push(el("span", { class: "vpend", text: ` · ${pendingText(pd)}` }));
-      if (v.can_change && pd.state !== "working") kids.push(" · ", el("button", { type: "button", class: "text-btn vbtn", id: "voice-cancel", text: "Cancel", onclick: () => undoChange(c.id) }));
+      if (v.can_change && pd.state !== "working" && pd.cancel !== false) kids.push(" · ", el("button", { type: "button", class: "text-btn vbtn", id: "voice-cancel", text: "Cancel", onclick: () => undoChange(c.id) }));
     } else if (v.can_change) {
       kids.push(" · ", el("button", { type: "button", class: "text-btn vbtn", id: "voice-change", text: "Change", "aria-expanded": String(!!S.vpick && S.vpick.eid === c.id),
         onclick: () => { S.vpick = S.vpick && S.vpick.eid === c.id ? null : { eid: c.id, id: v.id }; stopSample(); renderWin(); } }));
@@ -2777,7 +2784,7 @@
     store.set(posKey(eid), JSON.stringify({ s: v.at, at: now }));
     e.position_s = v.at; e.position_at = now;
     loadAudio(eid, was ? (x) => { x.play().catch(() => {}); } : null);
-    toast(`Now in the new voice${v.name ? `: ${v.name}` : ""}.`);
+    toast(d.voice_swap.script ? "Now the new script." : `Now in the new voice${v.name ? `: ${v.name}` : ""}.`);
   }
   window.addEventListener("papercast:event", (ev) => {
     const d = ev.detail || {};

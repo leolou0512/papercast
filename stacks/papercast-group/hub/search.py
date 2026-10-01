@@ -288,7 +288,7 @@ _SIG_SQL = """SELECT
          || ':' || total(length(authors)) || ':' || total(year) || ':' || total(length(arxiv_id)) || ':' || total(length(doi))
          || ':' || total(length(label)) FROM papers),
  (SELECT count(*) || ':' || coalesce(max(rowid), 0) || ':' || count(deleted_at) || ':' || total(state = 'rejected')
-         || ':' || total(made_by) || ':' || total(length(deleted_at)) FROM episodes),
+         || ':' || total(made_by) || ':' || total(length(deleted_at)) || ':' || total(script_rev) FROM episodes),
  (SELECT count(*) || ':' || coalesce(group_concat(id || '=' || name, ','), '') FROM users),
  (SELECT count(*) || ':' || coalesce(group_concat(id || '=' || name || '=' || rule_tags || '=' || coalesce(deleted_at, '')
          || '=' || coalesce(created_by, ''), ','), '') FROM graphs),
@@ -297,11 +297,21 @@ _SIG_SQL = """SELECT
 _cat_cache: dict = {}
 
 
+# Parts a database made before a migration lacks: papers.label (2), episodes.script_rev (6).
+_SIG_OPTIONAL = (" || ':' || total(script_rev)", " || ':' || total(length(label))")
+
+
 def _signature(c) -> str:
-    try:
-        row = c.execute(_SIG_SQL).fetchone()
-    except sqlite3.OperationalError:            # no papers.label yet (a database before migration 2)
-        row = c.execute(_SIG_SQL.replace(" || ':' || total(length(label))", "")).fetchone()
+    sql = _SIG_SQL
+    for part in (None,) + _SIG_OPTIONAL:
+        if part is not None:
+            sql = sql.replace(part, "")
+        try:
+            row = c.execute(sql).fetchone()
+            break
+        except sqlite3.OperationalError:
+            if part == _SIG_OPTIONAL[-1]:
+                raise
     return str(db._path) + "|" + "|".join(str(v) for v in row)
 
 
@@ -324,9 +334,11 @@ def catalog(c=None, sig=None) -> Catalog:
     try:
         cols = {r[1] for r in c.execute("PRAGMA table_info(papers)")}
         label = "label" if "label" in cols else "NULL AS label"
+        srev = "script_rev" if "script_rev" in {r[1] for r in c.execute("PRAGMA table_info(episodes)")} else "1 AS script_rev"
         users = {r[0]: r[1] for r in c.execute("SELECT id, name FROM users")}
         rows = c.execute(f"SELECT id, title, title_norm, authors, tags, year, arxiv_id, doi, {label}, created_at FROM papers").fetchall()
-        eps = c.execute("SELECT id, paper_id, made_by, state, deleted_at, created_at FROM episodes ORDER BY created_at, rowid").fetchall()
+        eps = c.execute(f"SELECT id, paper_id, made_by, state, deleted_at, created_at, {srev} FROM episodes "
+                        "ORDER BY created_at, rowid").fetchall()
         grows = c.execute("SELECT id, name, rule_tags, created_by FROM graphs WHERE deleted_at IS NULL ORDER BY created_at, rowid").fetchall()
         how: dict = {}
         for r in c.execute("SELECT graph_id, paper_id, how FROM graph_members"):
@@ -342,7 +354,7 @@ def catalog(c=None, sig=None) -> Catalog:
             "authors": [a for a in (db.loads(r["authors"], []) or []) if isinstance(a, str)],
             "year": r["year"] if isinstance(r["year"], int) else None, "arxiv_id": r["arxiv_id"], "doi": r["doi"],
             "label": r["label"] or graph.auto_label(r["title"], r["arxiv_id"], r["doi"], r["title_norm"]),
-            "eids": [], "makers": [], "maker_ids": set(), "added": None, "graphs": [], "all": 0}
+            "eids": [], "srevs": {}, "makers": [], "maker_ids": set(), "added": None, "graphs": [], "all": 0}
         gpapers[r["id"]] = {"tags": {t.strip().lower() for t in tags}, "visible": True}
     for e in eps:
         p = papers.get(e["paper_id"])
@@ -351,6 +363,8 @@ def catalog(c=None, sig=None) -> Catalog:
         p["all"] += 1
         if e["deleted_at"] is None and e["state"] != "rejected":
             p["eids"].append(e["id"])
+            if (e["script_rev"] or 1) > 1:                   # its script was replaced (scriptswap.py)
+                p["srevs"][e["id"]] = e["script_rev"]
             p["added"] = p["added"] or e["created_at"]
             p["maker_ids"].add(e["made_by"])
             name = users.get(e["made_by"])
@@ -388,6 +402,12 @@ def _meta_fields(cat: Catalog, p: dict) -> dict:
 
 def _h(obj) -> str:
     return hashlib.sha1(json.dumps(obj, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
+def _sig_e(p: dict) -> str:
+    """The fingerprint of a paper's content part: its live versions, and the revision of each
+    script replaced since its upload (one never replaced keeps the fingerprint it always had)."""
+    return _h([p["eids"], p["srevs"]]) if p.get("srevs") else _h(p["eids"])
 
 
 def _paper_eid(st: _State, p: dict):
@@ -481,7 +501,7 @@ def _sync_with(st: _State, c, full: bool, fuzzy: bool) -> dict:
     todo = []
     for pid, p in cat.papers.items():
         meta = _meta_fields(cat, p)
-        sm, se = _h(meta), _h(p["eids"])
+        sm, se = _h(meta), _sig_e(p)
         old = by_pid.get(pid)
         if old is not None and not full and old["sig_m"] == sm and old["sig_e"] == se:
             continue              # the paper text goes with the versions; `full` looks at the files too

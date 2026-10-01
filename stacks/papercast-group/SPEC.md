@@ -175,6 +175,13 @@ note)`, `base_prompt(version=None)`, `add_base_prompt(text, wording_json, by)`.
   (section 5), at most 50 MB → 201 `{"episode_id","paper_id","state":"checking"}`; the hub then
   checks it (section 6) and moves it to `waiting-for-gpu` or `rejected` (with `check_report`).
 - `GET /api/cli/episodes?mine=1` → the caller's episodes with state; `GET /api/cli/episodes/<id>`.
+- `PUT /api/cli/episodes/<id>/script` (cli-contributor; its maker or an admin) `{"script",
+  "explainer_html"?, "explainer_json"?, "dry_run"?}`: a version's script replaced in place
+  (hub/scriptswap.py). Section 6's checks run on it (422 `checks_failed` with `problems`); not
+  voiced yet, it takes the old one's place in the voice queue; voiced, it is voiced again in its
+  voice (section 9's voice-change path) and swaps in with the new audio; being voiced, 409 `busy`.
+  `GET /api/cli/episodes/<id>/script[?before=<change id>]`: the script, its changes, and the
+  files a change replaced (an undo).
 
 ## 5. The bundle (A9 defines `common/bundle.py`: `MANIFEST_VERSION = 1`, `validate(manifest,
 names) -> list[str]` of problems)
@@ -384,6 +391,9 @@ voice in use; its owner or an admin). The page hears `voice` events (a person's 
   (every paper built on, so the per-paper rule is applied to each); `--dry-run` prints what would
   change. A second run changes nothing. `--restructure`: every graded pair in one request to
   `POST /api/cli/relink/restructure`, the rule over the whole map at once.
+- `replace-script <episode> <script.md> [--explainer-html F] [--explainer-json F] [--dry-run]`,
+  `replace-script --batch FILE [--parallel N]` (a TSV of `episode_id<TAB>script.md`, resumable
+  through FILE.done) and `replace-script <episode> --undo`: `PUT /api/cli/episodes/<id>/script`.
 - Tests use a fake `claude` on PATH (a script that writes the expected files), never the real one.
 
 ## 12. Rules for every agent

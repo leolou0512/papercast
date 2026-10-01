@@ -440,6 +440,27 @@ class Upload(unittest.TestCase):
         self.assertIn(out["paper_id"], self.browse("gaussian cloud"))
 
 
+    def test_a_replaced_script_is_searched_again(self):
+        """scriptswap.py: a version's new script (`papercast replace-script`) is found at once,
+        the old one's words no longer; a paper never replaced keeps its fingerprint."""
+        from contrib_harness import bundle, manifest, script
+        h = self.h
+        st, cl = h.claim(self.u, arxiv_id="2011.77777", title="A Paper Whose Script Is Rewritten")
+        m = manifest(claim_id=cl["claim_id"], paper_over={"arxiv_id": "2011.77777", "title": "A Paper Whose Script Is Rewritten"})
+        st, out = h.upload(self.u, bundle(m, script_text=script(2600, extra="An old word: quandrillion.")))
+        self.assertEqual(st, 201, out)
+        h.wait_checked(self.u, out["episode_id"])
+        self.assertEqual(self.browse("quandrillion"), [out["paper_id"]])
+        self.assertEqual(self.browse("zorbulate"), [])
+        st, r = h.request("PUT", f"/api/cli/episodes/{out['episode_id']}/script",
+                          {"script": script(2600, extra="A new word: zorbulate.")}, user=self.u)
+        self.assertEqual((st, r["how"]), (200, "queue"), r)
+        self.assertEqual(self.browse("zorbulate"), [out["paper_id"]])
+        self.assertEqual(self.browse("quandrillion"), [])
+        self.assertEqual(search._sig_e({"eids": ["e_a", "e_b"], "srevs": {}}), search._h(["e_a", "e_b"]),
+                         "unchanged for a paper never replaced: no index made again at the deploy")
+
+
 class Units(unittest.TestCase):
     def test_parse(self):
         cls = search.parse('Reinforcment "denoising diffusion" q-learning the lea')

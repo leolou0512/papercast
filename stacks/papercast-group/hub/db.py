@@ -300,11 +300,38 @@ def _m5_password_auth(c) -> None:
                    detail TEXT)""")
 
 
+def _m6_script_changes(c) -> None:
+    """A version's script replaced in place (hub/scriptswap.py, `papercast replace-script`):
+    episodes.script_rev counts the scripts it has had (1 the uploaded one; the search indexes a
+    version again when it moves), and script_changes keeps every replacement: who and when, what
+    became of it, and its files (the script it replaced is kept in episodes/<id>/history/<change id>/)."""
+    _add_column(c, "episodes", "script_rev", "INTEGER NOT NULL DEFAULT 1")
+    c.execute("""CREATE TABLE IF NOT EXISTS script_changes (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   episode_id TEXT NOT NULL REFERENCES episodes(id),
+                   by_user INTEGER REFERENCES users(id),
+                   at TEXT NOT NULL,
+                   state TEXT NOT NULL CHECK (state IN ('waiting', 'done', 'superseded', 'failed')),
+                   how TEXT NOT NULL CHECK (how IN ('queue', 'revoice')),   -- not voiced yet | voiced again
+                   voice TEXT,                                  -- the voice it is recorded in (revoice)
+                   explainer TEXT NOT NULL DEFAULT '',          -- the explainer files it brought: "html,json"
+                   words INTEGER,
+                   est_minutes REAL,
+                   sha256 TEXT NOT NULL,                        -- of the new script
+                   prev_sha256 TEXT,                            -- of the one it replaced
+                   script_rev INTEGER,                          -- episodes.script_rev once it is in place
+                   audio_rev INTEGER,                           -- the audio revision it was voiced into
+                   done_at TEXT,
+                   error TEXT)""")
+    c.execute("CREATE INDEX IF NOT EXISTS script_changes_episode ON script_changes(episode_id, id)")
+
+
 MIGRATIONS = [
     (2, _m2_paper_label),
     (3, _m3_indexes),
     (4, _m4_runtime_columns),
     (5, _m5_password_auth),
+    (6, _m6_script_changes),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0] if MIGRATIONS else 1      # what migrate() brings a database to
 

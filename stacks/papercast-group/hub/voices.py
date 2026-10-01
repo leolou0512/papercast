@@ -43,11 +43,18 @@ Tables (this module's, CREATE TABLE IF NOT EXISTS at start):
                   so no browser keeps playing a cached old one); want/want_by/want_at: the
                   preset being made and who asked; error: why the last change failed;
                   spec: the custom voice the audio is in (JSON, voice "custom"); claim_spec:
-                  the custom voice the claim being voiced asked for.
+                  the custom voice the claim being voiced asked for; want_spec: the custom
+                  voice a re-voice of a replaced script asks for (the one the audio is in,
+                  scriptswap.py), else NULL (a change to "custom" is the maker's custom voice).
 
 Files in the episode dir: timings.json (the audio's), timings.next.json (the audio being made:
 the worker sends it before the MP3, whose arrival moves it in) and timings.prev.json (the audio
 before the last change, to carry positions over).
+
+A replaced script (scriptswap.py) is voiced again by this path, in the voice the audio is in: the
+change waits as want (want_spec for a custom voice) with the new files beside the old, and moves
+in with the new audio (after_audio). While it waits, choosing a voice changes the voice it will be
+recorded in, choosing the one there is keeps it waiting, and it is not taken back from the page.
 
     GET    /api/voices                             the presets, with their sample clips, and mine;
                                                    my custom voice and my latest preview
@@ -193,10 +200,11 @@ CREATE TABLE IF NOT EXISTS episode_voice (
   error TEXT,
   updated_at TEXT NOT NULL,
   spec TEXT,
-  claim_spec TEXT
+  claim_spec TEXT,
+  want_spec TEXT
 )
 """
-EXTRA_COLUMNS = (("spec", "TEXT"), ("claim_spec", "TEXT"))     # added to a table made before them
+EXTRA_COLUMNS = (("spec", "TEXT"), ("claim_spec", "TEXT"), ("want_spec", "TEXT"))   # added to a table made before them
 
 # ---------------------------------------------------------------- schema
 
@@ -496,6 +504,9 @@ def _claim_preset(c, eid: str):
     r = _row(c, eid)
     e = c.execute("SELECT made_by FROM episodes WHERE id = ?", (eid,)).fetchone()
     maker = e["made_by"] if e else None
+    sp = load_spec(r["want_spec"]) if r and r["want"] == CUSTOM else None
+    if sp:                                                      # a replaced script, in the custom voice it was in
+        return custom_preset(sp)
     p = _voice_preset(c, r["want"], maker) if r and r["want"] else None
     if p:                                                       # a voice change
         return p
@@ -538,6 +549,8 @@ def after_audio(c, cfg, eid: str, duration_s: float, key: str | None, had_audio:
         vid, spec = p["id"], p.get("custom")
     old_rev = r["rev"] if r else 1
     rev = old_rev + 1 if had_audio else old_rev
+    from . import scriptswap
+    script = scriptswap.landing(c, cfg, eid, rev) if had_audio else None    # a replaced script moves in too
     d = cfg.episodes / eid
     cur, nxt, prev = d / "timings.json", d / "timings.next.json", d / "timings.prev.json"
     old_doc = _read_json(cur) if had_audio else None
@@ -565,30 +578,38 @@ def after_audio(c, cfg, eid: str, duration_s: float, key: str | None, had_audio:
     if had_audio:
         at = _now_ms()
         for p in c.execute("SELECT user_id, seconds FROM positions WHERE episode_id = ?", (eid,)).fetchall():
+            to = (scriptswap.clamp(p["seconds"], old_dur, duration_s) if script else
+                  remap(p["seconds"], old_doc, new_doc, old_dur, duration_s))
             c.execute("UPDATE positions SET seconds = ?, updated_at = ? WHERE user_id = ? AND episode_id = ?",
-                      (remap(p["seconds"], old_doc, new_doc, old_dur, duration_s), at, p["user_id"], eid))
+                      (to, at, p["user_id"], eid))
     c.execute("INSERT INTO episode_voice (episode_id, voice, rev, prev_duration_s, updated_at, spec) "
               "VALUES (?, ?, ?, ?, ?, ?) "
               "ON CONFLICT(episode_id) DO UPDATE SET voice = excluded.voice, rev = excluded.rev, "
               "prev_duration_s = excluded.prev_duration_s, want = NULL, want_by = NULL, want_at = NULL, "
-              "error = NULL, updated_at = excluded.updated_at, spec = excluded.spec, claim_spec = NULL",
+              "error = NULL, updated_at = excluded.updated_at, spec = excluded.spec, claim_spec = NULL, want_spec = NULL",
               (eid, vid, rev, old_dur if had_audio else None, now, db.dumps(spec) if spec else None))
     if not had_audio or e is None:
         return None
     swap = {"rev": rev, "from_rev": old_rev, "voice": vid, "name": _name(vid)}
+    if script:                          # a replaced script came in with it (scriptswap.py)
+        swap["script"] = True
     if spec:                            # everyone hears of it: the owner's name (the page asks for its own)
         swap.update(name=custom_label(spec["user_id"], None, _users(c, [spec["user_id"]]).get(spec["user_id"])),
                     owner=spec["user_id"])
     return {"id": eid, "episode_id": eid, "paper_id": e["paper_id"], "voice_swap": swap}
 
 
-def revoice_failed(c, eid: str, error: str, retry: bool) -> None:
+def revoice_failed(c, eid: str, error: str, retry: bool, cfg=None) -> None:
     """A voice change failed (inside voiceq.failed's transaction). While it will be tried again
-    the change stays asked for; the last try leaves the episode as it was, with why."""
+    the change stays asked for; the last try leaves the episode as it was, with why (and drops
+    a replaced script waiting for it: scriptswap.dropped)."""
     if retry:
         return
+    from . import scriptswap
+    scriptswap.dropped(c, cfg, eid, error)
     c.execute("UPDATE episode_voice SET error = ?, want = NULL, want_by = NULL, want_at = NULL, claim_spec = NULL, "
-              "updated_at = ? WHERE episode_id = ?", (f"{_want_label(_want(c, eid))}: {error}"[:600], db.now(), eid))
+              "want_spec = NULL, updated_at = ? WHERE episode_id = ?",
+              (f"{_want_label(_want(c, eid))}: {error}"[:600], db.now(), eid))
     c.execute("UPDATE voice_jobs SET state = 'done', phase = 'done', progress = 1 WHERE episode_id = ?", (eid,))
 
 
@@ -621,10 +642,12 @@ def _pending(r, job, positions: dict, who: dict) -> dict | None:
     if not r or not r["want"] or job is None or job["state"] not in ("queued", "claimed", "failed"):
         return None
     working = job["state"] == "claimed"
+    script = who.get("script")              # the voice a replaced script waits to be recorded in
     return {"id": r["want"], "name": _label(r["want"], None, who), "by": r["want_by"], "at": r["want_at"],
             "state": "working" if working else ("retrying" if job["state"] == "failed" else "queued"),
             "position": positions.get(r["episode_id"]), "phase": job["phase"] if working else None,
-            "progress": job["progress"] if working else None, "attempts": job["attempts"]}
+            "progress": job["progress"] if working else None, "attempts": job["attempts"],
+            "script": script is not None, "cancel": script is None or r["want"] != script}
 
 
 def _view(r, job, can_change: bool, positions: dict, who: dict, epdir: Path | None = None) -> dict:
@@ -652,6 +675,7 @@ def decorate(papers: list, cfg, uid, admin: bool) -> None:
     ensure_schema()
     c = db.conn()
     rows = {r["episode_id"]: r for r in c.execute("SELECT * FROM episode_voice")}
+    scripts = {r[0]: r[1] for r in c.execute("SELECT episode_id, voice FROM script_changes WHERE state = 'waiting'")}
     jobs = {}
     if any(r["want"] for r in rows.values()):
         jobs = {j["episode_id"]: j for j in c.execute(
@@ -673,7 +697,8 @@ def decorate(papers: list, cfg, uid, admin: bool) -> None:
         for e in p.get("episodes") or []:
             r = rows.get(e["id"])
             maker = e["made_by"]["id"]
-            who = {"viewer": uid, "maker": maker, "names": names, "custom": customs.get(maker), "cfg": cfg}
+            who = {"viewer": uid, "maker": maker, "names": names, "custom": customs.get(maker), "cfg": cfg,
+                   "script": scripts.get(e["id"])}
             e["voice"] = _view(r, jobs.get(e["id"]), bool(e.get("has_audio") and (admin or e.get("mine"))),
                                positions, who, cfg.episodes / e["id"])
 
@@ -696,8 +721,9 @@ def _episode_view(req, c, eid) -> dict:
     viewer = _u(req, "id")
     mine = e["made_by"] == viewer
     spec = load_spec(r["spec"]) if r is not None and r["voice"] == CUSTOM else None
+    ch = c.execute("SELECT voice FROM script_changes WHERE episode_id = ? AND state = 'waiting'", (eid,)).fetchone()
     who = {"viewer": viewer, "maker": e["made_by"], "custom": saved_custom(c, e["made_by"]), "cfg": req.cfg,
-           "names": _users(c, [e["made_by"], spec["user_id"] if spec else None])}
+           "names": _users(c, [e["made_by"], spec["user_id"] if spec else None]), "script": ch[0] if ch else None}
     v = _view(r, job, bool(has_audio and (mine or _u(req, "role") == "admin")), positions, who, req.cfg.episodes / eid)
     v.update(episode_id=eid, paper_id=e["paper_id"], duration_s=e["duration_s"])
     return v
@@ -764,10 +790,14 @@ def get_episode_voice(req, eid):
         except ValueError:
             raise HTTPError(400, "bad_at", "at is seconds, rev a whole number")
         if n == v["rev"] - 1:
+            from . import scriptswap
             d = req.cfg.episodes / eid
             r = _row(c, eid)
-            s = remap(s, _read_json(d / "timings.prev.json"), _read_json(d / "timings.json"),
-                      r["prev_duration_s"] if r else None, v["duration_s"])
+            if scriptswap.swapped_by_script(c, eid, v["rev"]):      # another script: the same second
+                s = scriptswap.clamp(s, r["prev_duration_s"] if r else None, v["duration_s"])
+            else:
+                s = remap(s, _read_json(d / "timings.prev.json"), _read_json(d / "timings.json"),
+                          r["prev_duration_s"] if r else None, v["duration_s"])
         v["at"] = s
     req.send_json(200, v)
 
@@ -791,16 +821,19 @@ def _mutation(req):
 
 
 def _outstanding(c, uid, eid) -> int:
+    """This person's voice changes waiting or being made (a replaced script waiting to be voiced
+    again in the voice it has is not one: scriptswap.py)."""
     return c.execute("SELECT COUNT(*) FROM episode_voice ev JOIN voice_jobs v ON v.episode_id = ev.episode_id "
                      "JOIN episodes e ON e.id = ev.episode_id WHERE ev.want IS NOT NULL AND ev.want_by = ? "
-                     "AND ev.episode_id != ? AND e.deleted_at IS NULL AND v.state IN ('queued', 'claimed', 'failed')",
-                     (uid, eid)).fetchone()[0]
+                     "AND ev.episode_id != ? AND e.deleted_at IS NULL AND v.state IN ('queued', 'claimed', 'failed') "
+                     "AND NOT EXISTS (SELECT 1 FROM script_changes s WHERE s.episode_id = ev.episode_id "
+                     "AND s.state = 'waiting' AND s.voice IS ev.want)", (uid, eid)).fetchone()[0]
 
 
 def _back_to_done(c, eid) -> None:
     c.execute("UPDATE voice_jobs SET state = 'done', phase = 'done', progress = 1, error = NULL, worker = NULL "
               "WHERE episode_id = ? AND state IN ('queued', 'failed')", (eid,))
-    c.execute("UPDATE episode_voice SET want = NULL, want_by = NULL, want_at = NULL, updated_at = ? "
+    c.execute("UPDATE episode_voice SET want = NULL, want_by = NULL, want_at = NULL, want_spec = NULL, updated_at = ? "
               "WHERE episode_id = ?", (db.now(), eid))
 
 
@@ -833,8 +866,14 @@ def put_episode_voice(req, eid):
             raise HTTPError(409, "busy", f"it is being recorded in {_want_label(r['want'])} now; "
                                          "change it again once that is done")
         has = r["voice"] if r else None
+        script = c.execute("SELECT * FROM script_changes WHERE episode_id = ? AND state = 'waiting'", (eid,)).fetchone()
         if has == vid and (vid != CUSTOM or (load_spec(r["spec"]) or {}).get("key") == mc["key"]):
-            if pending:                                 # back to the voice it has: nothing to make
+            if pending and script is not None:          # a replaced script waits: recorded in the voice it has
+                c.execute("UPDATE episode_voice SET want = ?, want_by = ?, want_spec = ?, updated_at = ? "
+                          "WHERE episode_id = ?", (vid, script["by_user"], r["spec"] if vid == CUSTOM else None,
+                                                   now, eid))
+                c.execute("UPDATE script_changes SET voice = ? WHERE id = ?", (vid, script["id"]))
+            elif pending:                               # back to the voice it has: nothing to make
                 _back_to_done(c, eid)
         elif pending and r["want"] == vid:
             pass
@@ -845,8 +884,8 @@ def put_episode_voice(req, eid):
             if r is None:
                 c.execute("INSERT INTO episode_voice (episode_id, voice, rev, updated_at) VALUES (?, NULL, 1, ?)",
                           (eid, now))
-            c.execute("UPDATE episode_voice SET want = ?, want_by = ?, want_at = ?, error = NULL, updated_at = ? "
-                      "WHERE episode_id = ?", (vid, uid, now, now, eid))
+            c.execute("UPDATE episode_voice SET want = ?, want_by = ?, want_at = ?, want_spec = NULL, error = NULL, "
+                      "updated_at = ? WHERE episode_id = ?", (vid, uid, now, now, eid))
             if job is None:
                 c.execute("INSERT INTO voice_jobs (episode_id, user_id, state, queued_at, attempts) "
                           "VALUES (?, ?, 'queued', ?, 0)", (eid, uid, now))
@@ -873,7 +912,15 @@ def delete_episode_voice(req, eid):
         job = c.execute("SELECT state FROM voice_jobs WHERE episode_id = ?", (eid,)).fetchone()
         if r and r["want"] and job and job["state"] == "claimed":
             raise HTTPError(409, "busy", "it is being recorded now; it can no longer be taken back")
-        if r and r["want"] and job and job["state"] in ("queued", "failed"):
+        script = c.execute("SELECT * FROM script_changes WHERE episode_id = ? AND state = 'waiting'", (eid,)).fetchone()
+        if script is not None and r and r["want"] and job and job["state"] in ("queued", "failed"):
+            if r["want"] == script["voice"]:
+                raise HTTPError(409, "script_waiting", "a new script waits to be recorded in this voice; "
+                                                       "it cannot be taken back here")
+            c.execute("UPDATE episode_voice SET want = ?, want_by = ?, want_spec = ?, updated_at = ? WHERE episode_id = ?",
+                      (script["voice"], script["by_user"], r["spec"] if script["voice"] == CUSTOM else None,
+                       db.now(), eid))         # the voice change taken back; the new script stays in line
+        elif r and r["want"] and job and job["state"] in ("queued", "failed"):
             _back_to_done(c, eid)
         elif r and r["error"]:
             c.execute("UPDATE episode_voice SET error = NULL WHERE episode_id = ?", (eid,))

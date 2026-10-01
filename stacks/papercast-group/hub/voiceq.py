@@ -19,7 +19,8 @@ disk in chunks under a size limit instead of holding it in memory.
 
 A voice change (voices.py) puts an episode that has audio back in this queue: while it is made the
 episode stays ready with its old audio (claim, status and failures leave the episode row alone),
-the claim carries the voice, and the new MP3 replaces the old one. PUT /api/voice/<id>/timings
+the claim carries the voice, and the new MP3 replaces the old one. A replaced script
+(scriptswap.py) comes back the same way; its script_url then gives the new script. PUT /api/voice/<id>/timings
 takes the sentence timings of the audio being made (before its MP3), or of the audio there is.
 
 Voice previews (customvoice.py) share this queue: a claim may hand one out, under the id
@@ -325,7 +326,8 @@ def script(req, eid):
     c = db.conn()
     if _job(c, eid) is None:
         raise HTTPError(404, "no_such_job", f"no voice job for {eid}")
-    p = req.cfg.episodes / eid / "script.md"
+    from . import scriptswap
+    p = scriptswap.voice_script(req.cfg, c, eid)        # a replaced script waiting for its voice, else script.md
     if not p.is_file():
         raise HTTPError(404, "no_script", f"{eid} has no script.md")
     req.send(200, p.read_bytes(), "text/markdown; charset=utf-8")
@@ -460,7 +462,7 @@ def failed(req, eid):
         c.execute("UPDATE voice_jobs SET state = 'failed', error = ?, finished_at = ?, phase = 'failed', "
                   "worker = NULL WHERE episode_id = ?", (err, now, eid))
         if voices.revoicing(c, eid):        # a voice change failed: the episode keeps its audio
-            voices.revoice_failed(c, eid, err, retry)
+            voices.revoice_failed(c, eid, err, retry, req.cfg)
         else:
             detail = f"the voice failed: {err} " + (
                 f"(attempt {attempts} of {MAX_ATTEMPTS}; it will be tried again)" if retry

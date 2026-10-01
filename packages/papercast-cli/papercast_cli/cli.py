@@ -9,6 +9,8 @@
   papercast cancel|retry <job>        stop a job, or run it again
   papercast relink [--dry-run] [--restructure]
                                       find the links between the library's papers again
+  papercast replace-script <episode> <script.md> [--dry-run] | --batch FILE | <episode> --undo
+                                      replace a version's script on the hub; it is voiced again
   papercast whoami | logout | worker
 """
 from __future__ import annotations
@@ -19,6 +21,7 @@ import os
 import re
 import sys
 import time
+from pathlib import Path
 
 from . import __version__
 from . import usage
@@ -476,6 +479,33 @@ def cmd_relink(args) -> int:
     return 1 if res.get("errors") else 0
 
 
+# --------------------------------------------------------------------------- replace-script
+
+def cmd_replace_script(args) -> int:
+    from . import replace_script as R
+    cfg = config.require_login()
+    api = Api.from_config(cfg, retries=2, timeout=180)
+    if args.batch:
+        if args.episode or args.script or args.undo or args.explainer_html or args.explainer_json:
+            raise PapercastError("--batch FILE takes everything from the file: give no episode or script")
+        counts = R.run_batch(api, Path(args.batch), dry_run=args.dry_run, parallel=args.parallel)
+        return 1 if counts["refused"] or counts["busy"] or counts["error"] else 0
+    if not args.episode:
+        raise PapercastError("give an episode id and its new script.md, or --batch FILE")
+    if args.undo:
+        if args.script or args.explainer_html or args.explainer_json:
+            raise PapercastError("--undo sends back what the last replacement replaced: give no files")
+        it, ch = R.undo_item(api, args.episode)
+        print(f"Undoing the replacement of {ch.get('at')} (change {ch['id']}).")
+    else:
+        if not args.script:
+            raise PapercastError("give the new script.md after the episode id")
+        it = R.item(args.episode, args.script, args.explainer_html, args.explainer_json)
+    res = R.send(api, it, args.dry_run)
+    R.show(res)
+    return 0 if res["result"] in ("replaced", "unchanged", "would") else 1
+
+
 # --------------------------------------------------------------------------- cancel, retry, worker
 
 def cmd_cancel(args) -> int:
@@ -591,6 +621,19 @@ def build_parser() -> argparse.ArgumentParser:
                    help="ask Semantic Scholar again instead of its cached answers")
     s.add_argument("--json", action="store_true", help="machine-readable")
     s.set_defaults(func=cmd_relink)
+
+    s = sub.add_parser("replace-script", help="replace a version's script on the hub (its checks run on it); "
+                                              "it is voiced again in its voice, the old audio playing until then")
+    s.add_argument("episode", nargs="?", metavar="EPISODE_ID", help="the version (e_...)")
+    s.add_argument("script", nargs="?", metavar="SCRIPT_MD", help="its new script.md")
+    s.add_argument("--explainer-html", metavar="FILE", help="a new explainer.html too")
+    s.add_argument("--explainer-json", metavar="FILE", help="a new explainer.json too")
+    s.add_argument("--batch", metavar="FILE", help="many: a TSV of episode_id<TAB>script.md (more columns: "
+                                                   "explainer.html, explainer.json); resumable (FILE.done)")
+    s.add_argument("--parallel", type=int, default=3, metavar="N", help="with --batch: at once (1 to 8; default 3)")
+    s.add_argument("--undo", action="store_true", help="put back the script its last replacement replaced")
+    s.add_argument("--dry-run", action="store_true", help="only the hub's checks and what would happen")
+    s.set_defaults(func=cmd_replace_script)
 
     s = sub.add_parser("cancel", help="stop a job for good")
     s.add_argument("job", help="its id (or the start of it), from papercast status")

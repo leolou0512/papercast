@@ -1988,6 +1988,7 @@
       if (listBusy) { listAgain = true; return; }
       listBusy = true;
       var s0 = settled;
+      var asked = Date.now();                // when the page asked (opts.onList: an answer older than a change of its own)
       call("GET", "/api/graphs").then(function (r) {
         if (settled !== s0) { listAgain = true; return; }
         var arr = Array.isArray(r) ? r : (r && r.graphs) || [], next = [], seen = {};
@@ -2018,7 +2019,7 @@
         else if (!cur) showGraph(byId[want && want.gid] || byId[opts.graph] || byId[load(TKEY)] || graphs[0] || null);
         if (cur) { renderSettings(); refreshCard(); if (cur.stale && !cur.busy) loadGraph(cur); }
         renderEmpty();
-        if (opts.onList) opts.onList(r);
+        if (opts.onList) opts.onList(r, asked);
       }, function (err) { listErr = errText(err); renderEmpty(); }).then(function () {
         listBusy = false;
         if (listAgain) { listAgain = false; loadList(); }

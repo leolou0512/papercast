@@ -361,13 +361,8 @@ try:
 except ImportError:
     SKIP = "websocket-client not installed"
 
-# test_page's tap-target check, with the Up next panel as a top layer like the explainer
-_TOP = ("const top = !document.getElementById('overlay').hidden ? document.getElementById('overlay') : document.querySelector('.menu')"
-        " || (bell && !bell.hidden ? bell : null);")
-assert _TOP in tp.TAP_TARGETS
-TAP_TARGETS = tp.TAP_TARGETS.replace(_TOP, "const top = !document.getElementById('overlay').hidden ? document.getElementById('overlay')"
-                                     " : !document.getElementById('q-overlay').hidden ? document.getElementById('q-overlay')"
-                                     " : document.querySelector('.menu') || (bell && !bell.hidden ? bell : null);")
+# test_page's tap-target check (the Up next panel a top layer, as the explainer)
+TAP_TARGETS = tp.TAP_TARGETS
 AUDIO = "document.getElementById('audio')"
 SEG = "document.querySelector('#tr-body .tr-s[data-seg=\"{}\"]')"
 NOW = "(document.querySelector('#tr-body .tr-s.now') || {dataset: {}}).dataset.seg"

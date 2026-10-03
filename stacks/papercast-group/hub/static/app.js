@@ -1528,6 +1528,12 @@
       // a paper opened without a step in the history
       open: (pid) => { history.replaceState(history.state, "", `#${S.graph && inGraph(S.graph, pid) ? hashFor(S.graph, pid) : `p=${pid}`}`); openFromHash(); },
       list: () => { closeMenu(); closeQueue(); if (S.view !== "home" || S.open || phone()) goHome(); },
+      // a graph shown, with its header (a phone: its papers, not the list of graphs)
+      graph: () => {
+        closeMenu(); closeQueue();
+        const g = S.graph || (S.graphs && S.graphs.landing());
+        if (!phone()) { if (S.view !== "home" || S.open) goHome(); } else if (g) nav(hashFor(g), false);
+      },
       openMap, closeMap: () => closeMap(), closeMenu, map: () => S.map,
       go: (h) => nav(String(h || "").replace(/^#/, ""), false),        // back to an address, without a step
       pane: (k) => setPane(k),
@@ -2634,8 +2640,8 @@
     S.map = window.PaperMap.mount($("map"), {
       api: "", column: true, live: true, editable: true, me: S.me, papers: S.papers, head: S.graphs.head,
       onOpen: (id) => openPaper(id, S.map.current()), onClose: mapClose, onShow: mapShowed, onData: mapData,
-      onList: (r) => {
-        S.graphs.setList(r);
+      onList: (r, asked) => {
+        S.graphs.setList(r, asked);
         listIn();
         // a graph the address names that is not there (deleted, or never was): where the page lands
         if (S.graph && !S.graphs.item(S.graph) && S.view !== "settings" && S.view !== "listening") nav(hashFor(S.graphs.landing()), false);

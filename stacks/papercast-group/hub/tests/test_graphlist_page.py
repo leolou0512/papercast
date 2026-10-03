@@ -109,57 +109,100 @@ class GraphListPage(PageBase):
         return self.b.wait_js(expr, timeout, what)
 
     def row_text(self, gid):
+        """[name, paper count, locked, the new-papers dot on, the row's title (its words)]"""
         return self.js(f"(r => r && [r.querySelector('.gl-name').textContent, r.querySelector('.gl-n').textContent,"
-                       f" !!r.querySelector('.gl-lock'), (r.querySelector('.gl-new') || {{}}).textContent || null,"
-                       f" (r.querySelector('.gl-sub') || {{getAttribute: () => null}}).getAttribute('aria-pressed')])(document.querySelector('{GROW.format(gid)}'))")
+                       f" !!r.querySelector('.gl-lock'), r.querySelector('.gl-dot').classList.contains('on'),"
+                       f" r.querySelector('.gl-open').getAttribute('title')])(document.querySelector('{GROW.format(gid)}'))")
+
+    def tok(self, k):
+        return self.js(f"(e => {{ e.style.color = 'var({k})'; document.body.append(e); const c = getComputedStyle(e).color; e.remove(); return c; }})(document.createElement('span'))")
+
+    def pill(self):
+        """The graph header's pill: [its words, its fill, its words' colour, aria-pressed]"""
+        return self.js("(b => b && [b.textContent, getComputedStyle(b).backgroundColor, getComputedStyle(b).color, b.getAttribute('aria-pressed')])"
+                       "(document.querySelector('#gh .gh-sub'))")
 
     # ------------------------------------------------------------------ the column
     def test_1_the_column_subscribed_first_then_the_rest(self):
-        """Carol's column: her two subscriptions on top, in the text colour, "2 new" on the one
-        whose last two papers came after she opened it; the rest muted, without a badge; the
-        locked graph's lock; + New graph; Not in any graph last."""
+        """Carol's column: her two subscriptions on top, in the text colour, a dot at the end of the
+        one whose last two papers came after she opened it ("2 new papers" its title); the rest
+        muted, without a dot; no toggles on the rows (YouTube's subscriptions); the locked graph's
+        lock; + New graph; Not in any graph last."""
         self.home(C)
         self.assertEqual(sorted(self.js(SUBS)), sorted([self.gen, self.bobs]))
         self.assertEqual(sorted(self.js(REST)), sorted([self.rl, self.lm, self.mat, self.robot, self.alices]))
-        self.assertEqual(self.row_text(self.gen), ["Diffusion and generative models", "5", False, "2 new", "true"])
-        self.assertEqual(self.row_text(self.bobs), ["Bob's hands", "3", False, None, "true"])
-        self.assertEqual(self.row_text(self.lm), ["Language models", "1", True, None, "false"])
-        self.assertEqual(self.row_text(self.rl), ["Reinforcement learning", "6", False, None, "false"])
-        self.assertEqual(self.row_text("none"), ["Not in any graph", "3", False, None, None])
+        self.assertEqual(self.row_text(self.gen), ["Diffusion and generative models", "5", False, True, "2 new papers"])
+        self.assertEqual(self.row_text(self.bobs), ["Bob's hands", "3", False, False, None])
+        self.assertEqual(self.row_text(self.lm), ["Language models", "1", True, False, None])
+        self.assertEqual(self.row_text(self.rl), ["Reinforcement learning", "6", False, False, None])
+        self.assertEqual(self.row_text("none"), ["Not in any graph", "3", False, False, None])
+        self.assertIn("2 new papers", self.js(f"document.querySelector('{GROW.format(self.gen)} .gl-open').getAttribute('aria-label')"))
+        self.assertEqual(self.js("document.querySelectorAll('#gl .gl-row button').length"), self.js("document.querySelectorAll('#gl .gl-row').length"))
+        # the dot at the row's end, in the accent
+        dot, n, row = (self.js(f"(e => (r => [r.left, r.right])(e.getBoundingClientRect()))(document.querySelector('{GROW.format(self.gen)} {x}'))")
+                       for x in (".gl-dot", ".gl-n", ".gl-open"))
+        self.assertGreater(dot[0], n[1])
+        self.assertAlmostEqual(dot[1], row[1] - 16 * self.js("document.documentElement.currentCSSZoom || 1"), delta=1.5)
+        self.assertEqual(self.js(f"getComputedStyle(document.querySelector('{GROW.format(self.gen)} .gl-dot')).backgroundColor"), self.tok("--accent"))
         # the order on the page: the sections, + New graph, then Not in any graph
         order = self.js("[...document.getElementById('gl').children].map(e => e.className.split(' ')[0] + (e.classList.contains('gl-list') ? ':' + e.className.split(' ')[1] : ''))")
         self.assertEqual(order, ["gl-h", "gl-list:gl-subs", "gl-h", "gl-list:gl-rest", "gl-newb", "gl-list:gl-none"])
         # solid and greyed: the text colour, the muted one
         col = lambda gid: self.js(f"getComputedStyle(document.querySelector('{GROW.format(gid)} .gl-open')).color")
-        tok = lambda k: self.js(f"(e => {{ e.style.color = 'var({k})'; document.body.append(e); const c = getComputedStyle(e).color; e.remove(); return c; }})(document.createElement('span'))")
-        self.assertEqual(col(self.gen), tok("--text"))
-        self.assertEqual(col(self.rl), tok("--text-2"))
+        self.assertEqual(col(self.gen), self.tok("--text"))
+        self.assertEqual(col(self.rl), self.tok("--text-2"))
         self.shot("desktop-light")
 
-    def test_2_the_toggle_on_a_row_and_in_the_graphs_header(self):
+    def test_2_the_pill_in_the_graphs_header_and_its_confirm(self):
+        """YouTube's pill: "Subscribe" solid in the text colour on the page's ground, at once;
+        "Subscribed" grey, asking "Unsubscribe from <graph>?" with Cancel (or Escape, or a click
+        outside) and Unsubscribe."""
         b, r = self.b, self.r
-        self.home(C)
-        # on a row: Reinforcement learning joins her subscriptions, on the hub too
-        b.js(f"document.querySelector('{GROW.format(self.rl)} .gl-sub').click()")
-        self.wait(f"{SUBS}.includes({J(self.rl)}) && !{REST}.includes({J(self.rl)})", "subscribed from the row")
-        r.wait(lambda: r.q("SELECT 1 FROM graph_subs WHERE user_id = ? AND graph_id = ?", self.carol, self.rl), 5, "on the hub")
-        # in the header: the graph shown
-        b.js(f"location.hash = 'g={self.mat}'")
-        self.wait("document.getElementById('gh-name').textContent === 'Materials and molecules'", "its header")
-        self.assertEqual(self.js("document.querySelector('#gh .gh-sub').textContent"), "Subscribe")
+        sub = lambda gid: bool(r.q("SELECT 1 FROM graph_subs WHERE user_id = ? AND graph_id = ?", self.carol, gid))
+        self.home(C)                                       # lands on Reinforcement learning, not subscribed
+        self.wait("document.getElementById('gh-name').textContent === 'Reinforcement learning'", "its header")
+        self.assertEqual(self.pill(), ["Subscribe", self.tok("--text"), self.tok("--bg"), "false"])
+        self.assertEqual(self.js("(b => Math.round(b.getBoundingClientRect().height / (document.documentElement.currentCSSZoom || 1)))(document.querySelector('#gh .gh-sub'))"), 36)
         b.js("document.querySelector('#gh .gh-sub').click()")
-        self.wait(f"document.querySelector('#gh .gh-sub').textContent === 'Subscribed' && {SUBS}.includes({J(self.mat)})", "subscribed from the header")
-        r.wait(lambda: r.q("SELECT 1 FROM graph_subs WHERE user_id = ? AND graph_id = ?", self.carol, self.mat), 5, "on the hub")
+        self.wait(f"document.querySelector('#gh .gh-sub').textContent === 'Subscribed' && {SUBS}.includes({J(self.rl)})", "subscribed, no confirm")
+        r.wait(lambda: sub(self.rl), 5, "on the hub")
+        self.assertFalse(self.js("document.getElementById('gh-dlg').open"))
+        self.assertEqual(self.pill(), ["Subscribed", self.tok("--track"), self.tok("--text"), "true"])
+        # Subscribed: the confirm; Cancel keeps it
         b.js("document.querySelector('#gh .gh-sub').click()")
-        self.wait(f"document.querySelector('#gh .gh-sub').getAttribute('aria-pressed') === 'false' && {REST}.includes({J(self.mat)})", "and off again")
-        r.wait(lambda: not r.q("SELECT 1 FROM graph_subs WHERE user_id = ? AND graph_id = ?", self.carol, self.mat), 5, "off on the hub")
+        self.wait("document.getElementById('gh-dlg').open", "the confirm")
+        self.assertEqual(self.js("document.getElementById('gh-dlg-h').textContent"), "Unsubscribe from Reinforcement learning?")
+        self.assertEqual(self.js("[...document.querySelectorAll('#gh-dlg button')].map(x => x.textContent)"), ["Cancel", "Unsubscribe"])
+        self.assertEqual(self.js("document.activeElement.id"), "gh-dlg-no")
+        time.sleep(0.3)
+        self.shot("unsubscribe-confirm")
+        b.js("document.getElementById('gh-dlg-no').click()")
+        self.wait("!document.getElementById('gh-dlg').open && document.activeElement === document.querySelector('#gh .gh-sub')", "cancelled")
+        self.assertTrue(sub(self.rl))
+        # Escape keeps it too
+        b.js("document.querySelector('#gh .gh-sub').click()")
+        self.wait("document.getElementById('gh-dlg').open", "the confirm again")
+        b.call("Input.dispatchKeyEvent", type="keyDown", key="Escape", code="Escape", windowsVirtualKeyCode=27)
+        self.wait("!document.getElementById('gh-dlg').open", "Escape")
+        self.assertTrue(sub(self.rl))
+        self.assertEqual(self.pill()[0], "Subscribed")
+        # Unsubscribe
+        b.js("document.querySelector('#gh .gh-sub').click()")
+        self.wait("document.getElementById('gh-dlg').open", "and again")
+        b.js("document.getElementById('gh-dlg-yes').click()")
+        self.wait(f"!document.getElementById('gh-dlg').open && document.querySelector('#gh .gh-sub').textContent === 'Subscribe'"
+                  f" && {REST}.includes({J(self.rl)})", "unsubscribed")
+        r.wait(lambda: not sub(self.rl), 5, "off on the hub")
         # Not in any graph has none
         b.js("location.hash = 'g=none'")
-        self.wait("document.getElementById('gh-name').textContent === 'Not in any graph' && !document.querySelector('#gh .gh-sub')", "no toggle")
-        self.assertIsNone(self.js(f"document.querySelector('{GROW.format('none')} .gl-sub')"))
-        # a toggle from another tab of hers reaches this one
-        r.req("PUT", f"/api/graphs/{self.alices}/subscription", {"subscribed": True}, user=C)
-        self.wait(f"{SUBS}.includes({J(self.alices)})", "from her other tab")
+        self.wait("document.getElementById('gh-name').textContent === 'Not in any graph' && !document.querySelector('#gh .gh-sub')", "no pill")
+        # subscriptions from another tab of hers reach this one
+        for gid in (self.alices, self.mat):
+            r.req("PUT", f"/api/graphs/{gid}/subscription", {"subscribed": True}, user=C)
+        self.wait(f"{SUBS}.includes({J(self.alices)}) && {SUBS}.includes({J(self.mat)})", "from her other tab")
+        b.js(f"location.hash = 'g={self.gen}'")
+        self.wait("document.getElementById('gh-name').textContent === 'Diffusion and generative models'", "a subscribed graph")
+        time.sleep(0.3)
         self.shot("subscribed-mix")
 
     def test_3_the_seven_sorts_within_each_section_kept_per_account(self):
@@ -238,13 +281,13 @@ class GraphListPage(PageBase):
     def test_4_opening_a_graph_sees_its_new_papers(self):
         b, r = self.b, self.r
         self.home(C)
-        self.assertEqual(self.row_text(self.gen)[3], "2 new")
+        self.assertEqual(self.row_text(self.gen)[3:], [True, "2 new papers"])
         b.js(f"document.querySelector('{GROW.format(self.gen)} .gl-open').click()")
-        self.wait(f"location.hash === '#g={self.gen}' && !document.querySelector('{GROW.format(self.gen)} .gl-new')", "seen")
+        self.wait(f"location.hash === '#g={self.gen}' && !document.querySelector('{GROW.format(self.gen)} .gl-dot.on')", "seen")
         r.wait(lambda: r.q("SELECT at FROM graph_seen WHERE user_id = ? AND graph_id = ?", self.carol, self.gen)[0][0] > "2026-09-02", 5, "on the hub")
         self.assertEqual(r.q("SELECT last_graph FROM ui_state WHERE user_id = ?", self.carol)[0][0], self.gen)
         self.load()
-        self.wait(f"document.querySelectorAll('#gl .gl-row').length > 0 && !document.querySelector('{GROW.format(self.gen)} .gl-new')", "still seen")
+        self.wait(f"document.querySelectorAll('#gl .gl-row').length > 0 && !document.querySelector('{GROW.format(self.gen)} .gl-dot.on')", "still seen")
         self.assertTrue(self.js(f"document.querySelector('{GROW.format(self.gen)}').classList.contains('cur')"))
 
     def test_5_new_graph(self):
@@ -425,6 +468,16 @@ class GraphListPage(PageBase):
             self.assertTrue(self.js(f"document.querySelector('#gpl-rows .gpl-row[data-id={J(self.rlp[0])}]').classList.contains('heard')"))
             self.assertTargets("a graph's papers")
             self.shot("phone-papers-light")
+            # its header's pill: Subscribe at a tap; Subscribed asks first
+            pill = "document.querySelector('#gpl-acts .gh-sub')"
+            self.assertEqual(self.js(f"{pill}.textContent"), "Subscribe")
+            b.js(f"{pill}.click()")
+            self.wait(f"{pill}.textContent === 'Subscribed'", "subscribed on the phone")
+            b.js(f"{pill}.click()")
+            self.wait("document.getElementById('gh-dlg').open", "the confirm on the phone")
+            self.assertTargets("the unsubscribe confirm")
+            b.js("document.getElementById('gh-dlg-yes').click()")
+            self.wait(f"!document.getElementById('gh-dlg').open && {pill}.textContent === 'Subscribe'", "unsubscribed on the phone")
             # Back: the list of graphs, full width
             b.js("document.getElementById('gpl-back').click()")
             self.wait("!document.body.classList.contains('gpl-open') && location.hash === ''", "the list of graphs")
@@ -470,36 +523,50 @@ class GraphListPage(PageBase):
             b.viewport(1440, 900)
 
     def test_z_every_theme_draws_the_new_parts_in_its_tokens(self):
-        """Light, dark and the six others: the rows' text (subscribed: --text, the rest: --text-2),
-        the badge (--accent on --on-accent's text), the column's ground (--side), each readable on
-        what it sits on (4.5:1, as tools/theme_contrast.py has it), and the dark screenshot."""
+        """Light, dark and the six others: the rows' text (subscribed: --text, the rest: --text-2)
+        on the column's ground (--side), readable (4.5:1, as tools/theme_contrast.py has it); the
+        new-papers dot in the accent, seen on the ground (3:1); the header's pill: Subscribe in
+        the text colour with the page's ground for its words (black on a light theme, white on a
+        dark one), Subscribed grey (--track, its words --text), each readable and seen on the
+        page's ground and on the phone's header (--surface); the dark screenshot."""
         b = self.b
         self.home(C)
         probe = """((k) => { const e = document.createElement('span'); e.style.color = `var(${k})`; document.body.append(e);
             const c = getComputedStyle(e).color; e.remove(); return c; })"""
         lum = r"""((c) => { const v = c.match(/\d+(\.\d+)?/g).slice(0, 3).map(Number).map(x => x / 255)
             .map(x => x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4)); return 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2]; })"""
+        check = f"""(() => {{ const P = {probe}, L = {lum};
+            const ratio = (a, b) => {{ const x = L(a), y = L(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); }};
+            const cs = (sel, k) => getComputedStyle(document.querySelector(sel))[k];
+            const on = cs('{GROW.format(self.gen)} .gl-open', 'color'), off = cs('{GROW.format(self.rl)} .gl-open', 'color');
+            const ground = cs('#gcol', 'backgroundColor'), dot = cs('{GROW.format(self.gen)} .gl-dot', 'backgroundColor');
+            const pill = cs('#gh .gh-sub', 'backgroundColor'), words = cs('#gh .gh-sub', 'color'), map = cs('#map', 'backgroundColor'),
+                  surface = P('--surface');
+            const subscribed = document.querySelector('#gh .gh-sub').getAttribute('aria-pressed') === 'true';
+            return {{ on: on === P('--text'), off: off === P('--text-2'), ground: ground === P('--side'), dot: dot === P('--accent'),
+                     pill: pill === P(subscribed ? '--track' : '--text'), words: words === P(subscribed ? '--text' : '--bg'),
+                     r_on: ratio(on, ground), r_off: ratio(off, ground), r_dot: ratio(dot, ground), r_words: ratio(words, pill),
+                     r_pill: Math.min(ratio(pill, map), ratio(pill, surface)), subscribed }};
+        }})()"""
+        themes = [t["v"] for t in self.js("pcgTheme.themes")]
         try:
-            for theme in [t["v"] for t in self.js("pcgTheme.themes")]:
-                with self.subTest(theme=theme):
-                    b.js(f"pcgTheme.set({J(theme)})")
-                    got = self.js(f"""(() => {{ const P = {probe}, L = {lum};
-                        const ratio = (a, b) => {{ const x = L(a), y = L(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); }};
-                        const cs = (sel, k) => getComputedStyle(document.querySelector(sel))[k];
-                        const on = cs('{GROW.format(self.gen)} .gl-open', 'color'), off = cs('{GROW.format(self.rl)} .gl-open', 'color');
-                        const ground = cs('#gcol', 'backgroundColor'), badge = cs('{GROW.format(self.gen)} .gl-new', 'backgroundColor'),
-                              badgeText = cs('{GROW.format(self.gen)} .gl-new', 'color'), sel = cs('{GROW.format(self.rl)} .gl-open', 'backgroundColor');
-                        return {{ on: on === P('--text'), off: off === P('--text-2'), ground: ground === P('--side'), badge: badge === P('--accent'),
-                                 badgeText: badgeText === P('--on-accent'), r_on: ratio(on, ground), r_off: ratio(off, ground),
-                                 r_badge: ratio(badgeText, badge), r_sel: ratio(off, sel === 'rgba(0, 0, 0, 0)' ? ground : sel) }};
-                    }})()""")
-                    self.assertTrue(got["on"] and got["off"] and got["ground"] and got["badge"] and got["badgeText"], got)
-                    for k in ("r_on", "r_off", "r_sel"):
-                        self.assertGreaterEqual(got[k], 4.5, f"{theme}: {k} {got}")
-                    self.assertGreaterEqual(got["r_badge"], 3.0, f"{theme}: the badge {got}")      # 12 px bold on the accent: large-ish text
-                    if theme == "dark":
-                        time.sleep(0.4)
-                        self.shot("desktop-dark")
+            for gid, subscribed in ((self.rl, False), (self.gen, True)):
+                b.js(f"location.hash = 'g={gid}'")
+                self.wait(f"PaperMap.current.debug.cur().id === {J(gid)} && !!document.querySelector('#gh .gh-sub')"
+                          f" && document.querySelector('#gh .gh-sub').getAttribute('aria-pressed') === {J(str(subscribed).lower())}", "its header")
+                for theme in themes:
+                    with self.subTest(theme=theme, subscribed=subscribed):
+                        b.js(f"pcgTheme.set({J(theme)})")
+                        got = self.js(check)
+                        self.assertTrue(all(got[k] for k in ("on", "off", "ground", "dot", "pill", "words")), got)
+                        for k in ("r_on", "r_off", "r_words"):
+                            self.assertGreaterEqual(got[k], 4.5, f"{theme}: {k} {got}")
+                        self.assertGreaterEqual(got["r_dot"], 3.0, f"{theme}: the dot {got}")
+                        # Subscribe stands out of the map's ground; Subscribed is a quieter fill, but a fill (as YouTube's)
+                        self.assertGreaterEqual(got["r_pill"], 3.0 if not subscribed else 1.1, f"{theme}: the pill {got}")      # YouTube's own grey is 1.1:1
+                        if theme == "dark" and not subscribed:
+                            time.sleep(0.4)
+                            self.shot("desktop-dark")
         finally:
             b.js("pcgTheme.set('')")
 

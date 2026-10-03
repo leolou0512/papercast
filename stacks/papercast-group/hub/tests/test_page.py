@@ -59,7 +59,10 @@ TAP_TARGETS = r"""(() => {
   const q = 'a[href], button, input:not([type=hidden]), select, textarea, summary, label, [role=button], [role=link],' +
             ' [role=slider], [role=menuitem], [tabindex]:not([tabindex="-1"])';
   const bell = document.getElementById('bell-panel');
-  const top = !document.getElementById('overlay').hidden ? document.getElementById('overlay') : document.querySelector('.menu') || (bell && !bell.hidden ? bell : null);
+  // the layer on top: a modal dialog, the explainer, Up next, a menu, the bell's board
+  const top = document.querySelector('dialog[open]') || (!document.getElementById('overlay').hidden ? document.getElementById('overlay')
+    : !document.getElementById('q-overlay').hidden ? document.getElementById('q-overlay')
+    : document.querySelector('.menu') || (bell && !bell.hidden ? bell : null));
   const open = document.body.classList.contains('open'), gp = document.body.classList.contains('gpl-open');
   const phone = matchMedia('(max-width: 720px)').matches, map = !document.getElementById('map').hidden;
   const panes = [document.getElementById('win'), document.getElementById('gcol'), document.getElementById('gpl')];

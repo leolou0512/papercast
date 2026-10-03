@@ -49,7 +49,7 @@ STEPS = ["search", "subscribe", "play", "listened", "upnext", "transcript", "com
 # the control each step must spotlight, found on the page independently of the tour
 TARGETS = {
     "search": "document.querySelector('#gcol .search')",
-    "subscribe": "[...document.querySelectorAll('#gl .gl-sub')].find(e => e.getClientRects().length && getComputedStyle(e).visibility === 'visible')",
+    "subscribe": "[...document.querySelectorAll('#gh .gh-sub, #gpl-acts .gh-sub')].find(e => e.getClientRects().length && getComputedStyle(e).visibility === 'visible')",
     "play": "document.getElementById('p-play')",
     "listened": "document.getElementById('w-listened')",
     "upnext": "[...document.querySelectorAll('.menu [role=menuitem]')].find(b => b.textContent === 'Add to Up next')",
@@ -463,7 +463,10 @@ class TourPage(PageBase):
             self.assertEqual(bad, [], f"phone, the tour at {sid}:\n" + "\n".join(bad))
             if sid in ("play", "comments"):
                 self.assertTrue(self.js("document.body.classList.contains('open')"), "the paper's window, open over the list")
-            if sid in ("search", "subscribe", "settings", "help"):
+            if sid == "subscribe":
+                self.assertTrue(self.js("document.body.classList.contains('gpl-open') && !document.body.classList.contains('open')"),
+                                "subscribe: a graph's papers, its header's pill")
+            if sid in ("search", "settings", "help"):
                 self.assertFalse(self.js("document.body.classList.contains('open') || document.body.classList.contains('gpl-open')"
                                          " || !document.getElementById('map').hidden"), f"{sid}: the list of graphs, on top")
             if sid == "link":

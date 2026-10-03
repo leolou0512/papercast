@@ -177,6 +177,13 @@
       ctx.list();
       await waitFor(() => ctx.view() === "home", 1000);
     }
+    // A graph shown, with its header's Subscribe: on the map beside the list (a phone: its papers).
+    async function inGraph() {
+      ctx.closeMenu();
+      await mapClosed();
+      ctx.graph();
+      await waitFor(() => ctx.view() === "home", 1000);
+    }
     async function inPaper(pid) {
       ctx.closeMenu();
       await mapClosed();
@@ -222,8 +229,8 @@
     const STEPS = [
       { id: "search", text: () => "Search papers and graphs", prep: onList,
         at: () => shown(document.querySelector("#gcol .search")) },
-      { id: "subscribe", text: () => "Subscribe to a graph", prep: onList,
-        at: () => [...document.querySelectorAll("#gl .gl-sub")].map(shown).find(Boolean) || null },
+      { id: "subscribe", text: () => "Subscribe to a graph", prep: inGraph,
+        at: () => shown(document.querySelector("#gh .gh-sub")) || shown(document.querySelector("#gpl-acts .gh-sub")) },
       { id: "play", need: "audio", text: () => "Play the episode", prep: () => inPaper(T.audio),
         at: () => shown($("w-play")) || shown($("p-play")) },
       { id: "listened", need: "audio", text: () => "Tick it when you’ve listened", prep: () => inPaper(T.audio),

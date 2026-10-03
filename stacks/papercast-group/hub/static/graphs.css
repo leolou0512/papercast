@@ -29,20 +29,18 @@ body.v-paper .window, body.v-settings .window, body.v-listening .window { visibi
 .gl-h { margin: 12px 16px 2px; font-size: 12px; line-height: 16px; font-weight: 500; color: var(--text-2); letter-spacing: .02em; }
 .gl-list { list-style: none; margin: 0; padding: 0; }
 .gl-row { display: flex; align-items: stretch; }
-.gl-open { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 6px 4px 6px 16px; text-align: left;
+.gl-open { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 6px 16px; text-align: left;
   color: var(--text-2); font-size: 15px; line-height: 20px; }
 .gl-row.on .gl-open { color: var(--text); }
-.gl-open:hover, .gl-sub:hover { background: var(--hover); }
+.gl-open:hover { background: var(--hover); }
 .gl-row.cur .gl-open { background: var(--sel); }
 .gl-row.on.cur .gl-open { font-weight: 600; }
 .gl-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gl-lock { flex: none; display: grid; color: var(--text-2); }
 .gl-n { flex: none; min-width: 24px; text-align: right; font-size: 13px; color: var(--text-2); font-weight: 400; }
-.gl-new { flex: none; padding: 1px 7px; border-radius: 10px; background: var(--accent); color: var(--on-accent); font-size: 12px; line-height: 17px; font-weight: 600; }
-.gl-sub { flex: none; width: 44px; display: grid; place-items: center; color: var(--text-2); margin-right: 4px; }
-.gl-row.on .gl-sub { color: var(--accent); }
-.gl-sub-sp { flex: none; width: 48px; }
-.gl-row.cur .gl-sub { background: var(--sel); }
+/* new papers since it was last opened: YouTube's dot at the row's end, in the accent (its count in the title) */
+.gl-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; }
+.gl-dot.on { background: var(--accent); }
 .gl-none { margin-top: 12px; border-top: 1px solid var(--hairline); padding-top: 4px; }
 .gl-none .gl-open { font-style: italic; }
 .gl-newb { display: block; margin: 8px 0 0; padding: 0 16px; height: 44px; color: var(--accent); font-size: 14px; font-weight: 500; }
@@ -70,12 +68,23 @@ body.v-paper .window, body.v-settings .window, body.v-listening .window { visibi
 .gh-name { margin: 0; font-size: 17px; line-height: 22px; font-weight: 700; color: var(--pm-text, var(--text)); min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gh-lock { flex: none; display: grid; color: var(--text-2); }
-.gh-sub { flex: none; display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px 0 8px; border-radius: 16px;
-  border: 1px solid var(--hairline); background: var(--bg); color: var(--text-2); font-size: 13px; font-weight: 600; white-space: nowrap; }
-.gh-sub:hover { color: var(--text); background: var(--hover); }
-.gh-sub.on { color: var(--accent); border-color: var(--accent); }
-.gh-i { display: grid; }
-.gh-i svg { width: 18px; height: 18px; }
+/* YouTube's pill (Leo): Subscribe solid in the text colour (black on a light theme, white on a dark
+   one), Subscribed a neutral grey (the theme's track grey: seen on the page and on the phone's
+   header alike); 36 px tall, 16 px either side */
+.gh-sub { flex: none; display: inline-flex; align-items: center; justify-content: center; height: 36px; padding: 0 16px; border-radius: 18px;
+  border: 0; background-color: var(--text); color: var(--bg); font-size: 14px; line-height: 20px; font-weight: 500; white-space: nowrap; }
+.gh-sub.on { background-color: var(--track); color: var(--text); }
+.gh-sub:hover { box-shadow: inset 0 0 0 100px rgba(127, 127, 127, .22); }
+/* its "Unsubscribe from …?" */
+.gh-dlg { width: min(360px, calc(100% - 32px)); box-sizing: border-box; padding: 0; margin: auto; border: 1px solid var(--hairline);
+  border-radius: 12px; background: var(--bg); color: var(--text); box-shadow: 0 12px 36px rgba(0, 0, 0, .24); }
+.gh-dlg::backdrop { background: var(--scrim, rgba(0, 0, 0, .32)); }
+.gh-dlg-in { padding: 20px 20px 10px; }
+.gh-dlg-h { margin: 0; font-size: 16px; line-height: 22px; font-weight: 400; overflow-wrap: anywhere; }
+.gh-dlg-act { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.gh-dlg-act .text-btn { margin: 0; padding: 0 12px; min-width: 44px; border-radius: 18px; font-weight: 500; }
+.gh-dlg-act .text-btn:hover { background: var(--hover); }
+.gh-dlg-yes { color: var(--accent) !important; }
 .pm-col .pm-head { align-items: center; overflow: hidden; }          /* a narrow bar: the name gives way, nothing overlaps */
 
 /* ---------- the board, from the bell ---------- */
@@ -106,7 +115,6 @@ body.v-paper .window, body.v-settings .window, body.v-listening .window { visibi
   .gpl-top { position: sticky; top: 0; z-index: 2; gap: 4px; justify-content: flex-start; }
   .gpl-name { flex: 1; min-width: 0; margin: 0 4px; font-size: 17px; line-height: 22px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .gpl-acts { flex: none; display: flex; }
-  .gpl-acts .gh-sub { height: 44px; border-color: transparent; background: transparent; padding: 0 8px; }
   .gpl-map { flex: none; margin: 0; padding: 0 12px; min-width: 44px; color: var(--accent); font-weight: 600; }
   .gpl-rows { list-style: none; margin: 0; padding: 4px 0 96px; }
   .gpl-row { display: flex; align-items: center; }
@@ -118,9 +126,9 @@ body.v-paper .window, body.v-settings .window, body.v-listening .window { visibi
   .gpl-heard { flex: none; display: grid; place-items: center; width: 44px; }
   .gpl-empty { padding: 24px 16px; color: var(--text-2); font-size: 14px; }
   .gl-open { font-size: 16px; }
-  .gh-sub { height: 44px; border-radius: 22px; }
+  /* a 44 px tap, the pill drawn 36 px inside it */
+  .gh-sub { height: 44px; padding: 0 14px; border: 4px solid transparent; border-radius: 22px; background-clip: padding-box; }
+  .gh-sub:hover { box-shadow: none; }
   #map.pm-page .gh-name { font-size: 16px; }
-  #map.pm-page .gh-sub { width: 44px; padding: 0; justify-content: center; border-color: transparent; background: transparent; }
-  #map.pm-page .gh-sub > span:last-child { display: none; }       /* the drawing's bar is narrow: the toggle's icon alone */
   .bell-panel { left: 8px !important; right: 8px; width: auto; }
 }

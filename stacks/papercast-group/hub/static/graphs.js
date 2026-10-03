@@ -25,9 +25,6 @@
     return e;
   }
   const IC = {
-    sub: (on) => (on
-      ? `<svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="8.2" fill="currentColor"/><path d="m6.4 10.3 2.5 2.5 4.8-5.2" fill="none" stroke="var(--bg)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>`
-      : `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="10" cy="10" r="7.6"/><path d="M10 6.6v6.8M6.6 10h6.8"/></svg>`),
     lock: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>`,
     sort: `<svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3.5 5.5h13M3.5 10h9M3.5 14.5h5"/></svg>`,
     back: `<svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4 7 11l7 7"/></svg>`,
@@ -46,6 +43,7 @@
 
   function mount(ctx) {
     const G = { list: [], unfiled: null, sort: "updated", sortMine: false, last: null, loaded: false, cur: null, q: "", seq: 0, res: null, all: false,
+      mine: new Map(),        // gid -> {on, at}: this page's own toggle, and when the hub took it
       timer: null, form: false, busy: false, pend: new Map(), papersFor: null, data: new Map() };
     const mineOf = (g) => (g.created_by && ctx.me() && g.created_by.id === ctx.me().id ? 1 : 0);
     const ORDER = {
@@ -57,11 +55,16 @@
 
     // ------------------------------------------------------------------ the hub's list
     // As the map reads it (GET /api/graphs): the graphs with this person's fields, Not in any
-    // graph, and the account's choices. A toggle on its way stays over what a list says meanwhile.
-    function setList(r) {
+    // graph, and the account's choices. A toggle on its way, or one the hub took after the list was
+    // asked for (`asked`, ms), stays over what the list says.
+    function setList(r, asked) {
       if (!r || !Array.isArray(r.graphs)) return;
       G.list = r.graphs.filter((g) => g && typeof g.id === "string");
-      for (const g of G.list) if (G.pend.has(g.id)) g.subscribed = G.pend.get(g.id);
+      for (const g of G.list) {
+        const m = G.mine.get(g.id);
+        if (G.pend.has(g.id)) g.subscribed = G.pend.get(g.id);
+        else if (m && asked != null && asked <= m.at) g.subscribed = m.on;
+      }
       G.unfiled = r.unfiled && r.unfiled.id ? r.unfiled : null;
       if (r.ui) {
         // the account's sort until one is picked here: after that this page's own choice stands
@@ -120,24 +123,47 @@
       let j = null;
       try { j = await ctx.api("PUT", `/api/graphs/${encodeURIComponent(gid)}/subscription`, { subscribed: on }); }
       catch (e) { if (G.pend.get(gid) === on) { G.pend.delete(gid); const x = item(gid); if (x) x.subscribed = was; } ctx.toast(e.message); render(); renderHead(); renderPapers(); return; }
-      if (G.pend.get(gid) === on) G.pend.delete(gid);
+      if (G.pend.get(gid) === on) { G.pend.delete(gid); G.mine.set(gid, { on, at: Date.now() }); }
       if (j && j.graph && j.graph.id === gid && !G.pend.has(gid)) {
         const i = G.list.findIndex((x) => x.id === gid);
         if (i >= 0) G.list[i] = j.graph;
       }
       render(); renderHead(); renderPapers();
     }
-    function subBtn(g, cls) {
-      const on = !!g.subscribed;
-      return el("button", { type: "button", class: cls || "gl-sub", "aria-pressed": String(on), "aria-label": `Subscribe to ${g.name}`,
-        title: on ? "Subscribed" : "Subscribe", html: IC.sub(on), onclick: (e) => { e.stopPropagation(); toggle(g.id, !on); } });
-    }
     // The graph's own header (on the map, and above a phone's list of its papers): its name, and
-    // the same toggle, with its word.
+    // YouTube's pill (Leo): "Subscribe", solid in the text colour; "Subscribed", grey, which asks
+    // before it unsubscribes.
     function pill(g) {
       const on = !!g.subscribed;
       return el("button", { type: "button", class: `gh-sub${on ? " on" : ""}`, "aria-pressed": String(on), "aria-label": `Subscribe to ${g.name}`,
-        onclick: () => toggle(g.id, !on) }, el("span", { class: "gh-i", html: IC.sub(on) }), el("span", { text: on ? "Subscribed" : "Subscribe" }));
+        onclick: () => { if (on) askUnsubscribe(g); else toggle(g.id, true); } }, on ? "Subscribed" : "Subscribe");
+    }
+    // "Unsubscribe from <graph>?", Cancel or Unsubscribe (a real dialog: Escape and a click outside cancel).
+    const dlg = el("dialog", { class: "gh-dlg", id: "gh-dlg", "aria-labelledby": "gh-dlg-h" });
+    const dlgH = el("h2", { class: "gh-dlg-h", id: "gh-dlg-h" });
+    const dlgNo = el("button", { type: "button", class: "text-btn gh-dlg-no", id: "gh-dlg-no", text: "Cancel", onclick: () => dlg.close() });
+    const dlgYes = el("button", { type: "button", class: "text-btn gh-dlg-yes", id: "gh-dlg-yes", text: "Unsubscribe" });
+    dlg.append(el("div", { class: "gh-dlg-in" }, dlgH, el("div", { class: "gh-dlg-act" }, dlgNo, dlgYes)));
+    document.body.append(dlg);
+    let dlgFor = null, dlgBack = null;
+    dlgYes.addEventListener("click", () => { const gid = dlgFor; dlg.close(); if (gid) toggle(gid, false); });
+    dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); });       // outside the box: its backdrop
+    dlg.addEventListener("close", () => {
+      if (dlg.open) return;                // (late: it was opened again since, for another ask)
+      dlgFor = null;
+      // back to the pill it came from (drawn again meanwhile, it may be a new one: the one on the screen)
+      const b = dlgBack && dlgBack.isConnected && dlgBack.classList.contains("gh-sub") ? dlgBack
+        : [...document.querySelectorAll("#gh .gh-sub, #gpl-acts .gh-sub")].find((x) => x.getClientRects().length);
+      dlgBack = null;
+      if (b && b.getClientRects().length) b.focus({ preventScroll: true });
+    });
+    function askUnsubscribe(g) {
+      if (dlg.open) return;
+      dlgFor = g.id;
+      dlgBack = document.activeElement;
+      dlgH.textContent = `Unsubscribe from ${g.name}?`;
+      try { dlg.showModal(); } catch (e) { dlg.setAttribute("open", ""); }
+      dlgNo.focus();
     }
     const head = el("div", { class: "gh", id: "gh" });
     function renderHead() {
@@ -154,15 +180,16 @@
       const cur = g.id === G.cur, n = Number(g.n) || 0, fresh = g.subscribed && g.new > 0;
       const name = el("span", { class: "gl-name" });
       if (Array.isArray(parts) && parts.length) name.append(...marked(parts)); else name.textContent = g.name;
-      const label = [g.name, `${n} ${n === 1 ? "paper" : "papers"}`, g.locked ? "locked" : "", fresh ? `${g.new} new` : ""].filter(Boolean).join(", ");
-      const open = el("button", { type: "button", class: "gl-open", "aria-label": label, "aria-current": cur ? "true" : null,
-        onclick: () => ctx.openGraph(g.id) },
+      const freshT = fresh ? `${g.new} new ${g.new === 1 ? "paper" : "papers"}` : "";
+      const label = [g.name, `${n} ${n === 1 ? "paper" : "papers"}`, g.locked ? "locked" : "", freshT].filter(Boolean).join(", ");
+      // as YouTube's subscriptions: no toggle on the row; new papers, a dot at its end (its words in the title)
+      const open = el("button", { type: "button", class: "gl-open", "aria-label": label, title: freshT || null,
+        "aria-current": cur ? "true" : null, onclick: () => ctx.openGraph(g.id) },
       name,
       g.locked ? el("span", { class: "gl-lock", html: IC.lock }) : null,
-      fresh ? el("span", { class: "gl-new t", text: `${g.new} new` }) : null,
-      el("span", { class: "gl-n t", text: String(n) }));
-      return el("li", { class: `gl-row${g.subscribed ? " on" : ""}${g.pseudo ? " pseudo" : ""}${cur ? " cur" : ""}`, "data-id": g.id },
-        open, g.pseudo ? el("span", { class: "gl-sub-sp" }) : subBtn(g));
+      el("span", { class: "gl-n t", text: String(n) }),
+      el("span", { class: `gl-dot${fresh ? " on" : ""}`, "aria-hidden": "true" }));
+      return el("li", { class: `gl-row${g.subscribed ? " on" : ""}${g.pseudo ? " pseudo" : ""}${cur ? " cur" : ""}`, "data-id": g.id }, open);
     }
     // A title or a name, with what matched marked: text nodes and <mark> (never HTML).
     function marked(parts) {

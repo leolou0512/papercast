@@ -25,7 +25,7 @@ from . import db
 log = logging.getLogger("pcg")
 
 # Owners add their module here (SPEC.md section 1); nothing else in this file is theirs.
-ROUTE_MODULES = ["auth", "accounts", "web", "contrib", "voiceq", "graph", "player", "social", "voices", "customvoice", "slack", "search", "tour", "avatars", "listening", "scriptswap"]
+ROUTE_MODULES = ["auth", "accounts", "web", "contrib", "voiceq", "graph", "player", "social", "voices", "customvoice", "slack", "search", "tour", "avatars", "listening", "scriptswap", "graphlist"]
 JSON_MAX = 256 * 1024
 # Leo's page CSP (stacks/papercast/web/app.py PAGE_CSP): no inline script or style.
 PAGE_CSP = ("default-src 'self'; img-src 'self' data:; media-src 'self'; style-src 'self'; "

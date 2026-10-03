@@ -36,7 +36,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import avatars, db, events, listening, search, voices
+from . import avatars, db, events, graph, listening, search, voices
 from .app import HTTPError
 
 try:
@@ -187,12 +187,14 @@ def _ep_view(e, uid: int, admin: bool, epdir: Path) -> dict:
     }
 
 
-def _paper_view(p, eps: list) -> dict:
+def _paper_view(p, eps: list, heard: set = frozenset(), graphs: list = ()) -> dict:
     return {
         "id": p["id"], "title": p["title"], "authors": db.loads(p["authors"], []) or [], "year": p["year"],
         "arxiv_id": p["arxiv_id"], "doi": p["doi"], "url": p["url"], "tags": db.loads(p["tags"], []) or [],
         "created_at": p["created_at"], "added_at": min(e["created_at"] for e in eps) if eps else p["created_at"],
         "listened": p["listened_at"] is not None, "listened_at": p["listened_at"], "episodes": eps,
+        # heard: ticked, or a version finished (graph.heard); graphs: the graphs it is in, oldest first
+        "heard": p["listened_at"] is not None or p["id"] in heard, "graphs": list(graphs),
     }
 
 
@@ -214,7 +216,13 @@ def library(cfg, uid: int, admin: bool, q: str | None = None, pids: list | None 
         v = _ep_view(e, uid, admin, cfg.episodes)
         v["made_by"]["avatar"] = av.get(e["made_by"])       # the maker's picture (avatars.py)
         by_paper.setdefault(e["paper_id"], []).append(v)
-    out = [_paper_view(p, by_paper[p["id"]]) for p in _paper_rows(uid, pids) if p["id"] in by_paper]
+    done = graph.heard(uid) if uid is not None else set()
+    w = graph._world()
+    inside: dict = {}
+    for gid, m in w.members.items():
+        for pid in m:
+            inside.setdefault(pid, []).append(gid)
+    out = [_paper_view(p, by_paper[p["id"]], done, inside.get(p["id"], ())) for p in _paper_rows(uid, pids) if p["id"] in by_paper]
     voices.decorate(out, cfg, uid, admin)       # each episode's `voice` (voices.py)
     words = (q or "").lower().split()
     if words:
@@ -272,7 +280,10 @@ def get_library(req):
                 v["match"] = res["match"][pid]
             papers.append(v)
     res["info"]["n"] = len(papers)
-    req.send_json(200, {"papers": papers, "search": res["info"]})
+    out = {"papers": papers, "search": res["info"]}
+    if q.strip():
+        out["graphs"] = search.graph_hits(cfg, q)      # the graph list's one search box finds graphs too
+    req.send_json(200, out)
 
 
 def get_paper(req, pid):
@@ -339,6 +350,8 @@ def delete_episode(req, eid):
     now = db.now()
     db.conn().execute("UPDATE episodes SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
                       (now, now, eid))
+    if not db.conn().execute(f"SELECT 1 FROM episodes e WHERE e.paper_id = ? AND {LIVE}", (e["paper_id"],)).fetchone():
+        graph.touch_for_paper(e["paper_id"])        # it left its graphs: they changed (the graph list's "recently updated")
     events.publish("episode", {"id": eid, "episode_id": eid, "paper_id": e["paper_id"], "deleted": True})
     until = datetime.now(timezone.utc) + timedelta(days=UNDO_DAYS)
     req.send_json(200, {"id": eid, "paper_id": e["paper_id"], "deleted_at": now,
@@ -355,7 +368,10 @@ def undelete_episode(req, eid):
     if e["deleted_at"]:
         if time.time() * 1000 - _ms(e["deleted_at"]) > UNDO_DAYS * 86_400_000:
             raise HTTPError(410, "undo_expired", "Too late: it is deleted.")
+        back = not db.conn().execute(f"SELECT 1 FROM episodes e WHERE e.paper_id = ? AND {LIVE}", (e["paper_id"],)).fetchone()
         db.conn().execute("UPDATE episodes SET deleted_at = NULL, updated_at = ? WHERE id = ?", (db.now(), eid))
+        if back:
+            graph.touch_for_paper(e["paper_id"])
         events.publish("episode", {"id": eid, "episode_id": eid, "paper_id": e["paper_id"], "deleted": False})
     req.send_json(200, _one(req, e["paper_id"]))
 

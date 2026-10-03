@@ -326,12 +326,48 @@ def _m6_script_changes(c) -> None:
     c.execute("CREATE INDEX IF NOT EXISTS script_changes_episode ON script_changes(episode_id, id)")
 
 
+# The graph list's per-person tables (hub/graphlist.py; its ensure_schema runs these too).
+GRAPH_LIST_TABLES = [
+    """CREATE TABLE IF NOT EXISTS graph_subs (       -- a person's subscription to a graph: their own toggle
+         user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+         graph_id TEXT NOT NULL REFERENCES graphs(id),
+         at TEXT NOT NULL,
+         PRIMARY KEY (user_id, graph_id))""",
+    """CREATE TABLE IF NOT EXISTS graph_seen (       -- when a person last opened a graph: its "3 new" counts from here
+         user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+         graph_id TEXT NOT NULL REFERENCES graphs(id),
+         at TEXT NOT NULL,
+         PRIMARY KEY (user_id, graph_id))""",
+    """CREATE TABLE IF NOT EXISTS ui_state (         -- the page's choices, per account (a browser is shared)
+         user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+         last_graph TEXT,                            -- the graph open last: a graph's id, or 'none'
+         sort TEXT,                                  -- the graph list's sort (graphlist.SORTS)
+         updated_at TEXT NOT NULL)""",
+]
+
+
+def _m7_graph_list(c) -> None:
+    """The graph list (hub/graphlist.py): graphs.updated_at, set by every change to a graph
+    (graph.py's _bump; NULL until the first: its created_at stands for it), graph_members.at, when
+    a paper was added to a graph by hand or taken out (NULL for the rows from before), and the
+    tables of GRAPH_LIST_TABLES. Each person starts subscribed to the graphs they made and to
+    nothing else: the seed graphs have no maker, so nobody is subscribed to them."""
+    _add_column(c, "graphs", "updated_at", "TEXT")
+    _add_column(c, "graph_members", "at", "TEXT")
+    for stmt in GRAPH_LIST_TABLES:
+        c.execute(stmt)
+    c.execute("INSERT OR IGNORE INTO graph_subs(user_id, graph_id, at) "
+              "SELECT g.created_by, g.id, g.created_at FROM graphs g JOIN users u ON u.id = g.created_by "
+              "WHERE g.deleted_at IS NULL")
+
+
 MIGRATIONS = [
     (2, _m2_paper_label),
     (3, _m3_indexes),
     (4, _m4_runtime_columns),
     (5, _m5_password_auth),
     (6, _m6_script_changes),
+    (7, _m7_graph_list),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0] if MIGRATIONS else 1      # what migrate() brings a database to
 

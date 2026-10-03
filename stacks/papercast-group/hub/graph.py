@@ -190,7 +190,9 @@ def ensure_schema() -> None:
             if stmt.strip():
                 c.execute(stmt)
         for table, col, decl in (("papers", "label", "TEXT"),          # a short name; null: automatic
-                                 ("pending_links", "influential", "INTEGER")):   # Semantic Scholar's isInfluential
+                                 ("pending_links", "influential", "INTEGER"),    # Semantic Scholar's isInfluential
+                                 ("graphs", "updated_at", "TEXT"),             # db.py migration 7: the last change
+                                 ("graph_members", "at", "TEXT")):             # ... and when a paper was added by hand
             if col not in {r[1] for r in c.execute(f"PRAGMA table_info({table})")}:
                 try:
                     c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
@@ -325,7 +327,8 @@ def _norm_doi(v):
 class _World:
     """Everything a graph answer is made from, read in one snapshot; rebuilt only when the
     database's signature changes."""
-    __slots__ = ("sig", "users", "papers", "graphs", "how", "members", "links", "pos", "lstate", "revs", "sugg")
+    __slots__ = ("sig", "users", "papers", "graphs", "how", "how_at", "members", "links", "pos", "lstate", "revs", "sugg",
+                 "joins", "unfiled")
 
 
 _world_cache = None
@@ -344,8 +347,8 @@ _SIG_SQL = """SELECT
  (SELECT count(*) || ':' || total(rev) FROM graph_rev),
  (SELECT count(*) || ':' || total(state = 'open') || ':' || coalesce(max(id), 0) FROM link_suggestions),
  (SELECT count(*) || ':' || total(length(name)) || ':' || total(locked) || ':' || count(deleted_at)
-         || ':' || total(length(rule_tags)) FROM graphs),
- (SELECT count(*) || ':' || total(length(how)) FROM graph_members),
+         || ':' || total(length(rule_tags)) || ':' || coalesce(max(updated_at), '') FROM graphs),
+ (SELECT count(*) || ':' || total(length(how)) || ':' || coalesce(max(at), '') FROM graph_members),
  (SELECT count(*) || ':' || total(state = 'active') || ':' || total(length(grade)) FROM links)"""
 
 
@@ -366,19 +369,21 @@ def _world() -> _World:
         w.sig = sig
         w.users = {r["id"]: r["name"] for r in c.execute("SELECT id, name FROM users")}
         papers = {}
-        for r in c.execute("SELECT id, title, title_norm, year, arxiv_id, doi, tags, label FROM papers"):
+        for r in c.execute("SELECT id, title, title_norm, year, arxiv_id, doi, tags, label, created_at FROM papers"):
             tags = db.loads(r["tags"], []) or []
             papers[r["id"]] = {
                 "id": r["id"], "title": r["title"], "title_norm": r["title_norm"], "year": r["year"],
                 "arxiv_id": r["arxiv_id"], "doi": r["doi"], "label_set": r["label"],
                 "tags": {t.strip().lower() for t in tags if isinstance(t, str) and t.strip()},
-                "made_by": [], "episodes": 0, "live": 0, "ready": False}
-        for r in c.execute("SELECT paper_id, made_by, state, deleted_at FROM episodes ORDER BY created_at, rowid"):
+                "made_by": [], "episodes": 0, "live": 0, "ready": False, "since": r["created_at"]}
+        for r in c.execute("SELECT paper_id, made_by, state, deleted_at, created_at FROM episodes ORDER BY created_at, rowid"):
             p = papers.get(r["paper_id"])
             if p is None:
                 continue
             p["episodes"] += 1
             if r["deleted_at"] is None and r["state"] != "rejected":
+                if not p["live"]:
+                    p["since"] = r["created_at"]      # in the library from its first live version on
                 p["live"] += 1
                 name = w.users.get(r["made_by"])
                 if name and name not in p["made_by"]:
@@ -392,15 +397,18 @@ def _world() -> _World:
             p["okey"] = _okey(p)
         w.papers = papers
         w.graphs = {}
-        for r in c.execute("SELECT id, name, rule_tags, locked, created_by, created_at FROM graphs "
+        for r in c.execute("SELECT id, name, rule_tags, locked, created_by, created_at, updated_at FROM graphs "
                            "WHERE deleted_at IS NULL ORDER BY created_at, rowid"):
             w.graphs[r["id"]] = {"id": r["id"], "name": r["name"], "tags": _clean_tags(db.loads(r["rule_tags"], [])),
                                  "locked": bool(r["locked"]), "created_by": r["created_by"],
-                                 "created_at": r["created_at"]}
-        w.how = defaultdict(dict)
-        for r in c.execute("SELECT graph_id, paper_id, how FROM graph_members"):
+                                 "created_at": r["created_at"], "updated_at": r["updated_at"] or r["created_at"]}
+        w.how, w.how_at = defaultdict(dict), defaultdict(dict)
+        for r in c.execute("SELECT graph_id, paper_id, how, at FROM graph_members"):
             w.how[r[0]][r[1]] = r[2]
+            if r[3]:
+                w.how_at[r[0]][r[1]] = r[3]
         w.members = {gid: _members(g, w.how.get(gid, {}), papers) for gid, g in w.graphs.items()}
+        w.joins, w.unfiled = {}, None
         w.links = [dict(r) for r in c.execute(
             "SELECT l.id, l.src, l.dst, l.grade, l.origin, l.created_at, l.created_by, u.name AS by_name "
             "FROM links l LEFT JOIN users u ON u.id = l.created_by WHERE l.state = 'active' ORDER BY l.id")]
@@ -468,6 +476,60 @@ def graph_ids() -> list:
     return list(_world().graphs)
 
 
+# ---------------------------------------------------------------- the graph list's facts
+# When each member joined (graphlist.py: "3 new", "newest paper added", "recently updated"): a
+# paper added by hand when it was added (graph_members.at), one there by its tags when it came
+# into the library (its first live version; a row from before migration 7 has no time either:
+# that too), never before it came. "Not in any graph" (UNFILED): the papers with a live version
+# that no graph shows.
+
+UNFILED = "none"
+UNFILED_NAME = "Not in any graph"
+
+
+def unfiled(w: _World | None = None) -> set:
+    w = w or _world()
+    if w.unfiled is None:
+        inside = set().union(*w.members.values()) if w.members else set()
+        w.unfiled = {pid for pid, p in w.papers.items() if p["live"] > 0 and pid not in inside}
+    return w.unfiled
+
+
+def joins(w: _World, gid: str) -> list:
+    """The times graph gid's members joined it, oldest first (cached with the snapshot)."""
+    got = w.joins.get(gid)
+    if got is None:
+        mem = unfiled(w) if gid == UNFILED else w.members.get(gid, set())
+        at = w.how_at.get(gid, {})
+        got = sorted(max(at.get(pid) or "", w.papers[pid]["since"] or "") for pid in mem)
+        w.joins[gid] = got
+    return got
+
+
+def updated_at(w: _World, gid: str):
+    """The graph's last change: an edit to it (graphs.updated_at), or a paper that joined it."""
+    j = joins(w, gid)
+    g = w.graphs.get(gid)
+    return max([x for x in ((g or {}).get("updated_at"), j[-1] if j else None) if x], default=None)
+
+
+def touch_for_paper(pid: str) -> None:
+    """A paper left the library or came back (its last live version deleted, or one brought
+    back): the graphs that show it (by its tags or added by hand, not taken out) changed now."""
+    ensure_schema()
+    c = db.conn()
+    p = c.execute("SELECT tags FROM papers WHERE id = ?", (pid,)).fetchone()
+    if p is None:
+        return
+    tags = set(_clean_tags(db.loads(p["tags"], [])))
+    how = dict(c.execute("SELECT graph_id, how FROM graph_members WHERE paper_id = ?", (pid,)).fetchall())
+    gids = [r["id"] for r in c.execute("SELECT id, rule_tags FROM graphs WHERE deleted_at IS NULL")
+            if how.get(r["id"]) == "added"
+            or (how.get(r["id"]) is None and tags & set(_clean_tags(db.loads(r["rule_tags"], []))))]
+    if gids:
+        c.execute(f"UPDATE graphs SET updated_at = ? WHERE id IN ({','.join('?' * len(gids))})", (db.now(), *gids))
+
+
 # ---------------------------------------------------------------- revisions
 # Every graph has a revision that goes up by one with every change touching it: its members, the
 # links among them, its name, tags or lock, a label of one of its papers, its deletion, and the
@@ -508,6 +570,7 @@ def _bump(c, gids, user_id, actor, log_id=None) -> dict:
         return {}
     w = _world()                    # inside the transaction: the state after the change
     at, out = db.now(), {}
+    c.execute(f"UPDATE graphs SET updated_at = ? WHERE id IN ({','.join('?' * len(gids))})", (at, *gids))
     for gid in gids:
         r = c.execute("SELECT rev FROM graph_rev WHERE graph_id = ?", (gid,)).fetchone()
         rev = (r[0] if r else 0) + 1
@@ -652,20 +715,55 @@ def _provisional(ids: list, links: list, stored: dict):
 def _graph_item(w: _World, g: dict, user=None) -> dict:
     mem = w.members.get(g["id"], set())
     cb = g["created_by"]
+    j = joins(w, g["id"])
     out = {"id": g["id"], "name": g["name"], "tags": g["tags"], "locked": g["locked"], "n": len(mem),
            "links": sum(1 for l in w.links if l["src"] in mem and l["dst"] in mem),
            "suggestions": sum(1 for x in w.sugg if x["src"] in mem and x["dst"] in mem),
            "created_by": {"id": cb, "name": w.users.get(cb)} if cb is not None else None,
-           "created_at": g["created_at"],
+           "created_at": g["created_at"], "updated_at": updated_at(w, g["id"]), "newest_at": j[-1] if j else None,
            "rev": (w.revs.get(g["id"]) or {}).get("rev", 0), "changed": _changed_by(w, w.revs.get(g["id"]))}
     if user is not None:
         out.update(_perms(g, user))
     return out
 
 
+def _unfiled_item(w: _World, user=None) -> dict:
+    """"Not in any graph", as a graph's item: nobody makes, changes or subscribes to it; the
+    links among its papers are everyone's, as anywhere."""
+    mem = unfiled(w)
+    j = joins(w, UNFILED)
+    out = {"id": UNFILED, "name": UNFILED_NAME, "pseudo": True, "tags": [], "locked": False, "n": len(mem),
+           "links": sum(1 for l in w.links if l["src"] in mem and l["dst"] in mem), "suggestions": 0,
+           "created_by": None, "created_at": None, "updated_at": j[-1] if j else None, "newest_at": j[-1] if j else None,
+           "rev": None, "changed": None}
+    if user is not None:
+        out.update(can_edit=False, can_delete=False, can_link=True)
+    return out
+
+
+def _may_change(g, user) -> bool:
+    """Who changes a graph (its papers, name, tags, deletion; not the links among its papers,
+    which are everyone's): an admin; else, while it is not locked, its maker, or anyone for a
+    graph nobody made (the seed graphs). `g`: a graph row or the world's graph."""
+    if _is_admin(user):
+        return True
+    if g["locked"]:
+        return False
+    return g["created_by"] is None or (user is not None and g["created_by"] == user.get("id"))
+
+
+def _check_change(g, user) -> None:
+    if _may_change(g, user):
+        return
+    if g["locked"]:
+        raise _locked_error(g["name"])
+    raise HTTPError(403, "not_yours", f"only the maker of “{g['name']}” or an admin can change it")
+
+
 def _perms(g: dict, user) -> dict:
-    edit = _is_admin(user) or not g["locked"]
-    return {"can_edit": edit, "can_delete": edit and (_is_admin(user) or g["created_by"] == user.get("id"))}
+    change = _may_change(g, user)
+    return {"can_edit": change, "can_delete": change and (_is_admin(user) or g["created_by"] == user.get("id")),
+            "can_link": _is_admin(user) or not g["locked"]}
 
 
 def _lazy_rev(gid: str, row, sig: str) -> None:
@@ -689,22 +787,24 @@ def _view(gid: str, _again: int = 0):
     hit = _views.get(gid)
     if hit is not None and hit[0] == w.sig:
         return hit[1]
+    pseudo = gid == UNFILED
     g = w.graphs.get(gid)
-    if g is None:
+    if g is None and not pseudo:
         return None
-    mem = w.members[gid]
+    mem = unfiled(w) if pseudo else w.members[gid]
     ids = sorted(mem, key=lambda i: w.papers[i]["okey"])
-    links = _glinks(w, gid)
+    links = [l for l in w.links if l["src"] in mem and l["dst"] in mem] if pseudo else _glinks(w, gid)
     sig = layout_sig(ids, [(l["src"], l["dst"]) for l in links])
     rrow = w.revs.get(gid)
-    if (rrow is None or rrow.get("sig") != sig) and _again < 3 and not db.conn().in_transaction:
+    if not pseudo and (rrow is None or rrow.get("sig") != sig) and _again < 3 and not db.conn().in_transaction:
         _lazy_rev(gid, rrow, sig)
         return _view(gid, _again + 1)
     deg = defaultdict(int)
     for l in links:
         deg[l["src"]] += 1
         deg[l["dst"]] += 1
-    pos, placed = _provisional(ids, links, w.pos.get(gid, {}))
+    # "Not in any graph" has no stored layout (the layout table is per graph): the provisional one
+    pos, placed = _provisional(ids, links, {} if pseudo else w.pos.get(gid, {}))
     info = lineage(ids, links, w.papers)
     nodes = []
     for i in ids:
@@ -712,10 +812,11 @@ def _view(gid: str, _again: int = 0):
         x, y = pos[i]
         nodes.append({"id": i, "label": p["label"], "title": p["title"], "year": p["year"],
                       "made_by": list(p["made_by"]), "x": round(x, 1), "y": round(y, 1), "deg": deg[i],
-                      "placed": i in placed, "ready": p["ready"]})
+                      "placed": i in placed, "ready": p["ready"],
+                      "in": [k for k, m in w.members.items() if i in m]})       # every graph it is in
     st = w.lstate.get(gid) or {}
-    current = st.get("sig") == sig and len(placed) == len(ids)
-    item = _graph_item(w, g)
+    current = pseudo or (st.get("sig") == sig and len(placed) == len(ids))
+    item = _unfiled_item(w) if pseudo else _graph_item(w, g)
     view = {"graph": item, "rev": item["rev"],
             "nodes": nodes,
             "links": [{"id": l["id"], "src": l["src"], "dst": l["dst"], "grade": l["grade"], "origin": l["origin"],
@@ -736,19 +837,36 @@ def _view(gid: str, _again: int = 0):
     return view
 
 
+def heard(uid) -> set:
+    """The papers this person has heard (DESIGN.md decision 9): ticked as listened, or one of its
+    versions finished (listening.py's listen_finished, any version)."""
+    from . import listening
+    listening.ensure_schema()
+    return {r[0] for r in db.conn().execute(
+        "SELECT paper_id FROM listened WHERE user_id = ? UNION "
+        "SELECT e.paper_id FROM listen_finished f JOIN episodes e ON e.id = f.episode_id WHERE f.user_id = ?", (uid, uid))}
+
+
 def graph_for(gid: str, user) -> dict | None:
-    """The graph answer for one person: their Listened ticks and what they may do."""
+    """The graph answer for one person: their Listened ticks, what they have heard (the map's
+    green), and what they may do."""
     v = _view(gid)
     if v is None:
         return None
-    listened = set()
+    listened, done = set(), set()
     if user is not None:
         listened = {r[0] for r in db.conn().execute("SELECT paper_id FROM listened WHERE user_id = ?", (user["id"],))}
+        done = heard(user["id"])
     out = dict(v)
-    out["nodes"] = [dict(n, listened=n["id"] in listened) for n in v["nodes"]]
+    out["nodes"] = [dict(n, listened=n["id"] in listened, heard=n["id"] in done) for n in v["nodes"]]
     g = _world().graphs.get(gid)
-    if g is not None and user is not None:
-        out["graph"] = dict(v["graph"], **_perms(g, user))      # the rest as of the view's snapshot
+    if user is not None:
+        if g is not None:
+            out["graph"] = dict(v["graph"], **_perms(g, user))      # the rest as of the view's snapshot
+        elif gid == UNFILED:
+            out["graph"] = dict(v["graph"], can_edit=False, can_delete=False, can_link=True)
+        from . import graphlist
+        out["graph"]["subscribed"] = graphlist.subscribed(user["id"], gid)
     return out
 
 
@@ -842,7 +960,8 @@ def _set_how(c, gid, pid, how) -> None:
     if how is None:
         c.execute("DELETE FROM graph_members WHERE graph_id = ? AND paper_id = ?", (gid, pid))
     else:
-        c.execute("INSERT OR REPLACE INTO graph_members(graph_id, paper_id, how) VALUES (?, ?, ?)", (gid, pid, how))
+        c.execute("INSERT OR REPLACE INTO graph_members(graph_id, paper_id, how, at) VALUES (?, ?, ?, ?)",
+                  (gid, pid, how, db.now()))
 
 
 def _rule_matches(graph_row, paper_row) -> bool:
@@ -1970,8 +2089,7 @@ def _revert_row(c, user, r) -> int:
         g = _graph_snap(row)
         if op == "graph.lock" and not admin:
             raise HTTPError(403, "forbidden", "only an admin can lock or unlock a graph")
-        if g["locked"] and not admin:
-            raise _locked_error(g["name"])
+        _check_change(row, user)
         keys = list((after or before).keys())
         cur = {k: g[k] for k in keys}
         if g["deleted"] and "deleted" not in keys:
@@ -2000,8 +2118,7 @@ def _revert_row(c, user, r) -> int:
         row = _graph_row(c, gid)
         if row is None or row["deleted_at"] is not None:
             raise _conflict(r, after, None, "the graph was deleted")
-        if row["locked"] and not admin:
-            raise _locked_error(row["name"])
+        _check_change(row, user)
         cur = {"how": _how(c, gid, pid)}
         if not _same(cur, after):
             raise _conflict(r, after, cur)
@@ -2035,8 +2152,8 @@ def _body_paper(req, b):
 
 
 def h_list(req):
-    w = _world()
-    req.send_json(200, {"graphs": [_graph_item(w, g, req.user) for g in w.graphs.values()]})
+    from . import graphlist
+    req.send_json(200, graphlist.items(req.user))
 
 
 def h_get(req, gid):
@@ -2051,9 +2168,12 @@ def h_create(req):
     b = req.json()
     name, tags = _name(b.get("name")), _tags(b.get("tags"))
     gid = db.new_id("g_", 10)
+    from . import graphlist
     with _tx() as c:
-        c.execute("INSERT INTO graphs(id, name, rule_tags, locked, created_by, created_at) VALUES (?, ?, ?, 0, ?, ?)",
-                  (gid, name, db.dumps(tags), req.user["id"], db.now()))
+        at = db.now()
+        c.execute("INSERT INTO graphs(id, name, rule_tags, locked, created_by, created_at, updated_at) VALUES (?, ?, ?, 0, ?, ?, ?)",
+                  (gid, name, db.dumps(tags), req.user["id"], at, at))
+        graphlist.subscribe(c, req.user["id"], gid, at)          # its maker, and nobody else (DESIGN.md decision 2)
         lid = _log(c, req.user["id"], "human", "graph.create", gid, None,
                    {"name": name, "tags": tags, "locked": False, "deleted": False})
         revs = _bump(c, [gid], req.user["id"], "human", lid)
@@ -2061,7 +2181,7 @@ def h_create(req):
     from . import layout
     layout.schedule([gid], delay=1.0)
     w = _world()
-    req.send_json(201, {"graph": _graph_item(w, w.graphs[gid], req.user), "log": entries[0], "revs": revs})
+    req.send_json(201, {"graph": dict(_graph_item(w, w.graphs[gid], req.user), subscribed=True), "log": entries[0], "revs": revs})
 
 
 def h_update(req, gid):
@@ -2087,8 +2207,7 @@ def h_update(req, gid):
         if row is None or row["deleted_at"] is not None:
             raise HTTPError(404, "not_found", "no such graph")
         g = _graph_snap(row)
-        if g["locked"] and not _is_admin(req.user):
-            raise _locked_error(g["name"])
+        _check_change(row, req.user)
         todo = [(key, op, col) for key, op, col in (("name", "graph.rename", "name"), ("tags", "graph.set_tags", "rule_tags"),
                                                     ("locked", "graph.lock", "locked")) if key in fields and fields[key] != g[key]]
         if todo:
@@ -2113,8 +2232,7 @@ def h_delete(req, gid):
         row = _graph_row(c, gid)
         if row is None or row["deleted_at"] is not None:
             raise HTTPError(404, "not_found", "no such graph")
-        if row["locked"] and not _is_admin(req.user):
-            raise _locked_error(row["name"])
+        _check_change(row, req.user)
         if not (_is_admin(req.user) or row["created_by"] == req.user["id"]):
             raise HTTPError(403, "forbidden", "only the graph's maker or an admin can delete it")
         _fresh(c, _world(), gid, base)
@@ -2133,8 +2251,7 @@ def _membership(req, gid, pid, want: str, b=None):
         row = _graph_row(c, gid)
         if row is None or row["deleted_at"] is not None:
             raise HTTPError(404, "not_found", "no such graph")
-        if row["locked"] and not _is_admin(req.user):
-            raise _locked_error(row["name"])
+        _check_change(row, req.user)
         p = _paper_row(c, pid)
         if p is None:
             raise HTTPError(404, "not_found", "no such paper")

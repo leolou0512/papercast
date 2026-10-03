@@ -1224,6 +1224,34 @@ def _run(cat, sc, st, uid, q, f, pids, snippets, clauses, info, t0) -> dict:
     return {"ids": ids, "match": match, "info": info}
 
 
+def graph_hits(cfg, q: str) -> list:
+    """The graphs whose name matches q (the graph list's search box): every word of it, folded and
+    matched as the short fields are (a word, the last one as a prefix while it is typed, or four
+    letters or more inside a word), as typed or as corrected (correct(): a typo in a graph's name,
+    when the index knows the name from the papers in that graph). Oldest graph first, each
+    {"id", "name", "parts"}: the name with what matched marked, as a title's marks."""
+    typed = parse(q)
+    if not typed:
+        return []
+    fixed = parse(q)
+    try:
+        st, _ = _fresh(cfg)
+        with _conn(st) as sc:
+            if not correct(sc, fixed):
+                fixed = None
+    except sqlite3.Error:
+        fixed = None
+    ways = [[_Rx(cl, True) for cl in cls] for cls in (typed, fixed) if cls]
+    out = []
+    for r in db.conn().execute("SELECT id, name FROM graphs WHERE deleted_at IS NULL ORDER BY created_at, rowid"):
+        f = fold(r["name"] or "")
+        for rxs in ways:
+            if all(rx.search(f) for rx in rxs):
+                out.append({"id": r["id"], "name": r["name"], "parts": _parts(r["name"], rxs)})
+                break
+    return out
+
+
 def facets(uid=None) -> dict:
     """What the filters choose from: tags and people with how many papers each, the years."""
     cat = catalog(db.conn())

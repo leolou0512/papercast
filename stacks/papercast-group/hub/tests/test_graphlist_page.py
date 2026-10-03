@@ -237,6 +237,69 @@ class GraphListPage(PageBase):
             self.wait(f"(r => r && r.querySelector('.gl-n').textContent === '3')(document.querySelector('{GROW.format(gid)}'))", "its papers by its tags")
             self.assertTrue(self.js("!!document.getElementById('gl-newb')"))
 
+    def test_5b_a_paper_covers_the_map_and_closing_gives_it_back_as_it_was(self):
+        """A paper opened from its card's Open: its window covers the map, right of the graph list,
+        with Leo's player layout (the transcript in the middle, the comments a slim column on the
+        right, the bar along the bottom); the list stays and works; closing it, or Back, gives the
+        map back as it was: the same graph, view and paper picked."""
+        b, r = self.b, self.r
+        pid = self.d[1]
+        eid = r.q("SELECT id FROM episodes WHERE paper_id = ?", pid)[0][0]
+        script = r.cfg.episodes / eid / "script.md"
+        script.write_text("# The idea\n\n" + "".join(f"Paragraph {w} of plain made-up words about a fake diffusion study. It is only here to be read.\n\n"
+                                                       for w in ("one", "two", "three", "four", "five", "six", "seven", "eight")))
+        for i, who in enumerate((A, B, A)):
+            st, _, _ = r.req("POST", f"/api/papers/{pid}/comments", {"body": f"Fake comment {i}: the part at 0:0{i + 1} is the clearest."}, user=who)
+            self.assertEqual(st, 201)
+        self.addCleanup(lambda: (script.unlink(missing_ok=True), r.q("DELETE FROM comments")))
+        M = "PaperMap.current.debug"
+        box = lambda sel: self.js(f"(r => [r.left, r.top, r.right, r.bottom])(document.querySelector({J(sel)}).getBoundingClientRect())")
+        self.home(C)
+        b.js(f"location.hash = 'g={self.gen}'")
+        self.wait(f"{M}.cur().id === {J(self.gen)} && !!{M}.cur()._s && {M}.cur()._s.idx[{J(pid)}] != null", "the diffusion graph")
+        # a view of her own, and a paper picked: its card
+        b.js(f"{M}.view(1.3, 120, 40); {M}.select({J(pid)})")
+        self.wait("!!document.querySelector('#map .pm-card .pm-open')", "its card")
+        view0, sel0 = self.js(f"{M}.view()"), self.js(f"{M}.state().sel")
+        # its card's Open: the window over the whole map, right of the list
+        b.js("document.querySelector('#map .pm-card .pm-open').click()")
+        self.wait(f"location.hash === '#g={self.gen}&p={pid}' && getComputedStyle(document.getElementById('win')).visibility === 'visible'"
+                  " && document.getElementById('w-title').textContent === 'Fake Diffusion Study 1'", "the paper")
+        win, col, m = box("#win"), box("#gcol"), box("#map")
+        self.assertAlmostEqual(win[0], col[2], delta=1.5, msg="the window does not start at the graph list")
+        self.assertAlmostEqual(win[0], m[0], delta=1.5, msg="the window does not cover the map's left edge")
+        self.assertAlmostEqual(win[2], m[2], delta=1, msg="the window does not cover the map's right edge")
+        self.assertAlmostEqual(win[3], box("#bar")[1], delta=1, msg="the window does not end at the bar")
+        # the player's layout: the transcript in the middle, the comments a slim column on the right
+        self.wait("!document.getElementById('tr').hidden && document.querySelectorAll('#c-list .c-item').length === 3", "the transcript and the comments")
+        self.assertEqual(self.js("getComputedStyle(document.getElementById('ptabs')).display"), "none")
+        c, mid, z = box("#comments"), box("#p-mid"), self.js("document.documentElement.currentCSSZoom || 1")
+        self.assertTrue(280 <= (c[2] - c[0]) / z <= 341, f"the comments' column is {(c[2] - c[0]) / z} CSS px wide")
+        self.assertAlmostEqual(mid[2], c[0], delta=1, msg="the comments are not right of the transcript")
+        self.assertEqual(self.js("getComputedStyle(document.getElementById('bar')).position"), "fixed")
+        # the graph list stays, and takes a tap
+        self.assertEqual(self.js(f"(r => document.elementFromPoint(r.left + 20, (r.top + r.bottom) / 2).closest('.gl-row').dataset.id)"
+                                 f"(document.querySelector('{GROW.format(self.bobs)} .gl-open').getBoundingClientRect())"), self.bobs)
+        self.assertEqual(self.js("document.getElementById('gh-name').textContent"), "Diffusion and generative models")
+        time.sleep(0.5)
+        self.shot("desktop-paper")
+        # closed: the map as it was
+        b.js("document.getElementById('w-close').click()")
+        self.wait(f"location.hash === '#g={self.gen}' && getComputedStyle(document.getElementById('win')).visibility === 'hidden'", "closed")
+        self.assertEqual((self.js(f"{M}.cur().id"), self.js(f"{M}.view()"), self.js(f"{M}.state().sel")), (self.gen, view0, sel0))
+        # again, then Back
+        b.js("document.querySelector('#map .pm-card .pm-open').click()")
+        self.wait(f"location.hash === '#g={self.gen}&p={pid}' && getComputedStyle(document.getElementById('win')).visibility === 'visible'", "again")
+        b.js("history.back()")
+        self.wait(f"location.hash === '#g={self.gen}' && getComputedStyle(document.getElementById('win')).visibility === 'hidden'", "Back")
+        self.assertEqual((self.js(f"{M}.cur().id"), self.js(f"{M}.view()"), self.js(f"{M}.state().sel")), (self.gen, view0, sel0))
+        # a graph in the list, with a paper open, opens that graph (and the paper's window goes)
+        b.js("document.querySelector('#map .pm-card .pm-open').click()")
+        self.wait("getComputedStyle(document.getElementById('win')).visibility === 'visible'", "a third time")
+        b.js(f"document.querySelector('{GROW.format(self.bobs)} .gl-open').click()")
+        self.wait(f"location.hash === '#g={self.bobs}' && getComputedStyle(document.getElementById('win')).visibility === 'hidden'"
+                  f" && {M}.cur().id === {J(self.bobs)}", "the list's graph")
+
     # ------------------------------------------------------------------ search, routes, landing
     def test_6_one_search_box_for_papers_and_graphs(self):
         b = self.b
@@ -254,8 +317,6 @@ class GraphListPage(PageBase):
         self.assertIn(g, (self.gen, self.bobs))
         self.wait(f"!document.getElementById('paper').hidden && PaperMap.current.debug.cur().id === {J(g)}"
                   f" && PaperMap.current.debug.state().sel === {J(self.both)}", "its window, and its card on the map")
-        time.sleep(0.5)
-        self.shot("desktop-paper")
         # the graph shown has it: it stays there
         b.js("document.getElementById('w-close').click()")
         self.wait(f"location.hash === '#g={g}'", "closed")

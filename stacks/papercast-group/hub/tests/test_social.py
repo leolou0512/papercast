@@ -689,12 +689,11 @@ class Page(PageBase):
         b.js("localStorage.clear()")
 
     def test_9_a_column_right_of_the_transcript(self):
-        """On a wide screen the paper's window is wide enough (660 CSS px and up) for the comments to
-        be a slim column on its right, as tall as the window, the box to write in at its foot; its
-        list scrolls on its own, the transcript not with it; a time in it still plays from there."""
+        """At a desktop's width (1440 px, 125%) the paper's window covers the map, right of the graph
+        list, and is wide enough (660 CSS px and up) for the comments to be a slim column on its
+        right, as tall as the window, the box to write in at its foot; its list scrolls on its own,
+        the transcript not with it; a time in it still plays from there."""
         b = self.b
-        b.viewport(2560, 1440)                                         # at 125%: the window 760 CSS px wide
-        self.addCleanup(lambda: b.viewport(1440, 900))
         for i in range(14):
             self.api_post(f"Comment {i} at 0:0{i % 10}, long enough to take a couple of lines in a slim column.", user=B if i % 2 else CAROL)
         script = self.r.cfg.episodes / self.e30 / "script.md"          # a transcript, long enough to scroll
@@ -706,6 +705,8 @@ class Page(PageBase):
             b.wait_js("document.querySelectorAll('#c-list .c-item').length === 14", 5, "the comments")
             box = lambda sel: b.js(f"(r => [r.left, r.top, r.right, r.bottom])(document.querySelector({json.dumps(sel)}).getBoundingClientRect())")
             col, mid, win, z = box("#comments"), box("#p-mid"), box("#win"), b.js("document.documentElement.currentCSSZoom || 1")
+            self.assertAlmostEqual(win[0], box("#gcol")[2], delta=1.5, msg="the window does not cover the map up to the graph list")
+            self.assertAlmostEqual(win[2], b.js("innerWidth"), delta=1, msg="the window does not reach the right edge")
             inner = b.js("(w => w.getBoundingClientRect().left + (w.clientLeft + w.clientWidth) * (document.documentElement.currentCSSZoom || 1))(document.getElementById('win'))")
             self.assertTrue(280 <= (col[2] - col[0]) / z <= 341, f"the column is {(col[2] - col[0]) / z} CSS px wide")
             self.assertAlmostEqual(col[2], inner, delta=1, msg="not at the window's right edge")
@@ -738,10 +739,12 @@ class Page(PageBase):
             self.r.q("DELETE FROM positions")
 
     def test_9b_transcript_and_comments_tabs_in_a_narrower_window(self):
-        """At 1440 x 900 the paper's window over the map's side is too narrow for a column of
-        comments (660 CSS px and up): the transcript and the comments are two tabs, as on a phone;
-        a time in the comments still plays from there."""
+        """In a narrow desktop window (1000 px: 800 CSS px at 125%, the paper's window 460 of them)
+        there is no room for a column of comments (660 CSS px and up): the transcript and the
+        comments are two tabs, as on a phone; a time in the comments still plays from there."""
         b = self.b
+        b.viewport(1000, 800)
+        self.addCleanup(lambda: b.viewport(1440, 900))
         for i in range(4):                       # a few (each person's comments are rate-limited, in this process)
             self.api_post(f"Comment {i} at 0:0{i + 4}.", user=B if i % 2 else CAROL)
         script = self.r.cfg.episodes / self.e30 / "script.md"          # a transcript, long enough to scroll

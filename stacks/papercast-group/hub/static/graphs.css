@@ -1,6 +1,6 @@
 /* papercast-group: the graph list (graphs.js) and the map as the page's home: the column on the
-   left, the map beside it, a paper's window over the map's right side (Settings and Listening
-   over all of it). On a phone (720 px and under, as everywhere on the page) the column is the
+   left, the map beside it; a paper's window, Settings and Listening over the whole map (the
+   column stays), the map under them as it was. On a phone (720 px and under, as everywhere on the page) the column is the
    whole screen, a graph's papers slide over it, the map's drawing over those, and the window
    over everything. The page's own tokens only (app.css, themes.css), so every theme, light or
    dark, draws it; subscribed graphs in the text colour, the rest in the muted one. Every
@@ -14,9 +14,7 @@
 #map.pm-page { inset: 0 0 var(--bar-h, 0px) var(--col-w); z-index: 1; }
 .window { position: fixed; top: 0; right: 0; bottom: var(--bar-h, 0px); z-index: 38; visibility: hidden;
   scrollbar-gutter: stable; }        /* a scroll bar that comes as the paper loads moves nothing (a menu open under its button) */
-body.v-paper .window { visibility: visible; width: min(760px, max(400px, calc((100vw / var(--pcg-zoom, 1) - var(--col-w)) * .55)));
-  border-left: 1px solid var(--hairline); box-shadow: -10px 0 28px rgba(0, 0, 0, .10); }
-body.v-settings .window, body.v-listening .window { visibility: visible; left: var(--col-w); }
+body.v-paper .window, body.v-settings .window, body.v-listening .window { visibility: visible; left: var(--col-w); }
 .gpl { display: none; }
 .w-close { flex: none; }
 .pz-head .w-close:hover { background: var(--sel); }
@@ -94,20 +92,13 @@ body.v-settings .window, body.v-listening .window { visibility: visible; left: v
 
 @media (min-width: 721px) {
   #map.pm-page .pm-closebox { display: none; }
-  /* a paper's window over the map's right side: the map's bar, panels and legend stop at it */
-  body.v-paper #map.pm-page .pm-top { right: calc(var(--win-w, 0px) + 16px); }
-  body.v-paper #map.pm-page .pm-panel { right: calc(var(--win-w, 0px) + 16px); }
-  body.v-paper #map.pm-page .pm-legend { display: none; }
-  /* ... and the graph's toggle is its icon alone there, so its name keeps some room */
-  body.v-paper #map.pm-page .gh-sub { padding: 0 6px; }
-  body.v-paper #map.pm-page .gh-sub > span:last-child { display: none; }
 }
 
 /* ---------- phone ---------- */
 @media (max-width: 720px) {
   .gcol { position: absolute; inset: 0; width: auto; border-right: 0; background: var(--bg); }
   #map.pm-page { inset: 0 0 var(--bar-h, 0px) 0; z-index: 35; }
-  .window { left: 0; width: auto !important; border-left: 0 !important; box-shadow: none !important; }
+  .window { left: 0; }
   body.v-paper .window, body.v-settings .window, body.v-listening .window { left: 0; }
   .gpl { display: flex; flex-direction: column; position: fixed; inset: 0 0 var(--bar-h, 0px) 0; z-index: 8; background: var(--bg);
     overflow-y: auto; transform: translateX(100%); visibility: hidden; transition: transform .25s ease, visibility 0s linear .25s; }

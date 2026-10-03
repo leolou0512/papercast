@@ -713,14 +713,14 @@ class PlayerPage(tp.PageBase):
     def test_7_the_transcript_rolls_while_it_plays(self):
         """Playing, the window rolls with the sentence (about a third of the way down); scrolled
         by hand, it stops, and Back to now shows; Play (after a pause) follows again. The paper's
-        window is beside the map: at 1440 px the transcript and the comments are two tabs and the
-        window is what scrolls; on a wide screen (2560 px) the comments have their column, which
-        stays where it is while the middle rolls."""
-        for w, h in ((1440, 900), (2560, 1440)):
+        window covers the map: at 1440 px the comments have their column, which stays where it is
+        while the middle rolls; in a narrow desktop window (1000 px) the transcript and the
+        comments are two tabs and the window is what scrolls."""
+        for w, h in ((1440, 900), (1000, 800)):
             with self.subTest(width=w):
                 try:
                     self.b.viewport(w, h)
-                    self.rolls(wide=w > 2000)
+                    self.rolls(wide=w >= 1440)
                 finally:
                     self.b.js(f"{AUDIO}.pause()")
                     self.b.viewport(1440, 900)

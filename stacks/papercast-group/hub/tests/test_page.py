@@ -907,8 +907,8 @@ window.PaperMap = { mount: function (host, opts) {
   return { show: function () {}, hide: function () {}, changed: function () { window.__map.changed++; },
            event: function (k, d) { window.__map.events.push(k); },
            graph: function (gid) { cur = gid; window.__map.graphs.push(gid); if (opts.onShow) opts.onShow(gid); },
-           current: function () { return cur; }, select: function () {}, refreshList: list, data: function () { return null; },
-           inset: function () {} };
+           current: function () { return cur; }, select: function () {}, selected: function () { return null; },
+           refreshList: list, data: function () { return null; } };
 } };
 """
 

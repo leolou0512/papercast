@@ -16,7 +16,7 @@
    or opts.subscribe) keep every open map current. The hub works the positions out (layout.py
    runs these same equations to rest), so the map opens at rest: the browser never warms the
    layout up, it only eases a node to where the hub puts it. An arrow goes from a paper to a paper built on it. Grey: not
-   listened; green: listened (by whoever is looking); accent: a place to start. Mounted by app.js:
+   listened; green: heard (by whoever is looking: ticked, or a version finished); accent: a place to start. Mounted by app.js:
    window.PaperMap.mount(host, opts) -> {changed, show, hide, refresh, select, event, graph, refreshList}.
    With opts.column (the page's home: its graph list chooses the graph) there are no tabs and no
    search of its own: opts.head goes where the tabs were, the page is told of the list
@@ -154,7 +154,7 @@
     var aimTip = h("div", "pm-aim"); aimTip.hidden = true;           // what the link being aimed would say
     var legend = h("div", "pm-legend");
     function dot(cls, text) { var s = h("span"); s.appendChild(h("i", cls)); s.appendChild(document.createTextNode(text)); legend.appendChild(s); }
-    dot("pm-d-done", "listened");
+    dot("pm-d-done", "heard");
     dot("pm-d-start", "start here");
     var banner = h("div", "pm-banner"); banner.hidden = true;
     var empty = h("div", "pm-empty"); empty.hidden = true;
@@ -662,10 +662,9 @@
       var k = clampK(Math.min(2, (W - sl - sr) / Math.max(1, x1 - x0), (H - tp - bt) / Math.max(1, y1 - y0)));
       moveTo(k, sl + (W - sl - sr) / 2 - (x0 + x1) / 2 * k, tp + (H - tp - bt) / 2 - (y0 + y1) / 2 * k, smooth);
     }
-    var RIGHT = 0;            // CSS px of the map's right side the page covers (a paper's window)
     function centerAt(x, y) {
       var k = Math.max(cur._s.view.k, 1.1);
-      var cx = phone() ? W / 2 : RIGHT ? (W - RIGHT) / 2 + 40 : W / 2 + 60, cy = phone() ? H * 0.3 : H / 2;
+      var cx = phone() ? W / 2 : W / 2 + 60, cy = phone() ? H * 0.3 : H / 2;
       userMoved = true;
       moveTo(k, cx - x * k, cy - y * k, true);
     }
@@ -2183,8 +2182,7 @@
       data: function (gid) { var g = byId[gid]; return g && g.data ? g.data : null; },
       meta: function (gid) { var g = byId[gid]; return g ? g.meta : null; },
       refreshList: function () { loadList(); },
-      // the page covers this much of the map's right side (CSS px): a paper is centred left of it
-      inset: function (px) { RIGHT = Math.max(0, Math.min(W * 0.8, Number(px) || 0)); },
+      selected: function () { return selId; },
       // the selection's card and the panels closed (the page opens a paper's window over the map's side)
       deselect: function () { select(null); },
       debug: { S: S, cur: function () { return cur; }, graphs: function () { return graphs; }, show: function (id) { showGraph(byId[id]); }, select: select, selectLink: selectLink,

@@ -531,7 +531,6 @@
     if (v === "listening") $("listen-btn").setAttribute("aria-current", "page"); else $("listen-btn").removeAttribute("aria-current");
     if (v !== "listening" && S.listening) S.listening.hide();
     mapShown();
-    mapInset();
   }
   // Listening (listening.js, hub/listening.py): read from the hub each time it opens.
   function openListening() {
@@ -551,8 +550,9 @@
       if (S.open !== id) return;
     }
     refresh(id);
-    // its card on the map, beside the window (a wide screen; a phone's drawing, when it is open)
-    if (S.map && S.graph && (!phone() || S.phoneMap)) S.map.select(id, S.graph);
+    // its card on the map under the window, unless it has it already (its "Open"): the map is
+    // as it was when the window closes (a wide screen; a phone's drawing, when it is open)
+    if (S.map && S.graph && (!phone() || S.phoneMap) && S.map.selected() !== id) S.map.select(id, S.graph);
     // A paper that is playing keeps playing while another one is looked at.
     const c = chosen(S.papers.get(id));
     if (c && !isPlaying(S.audioEp)) loadAudio(c.id);
@@ -580,12 +580,6 @@
     if (on === !host.hidden) return;
     host.hidden = !on;
     if (S.map) { if (on) S.map.show(); else S.map.hide(); }
-  }
-  // the paper's window covers the map's right side (a wide screen): papers are centred left of it
-  function mapInset() {
-    const w = !phone() && S.view === "paper" ? box($("win")).width : 0;
-    document.body.style.setProperty("--win-w", `${w}px`);       // graphs.css: the map's bar and panels stop there
-    if (S.map && S.map.inset) S.map.inset(w);
   }
   function mapShowed(gid) {
     if (gid === S.graph) return;

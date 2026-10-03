@@ -263,7 +263,8 @@ Page CSP as Leo's (`PAGE_CSP` in stacks/papercast/web/app.py): no inline script 
   `created_at`, `created_by`, `can_edit`, `can_delete`, `can_link`; `unfiled`, "Not in any graph"
   (papers with a live version no graph shows; `GET /api/graphs/none` its view); and `ui`, the
   account's graph open last and sort (`GET/PUT /api/ui-state`). A paper joins a graph by its tags
-  when its first live version came, by hand when it was added. Page routes: `#g=<id>`,
+  when it came into the library (its first version not rejected, deleted since or not) or when a
+  change to the graph's tags brought it in, whichever is later; by hand when it was added. Page routes: `#g=<id>`,
   `#g=<id>&p=<paper>`, `#g=<id>&map` (a phone's drawing), `#p=<paper>` (a graph that has it, a
   subscribed one first), `#settings`, `#listening`.
 - **Edit log**: every change is one row in `graph_log` (who, when, op, before, after). Ops:
@@ -277,7 +278,9 @@ Page CSP as Leo's (`PAGE_CSP` in stacks/papercast/web/app.py): no inline script 
   `conflict` with detail and nothing changes. A revert is itself logged (`revert_of`), so it can
   be undone. With `"redo": true` it redoes the undo that `GET /api/graph-log`'s `redo[scope]`
   names (`undo[scope]` names the op to undo); after a new change in a scope there is nothing to
-  redo there, as in an editor.
+  redo there, as in an editor. Both scopes hold only what this person may undo (a graph's fields
+  and papers: its maker's and admins'; a link in a locked graph: admins'), so the page never
+  offers an undo the hub refuses.
 - **Revisions**: every graph has a revision, one up with every change touching it (members, links
   among them, name, tags, lock, a member's label, delete, undo, redo; members that come or go by
   their tags or episodes count on the next read). `GET /api/graphs/<id>` gives it (`rev`,

@@ -261,6 +261,7 @@ class TestGraphs(Base):
         p3, q = h.paper("Locked three here", 2020, ["lk"]), h.paper("Outside paper here", 2021, ["other"])
         gid = self.graph_with(["lk"], who="alice")
         old = self.link(p1, p2, who="alice")
+        old_log = h.ok("GET", "/api/graph-log", who="alice")["undo"]["mine"]["id"]
         self.assertEqual(h.req("PUT", f"/api/graphs/{gid}", {"locked": True}, who="alice")[0], 403)
         h.ok("PUT", f"/api/graphs/{gid}", {"locked": True}, who="root")
         self.assertEqual(h.ok("GET", "/api/graph-log")["log"][0]["op"], "graph.lock")
@@ -279,8 +280,10 @@ class TestGraphs(Base):
         self.link(p1, q, who="alice")                        # q is not in the locked graph
         h.undo(who="alice")                                  # fine: that link is outside it
         n = h.log_count()
-        st, js = h.undo(who="alice")                         # her link inside the locked graph
-        self.assertEqual((st, js["error"]), (403, "locked"))
+        # her link inside the locked graph (and her making of it): an admin's to undo now, so not offered
+        self.assertIsNone(h.ok("GET", "/api/graph-log", who="alice")["undo"]["mine"])
+        st, js = h.req("POST", "/api/graph-log/revert", {"scope": "mine", "expect": old_log}, who="alice")
+        self.assertEqual((st, js["error"]), (409, "moved"))
         self.assertEqual(h.log_count(), n)
         # agents still add; an admin still edits
         out = graph.apply_agent_links("e_x", p3, h.bob, [{"other": {"paper_id": p2}, "direction": "builds_on", "grade": "s"}])

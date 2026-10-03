@@ -176,6 +176,62 @@ class TestCounts(Base):
         self.assertNotEqual(self.item(g)["newest_at"], None)
         self.assertTrue(p1)
 
+    def test_deleting_the_oldest_version_does_not_make_a_paper_new_again(self):
+        h = self.h
+        p = self.paper("Old paper", ["x"], at="2026-01-10T00:00:00Z")          # Alice's January version
+        e1 = self.episode_of(p)
+        e2 = db.new_id("e_")
+        db.conn().execute("INSERT INTO episodes(id, paper_id, made_by, state, created_at, updated_at) VALUES (?, ?, ?, 'ready', ?, ?)",
+                          (e2, p, h.bob, "2026-10-01T10:00:00Z", "2026-10-01T10:00:00Z"))    # and Bob's, after he opened the graph
+        g = self.make("G", ["x"], who="bob")
+        self.clock.tick()
+        h.ok("POST", f"/api/graphs/{g}/opened", {}, who="bob")
+        before = self.item(g, "bob")
+        self.assertEqual((before["new"], before["newest_at"]), (0, "2026-01-10T00:00:00Z"))
+        self.clock.tick()
+        h.ok("DELETE", f"/api/episodes/{e1}")                                        # the oldest version goes
+        after = self.item(g, "bob")
+        self.assertEqual((after["n"], after["new"], after["newest_at"], after["updated_at"]),
+                         (1, 0, before["newest_at"], before["updated_at"]))
+        # all its versions gone and one back: in the library from the first one still
+        h.ok("DELETE", f"/api/episodes/{e2}", who="bob")
+        h.ok("POST", f"/api/episodes/{e2}/undelete", {}, who="bob")
+        self.assertEqual((self.item(g, "bob")["new"], self.item(g, "bob")["newest_at"]), (0, "2026-01-10T00:00:00Z"))
+
+    def test_papers_a_change_of_tags_brings_in_are_new(self):
+        h = self.h
+        a = self.paper("Alpha", ["x"], at="2026-08-01T00:00:00Z")
+        b2 = self.paper("Beta", ["y"], at="2026-08-02T00:00:00Z")
+        c2 = self.paper("Gamma", ["y"], at="2026-08-03T00:00:00Z")
+        g = self.make("G", ["x"])                        # Alice made it: subscribed
+        h.ok("POST", f"/api/graphs/{g}/papers", {"paper_id": c2})       # added by hand, then taken out by hand:
+        h.ok("DELETE", f"/api/graphs/{g}/papers/{c2}")                 # no change of tags brings it in
+        self.clock.tick()
+        h.ok("POST", f"/api/graphs/{g}/opened", {})
+        self.assertEqual(self.item(g)["new"], 0)
+        at = self.clock.tick()
+        h.ok("PUT", f"/api/graphs/{g}", {"tags": ["x", "y"]})
+        it = self.item(g)
+        self.assertEqual((it["n"], it["new"], it["newest_at"], it["updated_at"]), (2, 1, at, at))
+        self.assertEqual(db.conn().execute("SELECT paper_id, at FROM graph_tag_joins WHERE graph_id = ?", (g,)).fetchall()[0][:], (b2, at))
+        # undone: it leaves; redone: it comes in again, then
+        self.clock.tick()
+        st, _ = h.undo("mine")
+        self.assertEqual(st, 200)
+        self.assertEqual((self.item(g)["n"], self.item(g)["new"]), (1, 0))
+        again = self.clock.tick()
+        st, _ = h.undo("mine", redo=True)
+        self.assertEqual(st, 200)
+        it = self.item(g)
+        self.assertEqual((it["n"], it["new"], it["newest_at"]), (2, 1, again))
+        # opened: seen; a paper already in by a tag stays as it was when another tag comes
+        self.clock.tick()
+        h.ok("POST", f"/api/graphs/{g}/opened", {})
+        self.clock.tick()
+        h.ok("PUT", f"/api/graphs/{g}", {"tags": ["x", "y", "z"]})
+        self.assertEqual(self.item(g)["new"], 0)
+        self.assertTrue(a)
+
     def test_updated_at_moves_with_every_change_to_the_graph(self):
         h = self.h
         g = self.make("G", ["x"])
@@ -248,12 +304,52 @@ class TestRights(Base):
         g = self.make("Bob's", ["x"], who="bob")
         q = self.paper("Another", ["y"])
         h.ok("POST", f"/api/graphs/{g}/papers", {"paper_id": q}, who="bob")
-        st, js = h.undo("any", who="alice")
-        self.assertEqual((st, js["error"]), (403, "not_yours"))
+        added = h.ok("GET", "/api/graph-log", who="bob")["undo"]["mine"]["id"]
+        # Alice may not undo Bob's changes to his graph: Undo does not offer them, and asked anyway it is refused
+        self.assertIsNone(h.ok("GET", "/api/graph-log", who="alice")["undo"]["any"])
+        st, js = h.req("POST", "/api/graph-log/revert", {"scope": "any", "expect": added}, who="alice")
+        self.assertEqual((st, js["error"]), (409, "moved"))
         self.assertIn(q, graph._world().members[g])
         st, _ = h.undo("mine", who="bob")
         self.assertEqual(st, 200)
         self.assertNotIn(q, graph._world().members[g])
+
+    def test_undo_and_redo_offer_only_what_this_person_may_undo(self):
+        h = self.h
+        seed = db.conn().execute("SELECT id FROM graphs WHERE created_by IS NULL ORDER BY rowid LIMIT 1").fetchone()[0]
+        db.conn().execute("UPDATE graphs SET deleted_at = NULL WHERE id = ?", (seed,))
+        g = self.make("Bob's", ["x"], who="bob")
+        a, b2 = self.paper("Alpha", ["x"], year=2018), self.paper("Beta", ["x"], year=2020)
+        self.clock.tick()
+        h.ok("PUT", f"/api/graphs/{seed}", {"name": "Renamed by Bob"}, who="bob")        # anyone may undo this one
+        renamed = h.ok("GET", "/api/graph-log", who="bob")["undo"]["mine"]["id"]
+        self.clock.tick()
+        h.ok("DELETE", f"/api/graphs/{g}/papers/{a}", who="bob")                      # Bob's own graph: his and the admins'
+        removed = h.ok("GET", "/api/graph-log", who="bob")["undo"]["mine"]["id"]
+        log = h.ok("GET", "/api/graph-log", who="alice")
+        self.assertEqual(log["undo"]["any"]["id"], renamed)                           # the newest she may undo
+        self.assertEqual(h.ok("GET", "/api/graph-log", who="root")["undo"]["any"]["id"], removed)
+        st, js = h.undo("any", who="alice")
+        self.assertEqual(st, 200, js)
+        self.assertEqual(js["reverted"]["id"], renamed)
+        self.assertEqual(h.ok("GET", "/api/graph-log", who="alice")["redo"]["any"]["revert_of"], renamed)
+        # her redo of it works; Bob's removal stays offered to Bob and to admins only
+        st, _ = h.undo("any", who="alice", redo=True)
+        self.assertEqual(st, 200)
+        self.assertEqual(h.ok("GET", "/api/graph-log", who="bob")["undo"]["mine"]["id"], removed)
+        # an admin's change to Bob's graph, the admin made a viewer since: no longer offered to them
+        h.ok("POST", f"/api/graphs/{g}/papers", {"paper_id": a}, who="root")
+        self.assertEqual(h.ok("GET", "/api/graph-log", who="root")["undo"]["mine"]["op"], "graph.add_paper")
+        db.conn().execute("UPDATE users SET role = 'viewer' WHERE id = ?", (h.root,))
+        mine = h.ok("GET", "/api/graph-log", who="root")["undo"]["mine"]
+        self.assertTrue(mine is None or mine["op"] != "graph.add_paper", mine)
+        # a link among a locked graph's papers: the admins' to undo, not offered to others
+        db.conn().execute("UPDATE users SET role = 'admin' WHERE id = ?", (h.root,))
+        lk = h.ok("POST", "/api/links", {"src": a, "dst": b2, "grade": "s"}, who="alice", code=201)["link"]
+        h.ok("PUT", f"/api/graphs/{g}", {"locked": True}, who="root")
+        self.assertNotEqual((h.ok("GET", "/api/graph-log", who="alice")["undo"]["mine"] or {}).get("op"), "link.add")
+        self.assertEqual(h.ok("GET", "/api/graph-log", who="root")["undo"]["any"]["op"], "graph.lock")
+        self.assertEqual(lk["src"], a)
 
     def test_a_graph_nobody_made_is_open_to_all_but_for_a_lock(self):
         h = self.h
@@ -342,7 +438,7 @@ class TestMigration(unittest.TestCase):
                 db.migrate()
                 c = db.conn()
                 # a database as version 6 left it: the graph list's tables and columns not there yet
-                for t in ("graph_subs", "graph_seen", "ui_state"):
+                for t in ("graph_subs", "graph_seen", "graph_tag_joins", "ui_state"):
                     c.execute(f"DROP TABLE {t}")
                 c.execute("ALTER TABLE graphs DROP COLUMN updated_at")
                 c.execute("ALTER TABLE graph_members DROP COLUMN at")
@@ -352,9 +448,11 @@ class TestMigration(unittest.TestCase):
                 for gid, by, gone in (("g_seed000001", None, None), ("g_made000001", uid, None), ("g_gone000001", uid, "2026-09-03T00:00:00Z")):
                     c.execute("INSERT INTO graphs(id, name, rule_tags, locked, created_by, created_at, deleted_at) VALUES (?, ?, '[]', 0, ?, ?, ?)",
                               (gid, gid, by, "2026-09-02T00:00:00Z", gone))
-                self.assertEqual(db.migrate(), db.SCHEMA_VERSION)
+                with mock.patch.object(db, "now", lambda: "2026-10-04T12:00:00Z"):
+                    self.assertEqual(db.migrate(), db.SCHEMA_VERSION)
                 subs = c.execute("SELECT user_id, graph_id, at FROM graph_subs").fetchall()
-                self.assertEqual([tuple(r) for r in subs], [(uid, "g_made000001", "2026-09-02T00:00:00Z")])
+                # as of the migration, not the graph's making: what is in it already is not "new"
+                self.assertEqual([tuple(r) for r in subs], [(uid, "g_made000001", "2026-10-04T12:00:00Z")])
                 cols = {r[1] for r in c.execute("PRAGMA table_info(graphs)")} | {r[1] for r in c.execute("PRAGMA table_info(graph_members)")}
                 self.assertTrue({"updated_at", "at"} <= cols)
                 self.assertEqual(c.execute("SELECT updated_at FROM graphs WHERE id = 'g_made000001'").fetchone()[0], None)

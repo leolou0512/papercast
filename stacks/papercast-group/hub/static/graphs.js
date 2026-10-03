@@ -45,7 +45,7 @@
   const PAPERS_FIRST = 30;
 
   function mount(ctx) {
-    const G = { list: [], unfiled: null, sort: "updated", last: null, loaded: false, cur: null, q: "", seq: 0, res: null, all: false,
+    const G = { list: [], unfiled: null, sort: "updated", sortMine: false, last: null, loaded: false, cur: null, q: "", seq: 0, res: null, all: false,
       timer: null, form: false, busy: false, pend: new Map(), papersFor: null, data: new Map() };
     const mineOf = (g) => (g.created_by && ctx.me() && g.created_by.id === ctx.me().id ? 1 : 0);
     const ORDER = {
@@ -64,7 +64,9 @@
       for (const g of G.list) if (G.pend.has(g.id)) g.subscribed = G.pend.get(g.id);
       G.unfiled = r.unfiled && r.unfiled.id ? r.unfiled : null;
       if (r.ui) {
-        if (!G.loaded || !G.sortBusy) G.sort = SORTS.some((s) => s[0] === r.ui.sort) ? r.ui.sort : "updated";
+        // the account's sort until one is picked here: after that this page's own choice stands
+        // (a list asked for before the choice reached the hub would bring the old one back)
+        if (!G.sortMine) G.sort = SORTS.some((s) => s[0] === r.ui.sort) ? r.ui.sort : "updated";
         G.last = r.ui.last_graph || null;
       }
       G.loaded = true;
@@ -308,10 +310,9 @@
     }
     async function setSort(id) {
       if (!SORTS.some((s) => s[0] === id)) return;
-      G.sort = id; G.sortBusy = true;
+      G.sort = id; G.sortMine = true;
       sortLabel(); render();
       try { await ctx.api("PUT", "/api/ui-state", { sort: id }); } catch (e) { ctx.toast(e.message); }
-      G.sortBusy = false;
     }
     sortB.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -352,11 +353,13 @@
     function paperChanged() { if (G.papersFor) renderPapers(); }
 
     render();
-    return {
+    const api = {
       setList,
       setCurrent, opened, landing, graphFor, item, ordered, head, showPapers, graphData, paperChanged,
       sort: () => G.sort, query: () => G.q,
     };
+    window.PaperGraphs.current = api;       // for the browser tests
+    return api;
   }
 
   window.PaperGraphs = { mount };

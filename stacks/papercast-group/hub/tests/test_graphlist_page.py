@@ -207,6 +207,34 @@ class GraphListPage(PageBase):
         self.wait("document.getElementById('sort-label').textContent === 'Newest paper added'", "the sort kept")
         self.assertEqual((self.js(SUBS), self.js(REST)), want("newest"))
 
+    def test_3b_a_tick_resorts_most_unheard_and_an_old_answer_keeps_the_sort(self):
+        """Ticking Listened refreshes the list's counts, so "Most unheard by me" sorts again; a list
+        answer asked for before the sort was chosen here does not bring the old sort back."""
+        b, r = self.b, self.r
+        self.addCleanup(lambda: r.q("DELETE FROM listened WHERE paper_id = ?", self.flow))
+        self.home(C)
+        b.js("document.getElementById('sort-btn').click()")
+        self.wait("!!document.querySelector('.menu')", "menu")
+        b.js("document.querySelector('.menu [data-sort=unheard]').click()")
+        # not subscribed: RL 5 unheard; Alice's flows and Language models 1 each (by name); the rest 0
+        want0 = [self.rl, self.alices, self.lm, self.mat, self.robot]
+        self.wait(f"JSON.stringify({REST}) === {J(J(want0, separators=(',', ':')))}", "most unheard first")
+        b.js(f"location.hash = 'p={self.flow}'")
+        self.wait(f"!document.getElementById('paper').hidden && document.getElementById('w-title').textContent === 'Fake Flows Study'", "its paper")
+        b.js("document.getElementById('w-listened').click()")
+        want1 = [self.rl, self.lm, self.alices, self.mat, self.robot]           # Alice's flows: 0 unheard now
+        self.wait(f"JSON.stringify({REST}) === {J(J(want1, separators=(',', ':')))}", "sorted again after the tick", 8)
+        # an answer from before the choice (the account's old sort in it) leaves the sort as chosen
+        b.js("document.getElementById('sort-btn').click()")
+        self.wait("!!document.querySelector('.menu')", "menu")
+        b.js("document.querySelector('.menu [data-sort=az]').click()")
+        self.wait("document.getElementById('sort-label').textContent === 'A–Z'", "A–Z")
+        b.js("fetch('/api/graphs', {credentials: 'same-origin'}).then(r => r.json())"
+             ".then(j => { j.ui = {sort: 'updated', last_graph: null}; PaperGraphs.current.setList(j); window.__fed = 1; })")
+        self.wait("window.__fed === 1", "an old answer fed to the list")
+        self.assertEqual(self.js("document.getElementById('sort-label').textContent"), "A–Z")
+        self.assertEqual(self.js(REST), sorted(self.js(REST), key=lambda gid: self.js(f"document.querySelector('{GROW.format(gid)} .gl-name').textContent").lower()))
+
     def test_4_opening_a_graph_sees_its_new_papers(self):
         b, r = self.b, self.r
         self.home(C)

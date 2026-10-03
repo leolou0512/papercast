@@ -962,7 +962,9 @@
       savePosition(true);
       // heard, if the hub counted it finished (listening.py): the paper read again once the last position is in
       const pid = S.audioPaper;
-      if (pid && S.papers.has(pid) && !S.papers.get(pid).heard) setTimeout(() => touched(pid), 1500);
+      if (pid && S.papers.has(pid) && !S.papers.get(pid).heard) {
+        setTimeout(() => { touched(pid); if (S.map && S.map.refreshList) S.map.refreshList(); }, 1500);
+      }
       if (S.reloadFor) setTimeout(maybeReload, 1500);
     });
     a.addEventListener("error", () => { if (a.getAttribute("src")) toast("The audio could not be loaded."); });
@@ -2562,7 +2564,11 @@
     on("hello", (d) => checkBuild(d.build));
     on("resync", () => { loadLibrary(); toMap("resync", {}); });      // the map missed events too: it reads its graphs again
     on("mygraphs", () => { if (S.map && S.map.refreshList) S.map.refreshList(); });     // my subscriptions, from another tab
-    on("paper", (d) => touched(d.paper_id || d.id || (d.paper && d.paper.id)));
+    on("paper", (d) => {
+      touched(d.paper_id || d.id || (d.paper && d.paper.id));
+      // a tick of this person's (here or on another device): the list's unheard counts, and its sort by them
+      if (d.why === "listened" && S.map && S.map.refreshList) S.map.refreshList();
+    });
     on("episode", (d) => touched(d.paper_id || (d.paper && d.paper.id) || S.epPaper.get(d.episode_id || d.id)));
     on("graph", (d) => toMap("graph", d));
     on("log", (d) => toMap("log", d));

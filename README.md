@@ -6,7 +6,7 @@ Each paper becomes a spoken episode, a one-screen explainer page and a place on 
 Anyone in the group can listen on the site. To add papers you use the `papercast` command on
 your own computer. It runs Claude Code there, under your own Claude login, to write the
 episode. The site (the "hub" in the terminal messages) then records the voice and puts the
-episode in the library and on the map.
+episode on the map.
 
 This page shows how to add papers and how to work on the map. Listening needs no guide.
 
@@ -115,7 +115,7 @@ The terminal shows a link and a code, and your browser opens the link (if it doe
 the link yourself). Sign in if the site asks, check that the code matches, and press
 **Approve**. The terminal then says "Logged in as" with your name. This computer now shows
 under Settings, Devices. `papercast whoami` tells you who you are logged in as. The ? button at
-the top of the paper list shows these commands too, with Copy buttons.
+the top of the Graphs column shows these commands too, with Copy buttons.
 
 ## 4. Add a paper from a PDF file
 
@@ -204,8 +204,8 @@ site checks the script again), "waiting for the voice" (the voice is recorded on
 GPU server, one episode at a time, in a queue), "being voiced", and finally "ready" with the
 link to the paper.
 
-On the site the episode is in the library, marked "by" your name and your preferences. On the
-map it joins every graph whose topic tags match the paper's, with arrows to and from the papers
+On the site the episode is marked "by" your name and your preferences. It joins every graph
+whose topic tags match the paper's (or **Not in any graph** if none does), with arrows to and from the papers
 already there that it builds on or that build on it. If an admin set links from uploads to
 "Suggest only", those arrows wait as dashed suggestions until someone accepts them.
 
@@ -216,7 +216,7 @@ Use the job id that `papercast status` shows in place of `jk3x7qa`.
 
 ## 7. Settings
 
-Open Settings with the gear at the top of the paper list.
+Open Settings with the gear at the top of the Graphs column.
 
 **Preferences** decide how the versions you make are written: how much maths, what gets more
 time, what the listener already knows, and a note for the writer (up to 500 characters). The
@@ -250,12 +250,21 @@ use; it stops working at once. **Account** changes your password.
 
 ## 8. Working on the map
 
-Open the map with the button next to the gear (three joined dots). There is one tab per graph.
-An arrow goes from a paper to a later paper that builds on it. Anyone signed in can change a
-graph, except a locked one, which only admins change.
+The site opens on the map, on the graph you had open last. The **Graphs** column on the left
+lists every graph: the ones you subscribe to on top, the rest in grey. A dot on a row means new
+papers since you last opened that graph. An arrow on the map goes from a paper to a later paper
+that builds on it.
 
-- **Pick a paper**: click it, or type part of its title in "Search papers" and press Enter.
-  Its card shows what it builds on and what builds on it.
+![The Graphs column: subscribed graphs on top, the rest in grey, and the Subscribe button](docs/img/graph-list.png)
+
+- **Subscribe**: open a graph and press **Subscribe** next to its name. Press **Subscribed** to
+  unsubscribe.
+- **Sort the column**: the menu under the search box: A to Z, recently updated, most papers,
+  date created, mine first, most unheard by me, newest paper added.
+- **Find a paper or a graph**: type in "Search papers and graphs". Picking a paper opens it in
+  its graph. Papers in no graph are under **Not in any graph** at the bottom of the column.
+- **Pick a paper**: click it on the map. Its card shows what it builds on and what builds on it.
+  **Open** shows the episode, transcript and comments; the cross takes you back to the map.
 
   ![The map with a paper picked: its card has Open, Link to and Take out of this graph](docs/img/map-paper.png)
 
@@ -272,7 +281,11 @@ graph, except a locked one, which only admins change.
   ![Graph settings: the graph's name and tags, and Add a paper with two search results](docs/img/map-add-paper.png)
 
 - **Take a paper out of the graph**: pick it and press **Take out of this graph**.
-- **Make a graph**: the **+ New graph** tab, with a name and, if you like, topic tags.
+- **Make a graph**: **+ New graph** in the column, with a name and, if you like, topic tags.
+  You are subscribed to it. Only you and the admins change its papers and name; the group's
+  original graphs are open to everyone unless an admin locks them. Links between papers can be
+  changed from any graph.
+- **On a phone**: tap a graph to see its papers, earliest first; **Map** shows the drawing.
 - **Undo and Redo**: the two curved arrows at the top, or Ctrl+Z and Ctrl+Shift+Z (Cmd on a
   Mac). Undo says what it will undo, and lets you choose your own last edit or the last edit by
   anyone. The clock button lists the last 100 changes.

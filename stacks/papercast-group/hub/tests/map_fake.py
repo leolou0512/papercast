@@ -320,7 +320,9 @@ class FakeHub:
         for pid in mem:
             p = self.s["papers"][pid]
             x, y = pos.get(pid, (None, None))
-            nodes.append({"id": pid, "label": p["label"], "title": p["title"], "year": p["year"], "made_by": p["made_by"], "x": x, "y": y})
+            nodes.append({"id": pid, "label": p["label"], "title": p["title"], "year": p["year"], "made_by": p["made_by"], "x": x, "y": y,
+                          # every graph it is in (graph.py's `in`: the card's "Also in", with no graph read but this one)
+                          "in": [k for k, x2 in self.s["graphs"].items() if not x2["deleted"] and pid in x2["members"]]})
         links = [self.link_out(l) for l in self.s["links"].values() if l["state"] == "active" and l["src"] in mem and l["dst"] in mem]
         kids = {pid: [] for pid in mem}
         has_parent = set()

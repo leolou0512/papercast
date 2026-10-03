@@ -925,19 +925,23 @@ try:
 except ImportError:
     NO_BROWSER = "websocket-client not installed"
 
-# Leo's tap-target check (tests/test_page.py TAP_TARGETS), for pages without the library's panes:
+# Leo's tap-target check (tests/test_page.py TAP_TARGETS), for pages without the home's panes (or
+# with them: what the window, a phone's drawing or a graph's papers cover is left out, as there):
 # every control shown that is under 44 x 44 px, or that a tap on its edge does not reach.
 TAPS = r"""(() => {
   const q = 'a[href], button, input:not([type=hidden]), select, textarea, summary, label, [role=button], [role=link],' +
             ' [role=slider], [role=menuitem], [tabindex]:not([tabindex="-1"])';
-  const top = document.querySelector('.menu');
-  const open = document.body.classList.contains('open');
+  const bell = document.getElementById('bell-panel');
+  const top = document.querySelector('.menu') || (bell && !bell.hidden ? bell : null);
+  const open = document.body.classList.contains('open'), gp = document.body.classList.contains('gpl-open');
+  const phone = matchMedia('(max-width: 720px)').matches, map = !!document.getElementById('map') && !document.getElementById('map').hidden;
   const name = (e) => `${e.tagName.toLowerCase()}${e.id ? '#' + e.id : ''} "${(e.getAttribute('aria-label') || e.textContent || e.placeholder || '').trim().slice(0, 24)}"`;
   const bad = [];
   for (const e of document.querySelectorAll(q)) {
     const cs = getComputedStyle(e);
     if (e.closest('[hidden]') || cs.visibility !== 'visible' || cs.pointerEvents === 'none' || !e.getClientRects().length) continue;
-    if ((top && !top.contains(e)) || (open && e.closest('#list-pane'))) continue;
+    if ((top && !top.contains(e)) || (open && e.closest('#gcol, #gpl, #map')) || (phone && map && e.closest('#gcol, #gpl'))
+        || (phone && gp && e.closest('#gcol'))) continue;
     const r = e.getBoundingClientRect();
     if (r.width < 43.5 || r.height < 43.5) bad.push(`${name(e)} is ${r.width.toFixed(1)} x ${r.height.toFixed(1)}`);
     let fixed = false;
@@ -989,6 +993,9 @@ class PasswordPagesTest(unittest.TestCase):
     def setUp(self):
         accounts.reset_limits()
         self.allow = []                                     # console errors this test expects (regexes)
+        # the last test's page gone before its cookies are: the home it left keeps asking the hub
+        # (the tour starting for someone new; a page crossing 720 px opens its address again)
+        self.b.goto("about:blank")
         self.b.call("Network.clearBrowserCookies")
         self.b.viewport(1280, 860)
         self.b.pump(0.05)
@@ -1050,7 +1057,7 @@ class PasswordPagesTest(unittest.TestCase):
         self.wait(f"location.pathname === {json.dumps(where.split('#')[0].split('?')[0])}", "signed in")
 
     # -- tests
-    def test_1_first_sign_in_asks_for_a_new_password_then_opens_the_library(self):
+    def test_1_first_sign_in_asks_for_a_new_password_then_opens_the_home(self):
         self.new_person("pg101")
         self.b.goto(self.base + "/")
         self.wait("location.pathname === '/signin' && !document.getElementById('signin').hidden", "the site sends a signed-out browser to sign in")
@@ -1071,7 +1078,8 @@ class PasswordPagesTest(unittest.TestCase):
         self.wait("document.getElementById('msg').textContent.includes('does not contain your username')", "refused")
         self.typ("#password", "the tea is cold today")
         self.click("#save")
-        self.wait("location.pathname === '/' && !!document.getElementById('rows')", "the library")
+        self.wait("location.pathname === '/' && document.querySelectorAll('#gl .gl-row').length > 0 && /^#g=/.test(location.hash)",
+                  "the home: the graph list, and the graph it lands on")
         self.wait("document.title === 'Papers'", "the page started")
         self.assertIsNotNone(accounts.account(username="pg101")["pw_hash"])
 
@@ -1352,7 +1360,7 @@ class PasswordPagesTest(unittest.TestCase):
         self.assertEqual(self.js(state), [1.25, "1.25", "125", None])
         w, h, ok, iw, ih = self.js(fits)
         self.assertEqual((w, h, ok), (iw, ih, True), "the page does not fit the window at 125%")
-        self.assertEqual(self.js("Math.round(document.getElementById('list-pane').getBoundingClientRect().width)"), 425)    # 340 CSS px
+        self.assertEqual(self.js("Math.round(document.getElementById('gcol').getBoundingClientRect().width)"), 425)    # 340 CSS px
         for v, z in (("150", 1.5), ("100", 1)):
             self.js(f"document.querySelector('#acct-size [data-v=\"{v}\"]').click()")
             self.assertEqual(self.js(state), [z, "" if z == 1 else str(z), v, v])
@@ -1361,7 +1369,7 @@ class PasswordPagesTest(unittest.TestCase):
         # kept after a reload, drawn at that size from the start
         self.js("document.querySelector('#acct-size [data-v=\"150\"]').click()")
         b.goto(self.base + "/")
-        self.wait("document.querySelectorAll('#rows .row').length >= 0 && !!document.querySelector('.app')", "the library")
+        self.wait("!!document.getElementById('gl') && !!document.querySelector('.app')", "the home")
         self.assertEqual(self.js("[document.documentElement.currentCSSZoom, document.documentElement.style.zoom]"), [1.5, "1.5"])
         # a window 800 px wide: the two panes keep their 721 CSS px, so 150% is 800 / 721
         b.viewport(800, 860)
@@ -1380,7 +1388,7 @@ class PasswordPagesTest(unittest.TestCase):
         self.addCleanup(b.repin_size)
         self.addCleanup(lambda: self.js("localStorage.removeItem('pcg-size')"))
         b.viewport(390, 844, mobile=True)
-        side = "['documentElement', 'win', 'list-pane'].filter(k => (e => !!e && e.scrollWidth > e.clientWidth)(k === 'documentElement' ? document.documentElement : document.getElementById(k)))"
+        side = "['documentElement', 'win', 'gcol'].filter(k => (e => !!e && e.scrollWidth > e.clientWidth)(k === 'documentElement' ? document.documentElement : document.getElementById(k)))"
         b.goto(self.base + "/signin")
         self.wait("!document.getElementById('signin').hidden", "the form")
         self.js("localStorage.setItem('pcg-size', '150')")

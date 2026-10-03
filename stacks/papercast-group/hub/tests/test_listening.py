@@ -570,11 +570,11 @@ class ListeningPage(tp.PageBase):
         self.assertEqual(b.js("document.querySelectorAll('#ls-group .gp-row')[2].querySelectorAll('rect:not(.lv0)').length"), 0)
         self.assertEqual(b.js("document.querySelectorAll('#ls-group .gp-row')[0].querySelectorAll('rect').length"), 52 * 7 + dow + 1)
         self.assertEqual(self.text("#ls-group .gp-row:nth-child(3) .gp-n"), "0 min")
-        # the header's button says where you are; again goes back to the list
+        # the header's button says where you are; again goes back to the graph on the map
         self.assertEqual(b.js("document.getElementById('listen-btn').getAttribute('aria-current')"), "page")
         self.assertEqual(b.js("document.title"), "Listening · Papers")
         b.js("document.getElementById('listen-btn').click()")
-        b.wait_js("document.getElementById('listening').hidden && !location.hash", 3, "back to the list")
+        b.wait_js("document.getElementById('listening').hidden && /^#g=/.test(location.hash) && !document.getElementById('map').hidden", 3, "back to the graph")
         self.shot("listening-light")
 
     def test_2_a_dark_theme(self):
@@ -614,7 +614,9 @@ class ListeningPage(tp.PageBase):
             self.assertTargets("Listening")
             self.shot("listening-phone")
             b.js("document.getElementById('ls-back').click()")
-            b.wait_js("document.getElementById('listening').hidden", 3, "back")
+            # home: the page opened at #listening has not landed yet, so it lands (a graph's papers, Back: the list of graphs)
+            b.wait_js("document.getElementById('listening').hidden && (!location.hash || (/^#g=/.test(location.hash)"
+                      " && document.body.classList.contains('gpl-open')))", 3, "back home")
         finally:
             b.viewport(1440, 900)
 

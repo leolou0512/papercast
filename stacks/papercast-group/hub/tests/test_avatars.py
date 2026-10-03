@@ -377,7 +377,7 @@ TAPS = r"""(() => {
   for (const e of document.getElementById('set-body').querySelectorAll(q)) {
     const cs = getComputedStyle(e);
     if (e.closest('[hidden]') || cs.visibility !== 'visible' || cs.pointerEvents === 'none' || !e.getClientRects().length) continue;
-    if ((top && !top.contains(e)) || (open && e.closest('#list-pane'))) continue;
+    if ((top && !top.contains(e)) || (open && e.closest('#gcol, #gpl'))) continue;
     const r = e.getBoundingClientRect();
     if (r.width < 43.5 || r.height < 43.5) bad.push(`${name(e)} is ${r.width.toFixed(1)} x ${r.height.toFixed(1)}`);
     let fixed = false;
@@ -541,19 +541,23 @@ class AvatarPage(unittest.TestCase):
         self.wait(f"!!{meta} && !!{meta}.querySelector('.av img')", "the picture by the comment")
         self.assertEqual(self.js(f"{meta}.querySelector('.av img').getAttribute('src')"), f"/api/avatars/{self.leo}.jpg?v={v}")
         self.assertTrue(self.js(f"{meta}.textContent.startsWith('Leo Lou · ')"))           # the circle adds no text
+        self.js("document.getElementById('bell-btn').click()")                # the board, from the bell
+        self.wait("!document.getElementById('bell-panel').hidden", "the board open")
         bd = "[...document.querySelectorAll('#bd-list .bd-item')].find(x => x.dataset.kind === 'comment')"
         self.wait(f"!!({bd}) && !!({bd}).querySelector('.bd-link .av img')", "the picture on the board")
         self.assertEqual(self.js(f"({bd}).querySelector('.bd-text').textContent"), "Leo Lou commented on A Fake Paper With Faces")
-        # Bob's has none: initials; Bob uploads one elsewhere: this page shows it at once
-        row = f"document.querySelector('#rows .row[data-id=\"{self.pid}\"] .row-by')"
-        self.wait(f"!!{row} && !!{row}.querySelector('.av')", "the row's maker")
-        self.assertEqual(self.js(f"[{row}.querySelector('.av').dataset.i, !{row}.querySelector('.av img'), {row}.textContent]"),
-                         ["B", True, "by Bob"])
+        # Bob's has none: initials (by his upload on the board); Bob uploads one elsewhere: this page shows it at once
+        row = "[...document.querySelectorAll('#bd-list .bd-item')].find(x => x.dataset.kind === 'upload').querySelector('.bd-link')"
+        self.wait(f"!!({row}) && !!({row}).querySelector('.av')", "the upload's maker on the board")
+        self.assertEqual(self.js(f"(r => [r.querySelector('.av').dataset.i, !r.querySelector('.av img'), r.querySelector('.bd-text').textContent])({row})"),
+                         ["B", True, "Bob uploaded A Fake Paper With Faces"])
         s, j, _ = self.hub.req("PUT", "/api/me/avatar", self.real_jpeg("#00aa00"), cookie=self.bob_c)
         self.assertEqual(s, 200, j)
         bv = j["avatar"]
-        self.wait(f"({row}.querySelector('.av img') || {{}}).getAttribute && {row}.querySelector('.av img').getAttribute('src') === '/api/avatars/{self.bob}.jpg?v={bv}'",
+        self.wait(f"(r => !!r.querySelector('.av img') && r.querySelector('.av img').getAttribute('src') === '/api/avatars/{self.bob}.jpg?v={bv}')({row})",
                   "Bob's picture, live")
+        self.js("document.getElementById('bell-btn').click()")
+        self.wait("document.getElementById('bell-panel').hidden", "the board closed")
         # an admin takes Bob's down from Users: gone from the row too
         self.js("location.hash = 'settings=users'")
         item = f"#users .item[data-id=\"{self.bob}\"]"
@@ -565,7 +569,7 @@ class AvatarPage(unittest.TestCase):
         self.js("[...document.querySelectorAll('.menu button')].find(b => b.textContent === 'Remove their picture').click()")
         self.wait(f"!document.querySelector('{item} > .av img')", "Bob's picture gone from the list")
         self.assertIsNone(avatars.version_of(self.bob))
-        self.assertEqual(self.js(f"!!document.querySelector('#rows .row[data-id=\"{self.pid}\"] .row-by .av img')"), False)
+        self.assertEqual(self.js(f"!!({row}).querySelector('.av img')"), False)              # gone from the board too
         # Leo removes his own: initials again, by his comment too
         self.account()
         self.js("document.getElementById('acct-av-rm').click()")

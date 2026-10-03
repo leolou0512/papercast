@@ -461,15 +461,15 @@
     }
 
     // ================================================================ the board
-    // A small panel above the list: the pinned notice, then what happened, newest first. A dot
-    // marks what came since this person last had it open; it can be folded away (this device).
+    // A panel the bell in the column's header opens (DESIGN.md decision 10): the pinned notice,
+    // then what happened, newest first. A dot on the bell says something came since this person
+    // last had it open; in the panel, those are marked.
     const B = {
       items: [], notice: null, seenNow: null, seenSnap: undefined, more: false, limit: BOARD_FIRST,
-      loaded: false, seq: 0, rt: null, seenTimer: null, closed: store.get("pcg.board.closed") === "1", nsig: "", nodes: new Map(),
+      loaded: false, seq: 0, rt: null, seenTimer: null, closed: true, nsig: "", nodes: new Map(),
     };
-    const bDot = el("span", { class: "bd-dot", hidden: true, "aria-hidden": "true" });
-    const bToggle = el("button", { type: "button", class: "bd-toggle", id: "bd-toggle", "aria-controls": "bd-feed" },
-      el("span", { class: "bd-h", text: "Board" }), bDot);
+    const bell = $("bell-btn"), bDot = $("bell-dot") || el("span", { hidden: true }), panel = $("bell-panel");
+    const bToggle = el("h2", { class: "bd-toggle", id: "bd-toggle" }, el("span", { class: "bd-h", text: "Board" }));
     const bPin = el("button", { type: "button", class: "text-btn bd-pin", id: "bd-pin", text: "Pin a notice", hidden: true });
     const nText = el("div", { class: "bd-ntext md", id: "bd-ntext" });
     const nMeta = el("div", { class: "bd-nmeta" });
@@ -487,8 +487,7 @@
     const bFeed = el("div", { class: "bd-feed", id: "bd-feed" }, bList, el("div", { class: "bd-foot" }, bMore, bLess));
     const board = el("section", { class: "board", id: "board", "aria-label": "Board" },
       el("div", { class: "bd-head" }, bToggle, bPin), bForm, bNotice, bFeed);
-    const head = document.querySelector("#list-pane .list-head");
-    if (head) head.after(board); else $("list-pane").prepend(board);
+    panel.append(board);
 
     const after = (a, b) => ms(a) > ms(b);
     const theirs = (it) => !(it.user && it.user.id === me().id);
@@ -496,20 +495,40 @@
     function drawDot() {
       const on = B.loaded && unreadNow();
       bDot.hidden = !on;
-      bToggle.setAttribute("aria-label", on ? "Board, something new" : "Board");
+      if (bell) bell.setAttribute("aria-label", on ? "Board, something new" : "Board");
     }
     function drawToggle() {
-      bToggle.setAttribute("aria-expanded", String(!B.closed));
-      bFeed.hidden = B.closed;
-      board.classList.toggle("closed", B.closed);
+      if (bell) bell.setAttribute("aria-expanded", String(!B.closed));
+      panel.hidden = B.closed;
     }
-    bToggle.addEventListener("click", () => {
-      B.closed = !B.closed;
-      store.set("pcg.board.closed", B.closed ? "1" : "0");
+    // Under the bell, inside the screen.
+    function placePanel() {
+      if (panel.hidden || !bell) return;
+      const z = document.documentElement.currentCSSZoom || 1, r = bell.getBoundingClientRect(), w = panel.offsetWidth;
+      const vw = window.innerWidth / z;
+      panel.style.top = `${Math.round(r.bottom / z + 6)}px`;
+      panel.style.left = `${Math.round(Math.max(8, Math.min(vw - w - 8, r.left / z - 8)))}px`;
+    }
+    function openBoard(on) {
+      if (B.closed === !on) return;
+      B.closed = !on;
       if (B.closed) { B.limit = BOARD_FIRST; B.seenSnap = undefined; }
       else { B.seenSnap = B.seenNow; }      // opened: what is new since the last time is marked
-      drawToggle(); drawBoard(); maybeSeen();
-    });
+      drawToggle(); drawBoard(); placePanel(); maybeSeen();
+      if (!B.closed) { panel.focus({ preventScroll: true }); loadBoard(); }
+    }
+    if (bell) bell.addEventListener("click", (e) => { e.stopPropagation(); openBoard(B.closed); });
+    document.addEventListener("pointerdown", (e) => {
+      if (!B.closed && !panel.contains(e.target) && !(bell && bell.contains(e.target)) && !e.target.closest(".menu")) openBoard(false);
+    }, true);
+    window.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || B.closed || document.body.classList.contains("touring")) return;
+      if (!bForm.hidden && bForm.contains(document.activeElement)) return;       // the notice's own Escape: nothing
+      e.stopPropagation(); e.preventDefault();
+      openBoard(false);
+      if (bell) bell.focus({ preventScroll: true });
+    }, true);
+    window.addEventListener("resize", placePanel);
     bPin.addEventListener("click", () => { bForm.hidden = !bForm.hidden; if (!bForm.hidden) fIn.focus(); });
     fIn.addEventListener("input", () => { fGo.disabled = !fIn.value.trim(); fMsg.textContent = ""; ctx.typed(); });
     bForm.addEventListener("submit", async (e) => {
@@ -523,7 +542,7 @@
       } catch (err) { fMsg.textContent = err.message; fGo.disabled = false; }
     });
     bMore.addEventListener("click", () => { B.limit += BOARD_STEP; loadBoard(); });
-    bLess.addEventListener("click", () => { B.limit = BOARD_FIRST; loadBoard(); board.scrollIntoView({ block: "nearest" }); });
+    bLess.addEventListener("click", () => { B.limit = BOARD_FIRST; loadBoard(); panel.scrollTop = 0; });
 
     function drawNotice() {
       const n = B.notice;
@@ -551,11 +570,12 @@
           if (e.button || e.metaKey || e.ctrlKey || e.shiftKey) return;
           e.preventDefault();
           if (it.comment_id) C.focus = { pid: it.paper_id, cid: it.comment_id };
+          openBoard(false);
           ctx.openPaper(it.paper_id);
           if (C.pid === it.paper_id) showFocus();
         } }, who, text, when);
       } else if (it.graph_id) {
-        link = el("button", { type: "button", class: "bd-link", onclick: () => ctx.openGraph(it.graph_id) }, who, text, when);
+        link = el("button", { type: "button", class: "bd-link", onclick: () => { openBoard(false); ctx.openGraph(it.graph_id); } }, who, text, when);
       } else {
         link = el("div", { class: "bd-link bd-plain" }, who, text, when);
       }
@@ -599,14 +619,9 @@
       retime();
       maybeSeen();
     }
-    // Seen: the board is open and on the screen, and the page is in front.
+    // Seen: the board's panel is open, and the page is in front.
     function onScreen() {
-      if (B.closed || document.visibilityState !== "visible" || !board.getClientRects().length) return false;
-      const map = $("map");
-      if (map && !map.hidden) return false;
-      if (ctx.phone() && document.body.classList.contains("open")) return false;
-      const pane = $("list-pane").getBoundingClientRect(), r = board.getBoundingClientRect();
-      return r.bottom > pane.top && r.top < pane.bottom;
+      return !B.closed && document.visibilityState === "visible" && !!board.getClientRects().length;
     }
     const needSeen = () => B.loaded && !B.closed && B.items.length > 0 && (!B.seenNow || after(B.items[0].at, B.seenNow));
     function maybeSeen() {
@@ -621,7 +636,6 @@
     }
     document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") { retime(); maybeSeen(); } });
     window.addEventListener("hashchange", () => setTimeout(maybeSeen, 300));
-    $("list-pane").addEventListener("scroll", () => { if (needSeen()) maybeSeen(); }, { passive: true });
 
     function onBoard(d) {
       if (!d) return;

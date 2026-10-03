@@ -350,10 +350,10 @@ class Board(unittest.TestCase):
 # ==================================================================== in the browser
 
 try:
-    from test_page import ROW, SKIP, PageBase
+    from test_page import SKIP, TAP_TARGETS, PageBase
     from web_cdp import Browser
 except ImportError as e:                 # no websocket-client: test_page says so itself
-    SKIP, PageBase, ROW, Browser = f"browser tests unavailable: {e}", unittest.TestCase, "", None
+    SKIP, PageBase, Browser, TAP_TARGETS = f"browser tests unavailable: {e}", unittest.TestCase, None, ""
 
 HOSTILE = ('<script>window.__pwned = 1</script><img src=x onerror="window.__pwned = 2"> <b>bold</b> '
            'javascript:alert(1) [x](javascript:alert(2)) see https://example.org/a_(b). and '
@@ -429,6 +429,19 @@ class Page(PageBase):
     def board_texts(self, b=None):
         return json.loads((b or self.b).js("JSON.stringify([...document.querySelectorAll('#bd-list .bd-item .bd-text')].map(x => x.textContent))"))
 
+    def assertTargets(self, where):
+        self.b.wait_js("['win', 'gpl'].every(id => (w => !w || !w.getAnimations().length)(document.getElementById(id)))", 3, "the window at rest")
+        bad = json.loads(self.b.js(TAP_TARGETS))      # (it scrolls what is in the bell's panel into it first)
+        self.assertEqual(bad, [], f"phone, {where}: {len(bad)} tap target(s) too small or covered:\n" + "\n".join(bad))
+
+    def bell(self, on=True):
+        """The board's panel, from the bell in the column's header, open (or closed)."""
+        if self.b.js("document.getElementById('bell-panel').hidden") == on:
+            self.b.js("document.getElementById('bell-btn').click()")
+        self.b.wait_js(f"document.getElementById('bell-panel').hidden === {'false' if on else 'true'}"
+                       f" && document.getElementById('bell-btn').getAttribute('aria-expanded') === '{'true' if on else 'false'}'", 3,
+                       "the board open" if on else "the board closed")
+
     # ------------------------------------------------------------------ tests
     def test_1_time_links_play_from_there(self):
         b = self.b
@@ -439,10 +452,12 @@ class Page(PageBase):
             links = json.loads(b.js("JSON.stringify([...document.querySelectorAll('#c-list .c-time')].map(a => [a.textContent, a.dataset.t, a.dataset.ep]))"))
             self.assertEqual(links, [["0:12", "12", self.e30]])
             self.assertEqual(b.js("document.getElementById('c-text').value"), "")
+            where = b.js("location.hash")
+            self.assertTrue(where.endswith(f"&p={self.t30}"), where)
             b.js("document.getElementById('audio').muted = true; document.querySelector('#c-list .c-time').click()")
             b.wait_js(f"(() => {{ const a = document.getElementById('audio'); return a.getAttribute('src') === '/audio/{self.e30}.mp3'"
                       " && !a.paused && a.currentTime >= 12 && a.currentTime < 20; })()", 10, "playing from 0:12")
-            self.assertEqual(b.js("location.hash"), f"#p={self.t30}")          # the link only plays
+            self.assertEqual(b.js("location.hash"), where)          # the link only plays
             # "Comment at": where the player is goes into the box
             b.wait_js("!document.getElementById('c-at').hidden && /^Comment at 0:1\\d$/.test(document.getElementById('c-at').textContent)", 5, "Comment at")
             b.js("document.getElementById('audio').pause()")
@@ -452,7 +467,7 @@ class Page(PageBase):
             self.assertTrue(b.js("document.activeElement === document.getElementById('c-text')"))
             b.js("document.getElementById('c-at').click()")                   # a time already there is replaced
             self.assertEqual(b.js("document.getElementById('c-text').value"), label.replace("Comment at ", "") + " a thought")
-            self.assertEqual(self.text(ROW.format(self.t30) + " .row-sub .nc"), "· 1 comment")
+            self.assertEqual(self.text("#c-h"), "Comments (1)")
             # the draft outlives a reload of the page (this tab)
             self.load(f"p={self.t30}")
             b.wait_js("document.getElementById('c-text').value.endsWith(' a thought')", 5, "draft kept")
@@ -492,6 +507,7 @@ class Page(PageBase):
         self.r.q("UPDATE papers SET title = ? WHERE id = ?", "<img src=x onerror=\"window.__pwned=3\">Fake", self.others[0])
         try:
             self.home(A)
+            self.bell()
             b.wait_js("[...document.querySelectorAll('#bd-list .bd-t')].some(x => x.textContent.startsWith('<img'))"
                       " || (document.getElementById('bd-more').click(), false)", 10, "the hostile title on the board")
             self.assertEqual(b.js("typeof window.__pwned + document.querySelectorAll('#board img').length"), "undefined0")
@@ -507,13 +523,13 @@ class Page(PageBase):
             b2.viewport(1440, 900)
             b2.call("Network.setExtraHTTPHeaders", headers={"X-Test-User": B})
             b2.goto(self.base + f"/#p={self.t30}")
-            b2.wait_js("!document.getElementById('comments').hidden && !!document.querySelector('#c-list .c-none')", 10, "Bob's page")
-            # Bob writes; Alice's page shows it, and the row's count, with no reload
+            b2.wait_js("!document.getElementById('comments').hidden && !!document.querySelector('#c-list .c-none')"
+                       " && !document.getElementById('paper').hidden", 10, "Bob's page")
+            # Bob writes; Alice's page shows it, and the count, with no reload
             b2.js("{ const t = document.getElementById('c-text'); t.value = 'Bob, live, at 0:03.'; t.dispatchEvent(new Event('input')); }")
             b2.js("document.getElementById('c-post').click()")
             b.wait_js("[...document.querySelectorAll('#c-list .c-body')].some(x => x.textContent === 'Bob, live, at 0:03.')", 5, "live on Alice's page")
-            b.wait_js(f"(document.querySelector('{ROW.format(self.t30)} .row-sub .nc') || {{}}).textContent === '· 1 comment'", 5, "the count")
-            self.assertEqual(self.text("#c-h"), "Comments (1)")
+            b.wait_js("document.getElementById('c-h').textContent === 'Comments (1)'", 5, "the count")
             cid = self.items()[0]
             self.assertEqual(self.acts(cid), ["reply", "delete"])        # Alice is an admin: not hers to edit
             # Bob replies: nested under it on Alice's page
@@ -575,6 +591,7 @@ class Page(PageBase):
         c = self.api_post("A comment for the board.", user=A, pid=self.two)
         try:
             self.home(CAROL)
+            self.bell()
             b.wait_js("document.querySelectorAll('#bd-list .bd-item').length === 5", 5, "the board")
             t = self.board_texts()
             self.assertEqual(sorted(t[:2]), ["Alice commented on Two Fake Versions To Talk About", "Bob edited the graph Fake Diffusion (2 changes)"])   # the same second
@@ -588,19 +605,24 @@ class Page(PageBase):
             self.assertIn("Carol joined", t)
             b.js("document.getElementById('bd-less').click()")
             b.wait_js("document.querySelectorAll('#bd-list .bd-item').length === 5", 5, "show fewer")
-            # a comment's item opens the paper at that comment
+            # a comment's item opens the paper (in a graph that has it) at that comment, and the panel goes
             b.js("document.querySelector('#bd-list .bd-item[data-kind=comment] .bd-link').click()")
-            b.wait_js(f"location.hash === '#p={self.two}' && !!document.querySelector('.c-item[data-id=\"{c['id']}\"].c-flash')", 5, "opened at the comment")
+            b.wait_js(f"location.hash.endsWith('&p={self.two}') && !document.getElementById('paper').hidden"
+                      f" && !!document.querySelector('.c-item[data-id=\"{c['id']}\"].c-flash')", 5, "opened at the comment")
+            self.assertTrue(b.js("document.getElementById('bell-panel').hidden"))
             # an upload's opens its paper
+            self.bell()
             b.js("[...document.querySelectorAll('#bd-list .bd-item[data-kind=upload] .bd-link')][0].click()")
-            b.wait_js(f"location.hash === '#p={self.others[5]}'", 5, "opened the upload")
-            # a graph's opens the map on that graph
+            b.wait_js(f"location.hash.endsWith('&p={self.others[5]}') && document.getElementById('w-title').textContent === 'Filler fake paper 5'", 5, "opened the upload")
+            # a graph's: the map, on that graph (the home), the paper's window closed
+            self.bell()
             b.js("document.querySelector('#bd-list .bd-item[data-kind=graph] .bd-link').click()")
-            b.wait_js("!document.getElementById('map').hidden && !!(window.PaperMap && window.PaperMap.current)", 10, "the map")
-            b.wait_js(f"(() => {{ try {{ return PaperMap.current.debug.cur().id === '{gid}'; }} catch (e) {{ return true; }} }})()", 10, "on that graph")
+            b.wait_js(f"location.hash === '#g={gid}' && !document.getElementById('map').hidden && document.getElementById('paper').hidden"
+                      f" && PaperMap.current.debug.cur().id === '{gid}'", 10, "the map on that graph")
             b.js("history.back()")
-            b.wait_js("document.getElementById('map').hidden", 5, "map closed")
+            b.wait_js(f"location.hash.endsWith('&p={self.others[5]}')", 5, "back where it was")
         finally:
+            b.goto("about:blank")              # the page gone before the graph it shows is
             r.q("DELETE FROM links"); r.q("DELETE FROM graph_members"); r.q("DELETE FROM layout")
             r.q("UPDATE graphs SET deleted_at = '2026-09-01T00:00:00Z' WHERE id = ?", gid)
             r.q("DELETE FROM graph_log")
@@ -608,6 +630,7 @@ class Page(PageBase):
     def test_7_pinned_notice(self):
         b, r = self.b, self.r
         self.home(A)
+        self.bell()
         b.js("document.getElementById('bd-pin').click()")
         b.js("{ const t = document.getElementById('bd-nin'); t.value = 'Reading group Thursday 3 pm: the diffusion graph, https://example.org/rg'; t.dispatchEvent(new Event('input')); }")
         b.js("document.getElementById('bd-ngo').click()")
@@ -617,13 +640,14 @@ class Page(PageBase):
         self.assertIsNotNone(b.js("document.getElementById('bd-unpin')"))
         # Carol sees it on top, and cannot pin or unpin
         self.home(CAROL)
+        self.bell()
         b.wait_js("!document.getElementById('bd-notice').hidden", 5, "Carol sees it")
         self.assertTrue(b.js("document.getElementById('bd-pin').hidden && !document.getElementById('bd-unpin')"))
         self.assertTrue(b.js("document.getElementById('bd-notice').compareDocumentPosition(document.getElementById('bd-list')) & Node.DOCUMENT_POSITION_FOLLOWING"))
-        # folded, the notice still shows
-        b.js("document.getElementById('bd-toggle').click()")
-        self.assertTrue(b.js("document.getElementById('bd-feed').hidden && !document.getElementById('bd-notice').hidden"))
-        b.js("document.getElementById('bd-toggle').click()")
+        # the panel closed and open again: the notice still on top
+        self.bell(False)
+        self.bell()
+        self.assertFalse(b.js("document.getElementById('bd-notice').hidden"))
         # unpinned by Alice: gone from Carol's page, live
         n = r.req("GET", "/api/board", user=A)[1]["notice"]
         self.assertEqual(r.req("DELETE", f"/api/board/notice/{n['id']}", user=A)[0], 200)
@@ -631,36 +655,46 @@ class Page(PageBase):
         b.js("localStorage.clear()")
 
     def test_8_unread_dot(self):
+        """The bell's dot: something on the board came since this person last had it open. Opened,
+        what is new since then is marked, and it is seen (the dot goes; the marks stay until the
+        next time)."""
         b, r = self.b, self.r
-        dot = "!document.querySelector('#bd-toggle .bd-dot').hidden"
+        dot = "!document.getElementById('bell-dot').hidden"
         unread = "document.querySelectorAll('#bd-list .bd-item.unread').length"
         r.q("INSERT INTO board_seen(user_id, at) VALUES (?, '2026-09-01T08:00:00Z')", self.carol)
         self.api_post("Carol's own words.", user=CAROL)
         self.home(CAROL)
+        b.wait_js(f"{dot} && document.getElementById('bell-btn').getAttribute('aria-label') === 'Board, something new'", 5, "the dot")
+        self.assertEqual(b.js(unread), 0)                   # closed: nothing marked yet
+        self.bell()
         b.wait_js(f"{unread} === 4", 5, "items since Carol last looked")
         self.assertEqual(b.js("document.querySelector('#bd-list .bd-item[data-kind=comment]').className"), "bd-item")   # her own: not new to her
-        # open and on the screen: seen (the dot on the board goes, the new items keep theirs until the next visit)
+        # open and on the screen: seen (the dot goes, the new items keep their marks until the next visit)
         b.wait_js(f"!({dot})", 5, "seen")
         self.assertGreater(r.q("SELECT at FROM board_seen WHERE user_id = ?", self.carol)[0][0], "2026-09-02")
         self.assertEqual(b.js(unread), 4)
+        self.assertEqual(b.js("document.getElementById('bell-btn').getAttribute('aria-label')"), "Board")
         self.home(CAROL)
+        self.bell()
         b.wait_js("document.querySelectorAll('#bd-list .bd-item').length === 5", 5, "board")
         b.pump(0.3)
         self.assertEqual((b.js(unread), b.js(dot)), (0, False))
-        # folded away, something new: the dot; unfolded, seen
-        b.js("document.getElementById('bd-toggle').click()")
+        # closed, something new: the dot, and not seen; opened, seen
+        self.bell(False)
         self.api_post("Something new from Bob.", user=B)
-        b.wait_js(dot, 5, "the dot while folded")
+        b.wait_js(dot, 5, "the dot while closed")
         self.assertEqual(r.q("SELECT count(*) FROM board_seen WHERE user_id = ? AND at >= (SELECT max(created_at) FROM comments)", self.carol)[0][0], 0)
-        b.js("document.getElementById('bd-toggle').click()")
+        self.bell()
         b.wait_js(f"!({dot}) && {unread} === 1", 5, "seen again")
         b.js("localStorage.clear()")
 
     def test_9_a_column_right_of_the_transcript(self):
-        """On a wide screen the comments are a slim column on the right, as tall as the window,
-        the box to write in at its foot; its list scrolls on its own, the transcript not with it;
-        a time in it still plays from there."""
+        """On a wide screen the paper's window is wide enough (660 CSS px and up) for the comments to
+        be a slim column on its right, as tall as the window, the box to write in at its foot; its
+        list scrolls on its own, the transcript not with it; a time in it still plays from there."""
         b = self.b
+        b.viewport(2560, 1440)                                         # at 125%: the window 760 CSS px wide
+        self.addCleanup(lambda: b.viewport(1440, 900))
         for i in range(14):
             self.api_post(f"Comment {i} at 0:0{i % 10}, long enough to take a couple of lines in a slim column.", user=B if i % 2 else CAROL)
         script = self.r.cfg.episodes / self.e30 / "script.md"          # a transcript, long enough to scroll
@@ -671,9 +705,10 @@ class Page(PageBase):
             b.wait_js("!document.getElementById('tr').hidden", 5, "the transcript")
             b.wait_js("document.querySelectorAll('#c-list .c-item').length === 14", 5, "the comments")
             box = lambda sel: b.js(f"(r => [r.left, r.top, r.right, r.bottom])(document.querySelector({json.dumps(sel)}).getBoundingClientRect())")
-            col, mid, win, vw, z = box("#comments"), box("#p-mid"), box("#win"), b.js("innerWidth"), b.js("document.documentElement.currentCSSZoom || 1")
+            col, mid, win, z = box("#comments"), box("#p-mid"), box("#win"), b.js("document.documentElement.currentCSSZoom || 1")
+            inner = b.js("(w => w.getBoundingClientRect().left + (w.clientLeft + w.clientWidth) * (document.documentElement.currentCSSZoom || 1))(document.getElementById('win'))")
             self.assertTrue(280 <= (col[2] - col[0]) / z <= 341, f"the column is {(col[2] - col[0]) / z} CSS px wide")
-            self.assertAlmostEqual(col[2], vw, delta=1, msg="not at the right edge")
+            self.assertAlmostEqual(col[2], inner, delta=1, msg="not at the window's right edge")
             self.assertAlmostEqual(mid[2], col[0], delta=1, msg="not right of the middle")
             self.assertEqual([round(col[1]), round(col[3])], [round(win[1]), round(win[3])], "not as tall as the window")
             self.assertAlmostEqual(box(".c-compose")[3], col[3], delta=1, msg="the box is not at the column's foot")
@@ -702,6 +737,41 @@ class Page(PageBase):
             b.js("document.getElementById('audio').pause(); localStorage.clear(); sessionStorage.clear()")
             self.r.q("DELETE FROM positions")
 
+    def test_9b_transcript_and_comments_tabs_in_a_narrower_window(self):
+        """At 1440 x 900 the paper's window over the map's side is too narrow for a column of
+        comments (660 CSS px and up): the transcript and the comments are two tabs, as on a phone;
+        a time in the comments still plays from there."""
+        b = self.b
+        for i in range(4):                       # a few (each person's comments are rate-limited, in this process)
+            self.api_post(f"Comment {i} at 0:0{i + 4}.", user=B if i % 2 else CAROL)
+        script = self.r.cfg.episodes / self.e30 / "script.md"          # a transcript, long enough to scroll
+        script.write_text("# Opening\n\n" + "".join(f"Paragraph {w} of plain made-up words about nothing much. It is only here to be long.\n\n"
+                                                      for w in ("one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten")))
+        try:
+            self.comments_open(self.t30, A)
+            b.wait_js("!document.getElementById('tr').hidden && document.getElementById('paper').classList.contains('has-tr')", 5, "the transcript")
+            b.wait_js("document.querySelectorAll('#c-list .c-item').length === 4", 5, "the comments")
+            win, vw, z = b.js("(r => [r.left, r.right])(document.getElementById('win').getBoundingClientRect())"), b.js("innerWidth"), b.js("document.documentElement.currentCSSZoom || 1")
+            self.assertAlmostEqual(win[1], vw, delta=1, msg="the window is not at the right edge")
+            self.assertLess((win[1] - win[0]) / z, 660, "the window is wide enough for a column")
+            self.assertEqual(b.js("getComputedStyle(document.getElementById('ptabs')).display"), "flex")
+            self.assertEqual(b.js("[document.getElementById('pt-tr').getAttribute('aria-selected'), document.getElementById('pt-c').textContent]"),
+                             ["true", "Comments (4)"])
+            self.assertEqual(b.js("getComputedStyle(document.getElementById('comments')).display"), "none")
+            b.js("document.getElementById('pt-c').click()")
+            b.wait_js("getComputedStyle(document.getElementById('comments')).display !== 'none'"
+                      " && getComputedStyle(document.getElementById('tr')).display === 'none'", 3, "the comments' tab")
+            self.shot("desktop-comments-tab")
+            # a time in a comment plays from there
+            b.js("document.getElementById('audio').muted = true; document.querySelector('#c-list .c-time[data-t=\"5\"]').click()")
+            b.wait_js(f"(a => a.getAttribute('src') === '/audio/{self.e30}.mp3' && !a.paused && a.currentTime >= 5)(document.getElementById('audio'))", 10, "playing from 0:05")
+            b.js("document.getElementById('pt-tr').click()")
+            b.wait_js("getComputedStyle(document.getElementById('tr')).display !== 'none'", 3, "the transcript's tab")
+        finally:
+            script.unlink(missing_ok=True)
+            b.js("document.getElementById('audio').pause(); localStorage.clear(); sessionStorage.clear()")
+            self.r.q("DELETE FROM positions")
+
     def test_z_phone_tap_targets(self):
         b, r = self.b, self.r
         st, n, _ = r.req("POST", "/api/board/notice", {"body": "Reading group Thursday 3 pm, notes at https://example.org/notes"}, user=A)
@@ -711,16 +781,20 @@ class Page(PageBase):
         try:
             self.phone()
             self.home(A)
+            # the bell is in the list of graphs' header: back there from the graph it landed in
+            b.js("document.getElementById('gpl-back').click()")
+            b.wait_js("!document.body.classList.contains('gpl-open')", 5, "the list of graphs")
+            self.bell()
             b.wait_js("document.querySelectorAll('#bd-list .bd-item').length === 5 && !document.getElementById('bd-notice').hidden", 5, "board")
-            self.assertTargets("the list with the board")
-            self.no_side_scroll("the list with the board")
+            self.assertTargets("the board")
+            self.no_side_scroll("the board")
             b.js("document.getElementById('bd-pin').click()")
             self.assertTargets("the notice form")
             b.js("document.getElementById('bd-more').click()")
             b.wait_js("document.querySelectorAll('#bd-list .bd-item').length > 5", 5, "more")
             self.assertTargets("the board, more")
             self.shot("phone-board")
-            b.js("document.getElementById('list-pane').scrollTop = 0")
+            self.bell(False)
             self.open(self.t30)
             b.wait_js("getComputedStyle(document.getElementById('win')).visibility === 'visible' && document.querySelectorAll('#c-list .c-item').length === 3", 10, "comments")
             # no transcript here: no tabs, the comments under the paper's head (test_player has the tabs)

@@ -7,8 +7,8 @@ test_accounts.py drives it) for the order of a first sign-in, and headless Chrom
 
 What is checked: the hub keeps each person's tour (new, started, finished, skipped; someone who used
 the site before the tour existed is "old"), and Tour again for three days after the first time it
-saw them, by its own clock; a first sign-in changes the password first, then the tour starts on
-the library; each step's hole sits on its real control (the control's box against the hole's),
+saw them, by its own clock; a first sign-in changes the password first, then the tour starts at
+home (the graph list and the map, where the page landed); each step's hole sits on its real control (the control's box against the hole's),
 follows it on a scroll and a resize, and an arrow points at it; a step whose control is not
 there is left out (no transcript, locked graphs, an empty library); Back, Next, the arrow keys,
 Escape, and the keyboard kept in the tour; Skip ends it for good, on a second browser too; the
@@ -45,16 +45,16 @@ SCRIPT = ("# The idea\n\nA fake model learns to undo noise one small step at a t
           "A second paragraph says a little more. It has two sentences.\n\n"
           + "".join(f"Paragraph {w} goes on about nothing much, in plain made-up words. It is here so the page is long enough to scroll.\n\n"
                     for w in ("three", "four", "five", "six", "seven", "eight", "nine", "ten")))
-STEPS = ["search", "play", "listened", "upnext", "transcript", "comments", "map", "link", "settings", "help"]
+STEPS = ["search", "subscribe", "play", "listened", "upnext", "transcript", "comments", "link", "settings", "help"]
 # the control each step must spotlight, found on the page independently of the tour
 TARGETS = {
-    "search": "document.querySelector('#list-pane .search')",
+    "search": "document.querySelector('#gcol .search')",
+    "subscribe": "[...document.querySelectorAll('#gl .gl-sub')].find(e => e.getClientRects().length && getComputedStyle(e).visibility === 'visible')",
     "play": "document.getElementById('p-play')",
     "listened": "document.getElementById('w-listened')",
     "upnext": "[...document.querySelectorAll('.menu [role=menuitem]')].find(b => b.textContent === 'Add to Up next')",
     "transcript": "document.querySelector('#tr-body .tr-p .tr-s')",
     "comments": "document.getElementById('c-text')",
-    "map": "document.getElementById('map-btn')",
     "link": "document.querySelector('#map .pm-card .pm-linkto')",
     "settings": "document.getElementById('set-btn')",
     "help": "document.getElementById('help-btn')",
@@ -255,13 +255,22 @@ class PageBase(unittest.TestCase):
         db.conn().execute("DELETE FROM tour WHERE user_id = ?", (uid,))
 
     def home(self, email, clear=True):
+        """The page as it lands: the graph list and the map (a phone: the graph's papers); with
+        `clear`, nothing remembered (the browser's storage, the account's graph open last)."""
         self.as_user(email)
+        if clear:
+            db.conn().execute("DELETE FROM ui_state")
         self.b.goto("about:blank")
         self.b.goto(self.base + "/")
         if clear:
             self.js("localStorage.clear(); sessionStorage.clear()")
             self.b.goto(self.base + "/")
-        self.wait("!!window.PaperTour && !!PaperTour.current && document.title === 'Papers'", "the page started")
+        self.wait("!!window.PaperTour && !!PaperTour.current && document.title === 'Papers'"
+                  " && document.querySelectorAll('#gl .gl-row').length > 0 && /^#g=/.test(location.hash)", "the page started")
+
+    def landed(self):
+        """Where the page lands for someone new: the graph with the most papers (the diffusion one)."""
+        return "#g=" + db.conn().execute("SELECT id FROM graphs WHERE name = 'Diffusion and generative models'").fetchone()[0]
 
     def key(self, k, shift=False):
         kw = {"key": k, "code": {"/": "Slash"}.get(k, k), "windowsVirtualKeyCode": KEYS[k], "modifiers": 8 if shift else 0}
@@ -309,6 +318,7 @@ class PageBase(unittest.TestCase):
 class TourPage(PageBase):
     @classmethod
     def fill(cls):
+        graph.ensure_schema()                     # the seed graphs: the papers are in the diffusion one
         cls.pids = fill(cls.r, cls.alice)
         cls.nia = new_user(NIA, "Nia", "contributor")
         cls.vic = new_user(VIC, "Vic", "viewer")
@@ -329,7 +339,7 @@ class TourPage(PageBase):
         self.fresh(self.nia)
         self.home(NIA)
         st = self.settle("search")
-        self.assertEqual(st["text"], "Search inside papers, or filter")
+        self.assertEqual(st["text"], "Search papers and graphs")
         self.assertEqual(self.r.q("SELECT state FROM tour WHERE user_id = ?", self.nia)[0][0], "started")
         texts = {}
         for i, sid in enumerate(STEPS):
@@ -338,7 +348,8 @@ class TourPage(PageBase):
             g = self.assertSpotlight(sid, where="desktop")
             self.assertEqual(self.js("document.getElementById('tour-n').textContent"), f"{i + 1} / 10")
             if sid == "play":
-                self.assertEqual(self.js("location.hash"), f"#p={self.pids[-1]}")      # the newest paper, opened for it
+                # a paper of the graph on the screen, opened in it for the tour
+                self.assertRegex(self.js("location.hash"), "^" + re.escape(self.landed()) + "&p=(" + "|".join(self.pids) + ")$")
                 # it follows the control when the page moves under it
                 self.b.viewport(1100, 760)
                 time.sleep(0.2)
@@ -356,9 +367,9 @@ class TourPage(PageBase):
             if i < len(STEPS) - 1:
                 self.js("document.getElementById('tour-next').click()")
         self.assertEqual(texts, {
-            "search": "Search inside papers, or filter", "play": "Play the episode", "listened": "Tick it when you’ve listened",
-            "upnext": "Add it to Up next", "transcript": "Tap a sentence to play from there", "comments": "Comment on the paper",
-            "map": "The map of how papers connect", "link": "Link two papers", "settings": "Your voice and preferences",
+            "search": "Search papers and graphs", "subscribe": "Subscribe to a graph", "play": "Play the episode",
+            "listened": "Tick it when you’ve listened", "upnext": "Add it to Up next", "transcript": "Tap a sentence to play from there",
+            "comments": "Comment on the paper", "link": "Link two papers", "settings": "Your voice and preferences",
             "help": "How to add papers"})
         self.assertEqual(self.js("document.getElementById('tour-next').textContent"), "Done")
         # the page untouched by it: nothing ticked, queued or played
@@ -369,8 +380,13 @@ class TourPage(PageBase):
         self.wait("!PaperTour.current.state().on && !document.getElementById('tour')", "the tour ended")
         self.wait("PaperTour.current.state().hub.state === 'finished'", "finished, on the hub")
         self.assertEqual(self.r.q("SELECT state FROM tour WHERE user_id = ?", self.nia)[0][0], "finished")
-        # put back: the list with nothing open, no menu, no map, and nothing new remembered
-        self.wait("location.hash === '' && document.getElementById('paper').hidden && document.getElementById('map').hidden", "the page as it was")
+        # put back: the graph it landed on, with nothing open, no menu, and nothing new remembered
+        now = "JSON.stringify([location.hash, document.getElementById('paper').hidden, document.getElementById('map').hidden, PaperMap.current.debug.state().sel])"
+        want = json.dumps([self.landed(), True, False, None], separators=(",", ":"))
+        try:
+            self.wait(f"{now} === {json.dumps(want)}", "the page as it was")
+        except AssertionError:
+            self.assertEqual(self.js(now), want, "the page as it was")
         self.assertFalse(self.js("!!document.querySelector('.menu')"))
         self.assertIsNone(self.js("localStorage.getItem('pcg.last')"))
         self.assertIsNone(self.js("localStorage.getItem('pcg.map.tab')"))
@@ -392,12 +408,12 @@ class TourPage(PageBase):
         self.home(NIA)
         self.settle("search")
         self.key("ArrowRight")
-        self.settle("play")
+        self.settle("subscribe")
         self.key("ArrowRight")
-        self.settle("listened")
-        self.key("ArrowLeft")
         self.settle("play")
-        self.assertSpotlight("play", where="back")
+        self.key("ArrowLeft")
+        self.settle("subscribe")
+        self.assertSpotlight("subscribe", where="back")
         self.key("ArrowLeft")
         self.settle("search")
         self.assertTrue(self.js("document.getElementById('tour-back').disabled"))
@@ -418,14 +434,17 @@ class TourPage(PageBase):
         self.assertNotEqual(self.js("document.activeElement.id"), "search")
         self.js("document.querySelector('#tour .tour-block').click()")
         self.assertEqual(self.state()["id"], "search")
-        # Enter on the words is Next
+        # Enter on the words is Next, twice: to the paper it opens
+        self.js("document.getElementById('tour-card').focus()")
+        self.key("Enter")
+        self.settle("subscribe")
         self.js("document.getElementById('tour-card').focus()")
         self.key("Enter")
         self.settle("play")
         self.key("Escape")
         self.wait("!PaperTour.current.state().on", "Escape skips")
         self.wait("PaperTour.current.state().hub.state === 'skipped'", "skipped, on the hub")
-        self.wait("location.hash === '' && document.getElementById('paper').hidden", "the paper it opened, closed again")
+        self.wait(f"location.hash === {json.dumps(self.landed())} && document.getElementById('paper').hidden", "the paper it opened, closed again")
         # skipped for good
         self.home(NIA, clear=False)
         time.sleep(1.0)
@@ -444,18 +463,27 @@ class TourPage(PageBase):
             self.assertEqual(bad, [], f"phone, the tour at {sid}:\n" + "\n".join(bad))
             if sid in ("play", "comments"):
                 self.assertTrue(self.js("document.body.classList.contains('open')"), "the paper's window, open over the list")
-            if sid in ("search", "map", "settings", "help"):
-                self.assertFalse(self.js("document.body.classList.contains('open')"), f"{sid}: the list, on top")
+            if sid in ("search", "subscribe", "settings", "help"):
+                self.assertFalse(self.js("document.body.classList.contains('open') || document.body.classList.contains('gpl-open')"
+                                         " || !document.getElementById('map').hidden"), f"{sid}: the list of graphs, on top")
+            if sid == "link":
+                self.assertFalse(self.js("document.getElementById('map').hidden"), "link: the graph's drawing")
             if i < len(STEPS) - 1:
                 self.js("document.getElementById('tour-next').click()")
         self.js("document.getElementById('tour-skip').click()")
-        self.wait("!PaperTour.current.state().on && location.hash === '' && !document.body.classList.contains('open')", "put back")
+        self.wait(f"!PaperTour.current.state().on && location.hash === {json.dumps(self.landed())} && !document.body.classList.contains('open')"
+                  " && document.body.classList.contains('gpl-open') && document.getElementById('map').hidden", "put back: the graph's papers")
         self.wait("!document.getElementById('tour-again').hidden", "Tour again")
-        # the page's own tap check, with Tour again on it
+        # the page's own tap check, with Tour again on it: the graph's papers, then the list of graphs
         import test_page
+        self.wait("(w => !w.getAnimations().length)(document.getElementById('gpl'))", "at rest")
         bad = json.loads(self.js(test_page.TAP_TARGETS))
-        self.assertEqual(bad, [], "phone, the list with Tour again:\n" + "\n".join(bad))
-        for w in ("document.documentElement", "document.getElementById('list-pane')"):
+        self.assertEqual(bad, [], "phone, a graph's papers with Tour again:\n" + "\n".join(bad))
+        self.js("document.getElementById('gpl-back').click()")
+        self.wait("!document.body.classList.contains('gpl-open') && (w => !w.getAnimations().length)(document.getElementById('gpl'))", "the list of graphs")
+        bad = json.loads(self.js(test_page.TAP_TARGETS))
+        self.assertEqual(bad, [], "phone, the list of graphs with Tour again:\n" + "\n".join(bad))
+        for w in ("document.documentElement", "document.getElementById('gcol')", "document.getElementById('gpl')"):
             self.assertLessEqual(self.js(f"{w}.scrollWidth - {w}.clientWidth"), 0, f"{w} scrolls sideways")
 
     def test_4_reduced_motion(self):
@@ -464,11 +492,11 @@ class TourPage(PageBase):
         self.home(NIA)
         self.settle("search")
         self.js("document.getElementById('tour-next').click()")
-        self.wait("PaperTour.current.state().id === 'play'", "the next step")
+        self.wait("PaperTour.current.state().id === 'subscribe'", "the next step")
         self.assertFalse(self.state()["gliding"])
         self.assertEqual(self.js("getComputedStyle(document.querySelector('#tour .tour-hole')).transitionDuration"), "0s")
         self.assertEqual(self.js("getComputedStyle(document.getElementById('tour-card')).animationName"), "none")
-        self.assertSpotlight("play", where="reduced motion")
+        self.assertSpotlight("subscribe", where="reduced motion")
         self.js("PaperTour.current.skip()")
         self.wait("!PaperTour.current.state().on", "skipped")
 
@@ -478,8 +506,10 @@ class TourPage(PageBase):
         self.home(NIA)
         self.assertFalse(self.state()["on"])
         self.assertEqual(self.js("document.getElementById('help-btn').getAttribute('aria-label')"), "Help")
-        # in the list's header, beside the map and Settings
+        # in the column's header, beside the bell, Listening and Settings
         self.assertEqual(self.js("document.getElementById('help-btn').parentElement.className"), "head-btns")
+        self.assertEqual(self.js("[...document.querySelectorAll('#gcol .head-btns button')].map(b => b.id)"),
+                         ["help-btn", "bell-btn", "listen-btn", "set-btn"])
         self.js("document.getElementById('help-btn').click()")
         self.wait("!document.getElementById('help').hidden", "the panel")
         self.assertEqual(self.js("document.getElementById('help-btn').getAttribute('aria-expanded')"), "true")
@@ -520,6 +550,8 @@ class TourPage(PageBase):
         # on a phone: reachable, and its taps
         self.b.viewport(390, 844, mobile=True)
         self.home(NIA, clear=False)
+        self.js("document.getElementById('gpl-back').click()")           # from the graph it landed on to the list of graphs
+        self.wait("!document.body.classList.contains('gpl-open') && (w => !w.getAnimations().length)(document.getElementById('gpl'))", "the list of graphs")
         self.js("document.getElementById('help-btn').click()")
         self.wait("!document.getElementById('help').hidden", "the phone's panel")
         bad = json.loads(self.js(TAPS_IN % "document.getElementById('help')"))
@@ -555,8 +587,8 @@ class TourPage(PageBase):
         self.assertTrue(self.js("document.getElementById('tour-again').hidden"))
         self.assertTrue(self.js("!document.getElementById('help-btn').hidden"))       # "?" is for everyone
 
-    def test_8_it_waits_for_the_library(self):
-        """Opened on a paper, it starts once the person is back on the list."""
+    def test_8_it_waits_for_the_home(self):
+        """Opened on a paper, it starts once the person is back at home (the graph, on the map)."""
         self.fresh(self.nia)
         self.as_user(NIA)
         self.b.goto("about:blank")
@@ -603,15 +635,15 @@ class TourSparse(PageBase):
         self.assertEqual(self.state()["plan"], plan)
         self.assertEqual(self.js("document.getElementById('tour-n').textContent"), "8 / 8")
         self.js("document.getElementById('tour-next').click()")
-        self.wait("!PaperTour.current.state().on && document.getElementById('map').hidden", "done")
+        self.wait("!PaperTour.current.state().on && document.getElementById('paper').hidden", "done")
 
     def test_2_an_empty_library(self):
         db.conn().execute("UPDATE episodes SET deleted_at = ?", (db.now(),))
         self.fresh(self.nia)
         self.home(NIA)
-        self.wait("!!document.querySelector('#rows .empty-list')", "no papers")
+        self.wait("[...document.querySelectorAll('#gl .gl-n')].every(n => n.textContent === '0')", "no papers")
         st = self.settle("search")
-        self.assertEqual(st["plan"], ["search", "map", "settings", "help"])
+        self.assertEqual(st["plan"], ["search", "subscribe", "settings", "help"])
         for sid in st["plan"]:
             st = self.settle(sid)
             self.assertSpotlight(sid, where="empty")
@@ -681,8 +713,10 @@ class FirstSignIn(unittest.TestCase):
         self.assertEqual(self.hub.q("SELECT count(*) FROM tour")[0][0], 0)
         b.js("{ const e = document.getElementById('password'); e.value = 'the kettle is on now'; e.dispatchEvent(new Event('input')); }")
         b.js("document.getElementById('save').click()")
-        b.wait_js("location.pathname === '/' && !!window.PaperTour && !!PaperTour.current", 10, "the library")
-        b.wait_js("PaperTour.current.state().on && PaperTour.current.state().id === 'search'", 10, "then the tour, on the library")
+        b.wait_js("location.pathname === '/' && !!window.PaperTour && !!PaperTour.current", 10, "the page")
+        b.wait_js("document.querySelectorAll('#gl .gl-row').length > 0 && /^#g=/.test(location.hash) && !document.getElementById('map').hidden",
+                  10, "landed at home: the graph list, a graph on the map")
+        b.wait_js("PaperTour.current.state().on && PaperTour.current.state().id === 'search'", 10, "then the tour, at home")
         b.wait_js("(() => { const s = PaperTour.current.state(); return s.hub && s.hub.state === 'started'; })()", 5, "started, on the hub")
         self.assertEqual(self.hub.q("SELECT state FROM tour WHERE user_id = ?", (self.uid,))[0][0], "started")
         first = tour._unix(self.hub.q("SELECT first_seen FROM tour WHERE user_id = ?", (self.uid,))[0][0])
@@ -703,6 +737,7 @@ class FirstSignIn(unittest.TestCase):
         self.accounts.reset_limits()
         self.sign_in(b2, "the kettle is on now")
         b2.wait_js("location.pathname === '/' && !!window.PaperTour && !!PaperTour.current && !!PaperTour.current.state().hub", 10, "signed in again")
+        b2.wait_js("/^#g=/.test(location.hash) && document.body.classList.contains('gpl-open')", 10, "the phone: landed in a graph's papers")
         time.sleep(1.0)
         self.assertFalse(b2.js("PaperTour.current.state().on"))
         self.assertEqual(b2.js("PaperTour.current.state().hub.state"), "skipped")

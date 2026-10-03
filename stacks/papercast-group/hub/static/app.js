@@ -1,8 +1,9 @@
 // papercast-group: Leo's one page ("Now Playing", stacks/papercast/web/static/app.js) for a
-// group. The list and the player as Leo's; no chat, no adding (that is `papercast add`, on each
-// person's own machine). A paper can have several versions, each made by one person with their
-// preferences; the row shows who made the one that plays, the window lists them all. Listened
-// and positions are each person's own. Nothing is fetched from anywhere else, and every string
+// group. Its home is the graph list and the map (graphs.js, map.js; DESIGN.md, 2026-10-03): a
+// paper opens in its graph, its window over the map; the player as Leo's; no chat, no adding
+// (that is `papercast add`, on each person's own machine). A paper can have several versions,
+// each made by one person with their preferences; the window lists them all. Listened and
+// positions are each person's own. Nothing is fetched from anywhere else, and every string
 // that came from a paper or a person is inserted as text, never as HTML. The page's CSP (no
 // inline script, no inline style) is the second fence behind that.
 "use strict";
@@ -10,14 +11,13 @@
   const $ = (id) => document.getElementById(id);
   const A = () => $("audio");
   const S = {
-    cfg: null, me: {}, papers: new Map(), q: "", open: null, view: "list",
+    cfg: null, me: {}, papers: new Map(), open: null, view: "home",
+    graph: null, phoneMap: false, landed: false,      // the graph shown (or "none"); a phone's drawing open
     es: null, lastId: "", esRetry: null, esFails: 0, offTimer: null,
     audioEp: null, audioPaper: null, audioReady: null, afterReady: null, dirty: false,
-    barEp: null, barOpen: false, pane: "tr", speed: 1, swiped: null, swipeEnd: 0, flash: null,
-    rows: new Map(), menu: null, lastFocus: null, scrubbing: null,
-    build: "", reloadFor: "", typedAt: 0,
-    sort: "added_desc", details: false,
-    f: {}, match: null, sinfo: null, qsort: null,     // filters; the search's matches and answer
+    barEp: null, barOpen: false, pane: "tr", speed: 1,
+    menu: null, lastFocus: null, scrubbing: null,
+    build: "", reloadFor: "", typedAt: 0, details: false,
     epPaper: new Map(),       // episode id -> paper id
     setTab: "prefs", set: {},
   };
@@ -101,13 +101,6 @@
     doc: `<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M4 1.8h6.5L14 5.3v10.9H4z"/><path d="M6.5 8.5h5M6.5 11h5M6.5 13.5h3" stroke-linecap="round"/></svg>`,
     check: `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m2.5 7.5 3 3 6-7"/></svg>`,
     close: `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg>`,
-    sort: `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3.5 5.5h13M3.5 10h9M3.5 14.5h5"/></svg>`,
-    filter: `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 4.5h13l-5.2 6.2v4.6l-2.6 1.4v-6z"/></svg>`,
-    x: (s = 12) => `<svg width="${s}" height="${s}" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="m3 3 6 6M9 3 3 9"/></svg>`,
-    // the row's listened tick: a quiet ring until this person ticks it, then a filled grey disc
-    tick: (on) => on
-      ? `<svg width="22" height="22" viewBox="0 0 22 22" aria-hidden="true"><circle cx="11" cy="11" r="10" fill="var(--text-2)"/><path d="m6.5 11.3 3 3 6-6.3" fill="none" stroke="var(--bg)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`
-      : `<svg width="22" height="22" viewBox="0 0 22 22" aria-hidden="true"><circle cx="11" cy="11" r="9.75" fill="none" stroke="var(--track)" stroke-width="1.5"/><path d="m6.5 11.3 3 3 6-6.3" fill="none" stroke="var(--track)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   };
 
   // ------------------------------------------------------------------ formatting
@@ -163,7 +156,7 @@
   function indexEps(p) { for (const e of p.episodes || []) S.epPaper.set(e.id, p.id); }
   // A paper the list does not show (a search, or queued from elsewhere) is still known from the
   // Up next answer or the map.
-  const paperOf = (pid) => S.papers.get(pid) || Q.papers.get(pid) || (S.mapPapers && S.mapPapers.get(pid)) || null;
+  const paperOf = (pid) => S.papers.get(pid) || Q.papers.get(pid) || null;
   function epById(eid) {
     const p = paperOf(S.epPaper.get(eid));
     return (p && (p.episodes || []).find((e) => e.id === eid)) || null;
@@ -255,7 +248,7 @@
     S.edits.set(id, e);
     e.listened = !!on; e.n++;
     p.listened = !!on;
-    renderList();
+    refresh(id);
     if (S.open === id) renderWin();
     const body = { listened: !!on };
     e.chain = e.chain.then(() => api("PUT", `/api/papers/${id}/listened`, body))
@@ -273,27 +266,21 @@
   }
 
   // ------------------------------------------------------------------ deleting a version
-  // Its maker or an admin: gone from the list at once; the hub keeps it 30 days, and Undo
-  // brings it back.
+  // Its maker or an admin: gone at once; the hub keeps it 30 days, and Undo brings it back.
   async function deleteVersion(eid) {
     const pid = S.epPaper.get(eid), p = S.papers.get(pid);
     const e = p && (p.episodes || []).find((x) => x.id === eid);
     if (!e) return;
-    closeMenu(); closeSwipe();
+    closeMenu();
     const rest = p.episodes.filter((x) => x.id !== eid);
-    const order = shownPapers().map((x) => x.id);
     if (S.audioEp === eid) unloadAudio();
     if (store.get(mine(`pick.${pid}`)) === eid) store.del(mine(`pick.${pid}`));
     if (rest.length) S.papers.set(pid, Object.assign({}, p, { episodes: rest }));
     else {
       S.papers.delete(pid);
-      if (S.open === pid) {
-        const i = order.indexOf(pid), others = order.filter((x) => x !== pid);
-        const next = phone() ? null : others[Math.min(i, others.length - 1)];
-        if (next) location.hash = `p=${next}`; else goList();
-      }
+      if (S.open === pid) closePaper();
     }
-    renderList();
+    refresh(pid);
     if (S.open === pid) renderWin();
     try {
       await api("DELETE", `/api/episodes/${eid}`);
@@ -301,15 +288,13 @@
         : displayTitle(p) ? `Deleted “${short(displayTitle(p))}”` : "Deleted";
       toast(what, { label: "Undo", fn: () => undelete(eid) }, 10000);
     } catch (err) {
-      if (err.status !== 404) { S.papers.set(pid, p); renderList(); if (S.open === pid) renderWin(); }
+      if (err.status !== 404) { S.papers.set(pid, p); refresh(pid); if (S.open === pid) renderWin(); }
       toast(err.message);
     }
   }
   async function undelete(eid) {
     try {
-      const v = await api("POST", `/api/episodes/${eid}/undelete`, {});
-      S.flash = v.id;
-      upsert(v);
+      upsert(await api("POST", `/api/episodes/${eid}/undelete`, {}));
     } catch (e) {
       toast(e.code === "undo_expired" ? "Too late: it is deleted." : e.message);
     }
@@ -318,307 +303,55 @@
   function removed(id) {
     if (!S.papers.has(id) && S.open !== id) return;
     S.papers.delete(id);
-    if (S.match) S.match.delete(id);
     if (S.audioPaper === id) unloadAudio();
-    if (S.open === id) goList();
-    renderList();
+    if (S.open === id) closePaper();
+    refresh(id);
   }
 
-  // ------------------------------------------------------------------ the list
+  // ------------------------------------------------------------------ the library
+  // S.papers holds every paper in the library (GET /api/library), read whole at the start and
+  // on a resync, one paper again on its event: the player, Versions, Up next and the map draw
+  // from it (the map is given this very Map). There is no list of papers to draw any more: the
+  // home is the graph list and the map (graphs.js, map.js).
   function upsert(v) {
     pinEdits(v);
     S.papers.set(v.id, v);
     indexEps(v);
     // a version that was playing and is gone (deleted elsewhere) stops
     if (S.audioPaper === v.id && !(v.episodes || []).some((e) => e.id === S.audioEp)) unloadAudio();
-    if (searching()) scheduleSearch();       // where it now stands among the matches, if at all
-    renderList();
+    refresh(v.id);
     if (S.open === v.id) renderWin();
   }
-  // ------------------------------------------------------------------ sort, search and filters
-  // The sort is remembered on this device; the search and the filters in this tab only (they
-  // survive a reload). The hub searches and filters (GET /api/library: q, graph, tag, maker,
-  // year_from, year_to, listened); the sort is the page's own. While searching, the list is the
-  // hub's best matches first, until another sort is picked.
-  const SORTS = [
-    ["added_desc", "Date added (newest first)"], ["added_asc", "Date added (oldest first)"],
-    ["title", "Title A–Z"], ["unlistened", "Not listened first"], ["year", "Paper year (newest first)"],
-  ];
-  const byAdded = (a, b) => (b.added_at || "").localeCompare(a.added_at || "") || b.id.localeCompare(a.id);
-  const collator = new Intl.Collator("en", { sensitivity: "base", numeric: true });
-  const ORDER = {
-    added_desc: byAdded,
-    added_asc: (a, b) => byAdded(b, a),
-    // a paper whose title is not known goes last
-    title: (a, b) => (!displayTitle(a) - !displayTitle(b)) || collator.compare(displayTitle(a), displayTitle(b)) || byAdded(a, b),
-    unlistened: (a, b) => (!!a.listened - !!b.listened) || byAdded(a, b),
-    year: (a, b) => ((b.year || 0) - (a.year || 0)) || byAdded(a, b),
-  };
-  const FKEYS = ["graph", "tag", "maker", "yfrom", "yto", "listened"];
-  const typed = () => !!S.q.trim();
-  const filtering = () => FKEYS.some((k) => S.f[k] !== undefined);
-  const searching = () => typed() || filtering();
-  const effSort = () => (typed() ? S.qsort || "match" : S.sort);
-  const sortedPapers = () => [...S.papers.values()].sort(ORDER[S.sort] || byAdded);
-  // What the list shows: every paper, sorted; or, searching, the matches (in the hub's order
-  // for "Best match").
-  function shownPapers() {
-    if (!S.match) return sortedPapers();
-    const list = [];
-    for (const id of S.match.keys()) { const p = S.papers.get(id); if (p) list.push(p); }
-    const how = effSort();
-    return how === "match" ? list : list.sort(ORDER[how] || byAdded);
+  // What shows a paper besides its window: the player bar, the map's colours, a phone's list of
+  // a graph's papers.
+  function refresh(pid) {
+    renderPlayer();
+    mapSync();
+    if (S.graphs) S.graphs.paperChanged(pid);
+    // the open paper's versions say how far each one is
+    const p = pid && pid === S.open && S.view === "paper" ? S.papers.get(pid) : null;
+    if (p) renderVersions(p, chosen(p));
   }
-  function sortLabel() {
-    const cur = effSort(), b = $("sort-btn");
-    const label = cur === "match" ? "Best match" : (SORTS.find((x) => x[0] === cur) || SORTS[0])[1];
-    b.classList.toggle("on", cur !== (typed() ? "match" : "added_desc"));
-    b.setAttribute("aria-label", `Sort: ${label}`);
-    b.title = `Sort: ${label}`;
-  }
-  function setSort(id) {
-    if (id === "match") S.qsort = "match";
-    else {
-      S.sort = ORDER[id] ? id : "added_desc";
-      store.set("pcg.sort", S.sort);
-      if (typed()) S.qsort = S.sort;
+  // Papers the search found: known here from now on (their match is the search's own).
+  function known(list) {
+    for (const p of list || []) {
+      if (!p || typeof p.id !== "string") continue;
+      const v = Object.assign({}, p);
+      delete v.match;
+      S.papers.set(v.id, pinEdits(v));
+      indexEps(v);
     }
-    sortLabel();
-    renderList();
   }
-  function sortMenu() {
-    const cur = effSort();
-    return (typed() ? [["match", "Best match"]] : []).concat(SORTS).map(([id, label]) => el("button", {
-      type: "button", role: "menuitemradio", "aria-checked": String(id === cur), class: "radio",
-      onclick: () => { closeMenu(); setSort(id); } },
-    el("span", { class: "mark", html: id === cur ? I.check : "" }), el("span", { text: label })));
-  }
-
-  // The filters: {graph: {id, name}, tag, maker: {id, name}, yfrom, yto, listened: "yes"|"no"}.
-  function readFilters() {
-    let f;
-    try { f = JSON.parse(tab.get("pcg.filters") || "{}") || {}; } catch (e) { f = {}; }
-    const out = {};
-    if (f.graph && typeof f.graph.id === "string") out.graph = { id: f.graph.id, name: String(f.graph.name || "") };
-    if (typeof f.tag === "string" && f.tag) out.tag = f.tag;
-    if (f.maker && Number.isInteger(f.maker.id)) out.maker = { id: f.maker.id, name: String(f.maker.name || "") };
-    for (const k of ["yfrom", "yto"]) if (Number.isInteger(f[k])) out[k] = f[k];
-    if (f.listened === "yes" || f.listened === "no") out.listened = f.listened;
-    const old = tab.get("pcg.tag");          // the tag filter as an older page kept it
-    if (old && !out.tag) out.tag = old;
-    tab.del("pcg.tag");
-    return out;
-  }
-  function saveFilters() {
-    if (filtering()) tab.set("pcg.filters", JSON.stringify(S.f)); else tab.del("pcg.filters");
-  }
-  function setFilter(k, v, quiet) {
-    if (v === null || v === undefined || v === "") delete S.f[k]; else S.f[k] = v;
-    let other = false;            // a year range the wrong way round: its other end goes
-    if (k === "yfrom" && S.f.yto !== undefined && S.f.yfrom > S.f.yto) { delete S.f.yto; other = true; }
-    if (k === "yto" && S.f.yfrom !== undefined && S.f.yto < S.f.yfrom) { delete S.f.yfrom; other = true; }
-    saveFilters();
-    renderFilters(quiet && !other);
-    S.limit = PAGE;
-    loadList();
-    $("list-pane").scrollTop = 0;
-  }
-  const setTag = (t) => setFilter("tag", t || null);
-  function clearFilters() {
-    S.f = {};
-    saveFilters();
-    renderFilters();
-    loadList();
-  }
-  // One chip per filter, under the search; a tap takes that one away.
-  function chips() {
-    const f = S.f, out = [];
-    if (f.graph) out.push(["graph", `Topic: ${f.graph.name || "a graph"}`]);
-    if (f.tag) out.push(["tag", `Tag: ${f.tag}`]);
-    if (f.maker) out.push(["maker", `By ${f.maker.name || "someone"}`]);
-    if (f.yfrom !== undefined || f.yto !== undefined) {
-      out.push(["year", f.yfrom === undefined ? `Up to ${f.yto}` : f.yto === undefined ? `From ${f.yfrom}`
-        : f.yfrom === f.yto ? `Year ${f.yfrom}` : `${f.yfrom}–${f.yto}`]);
-    }
-    if (f.listened) out.push(["listened", f.listened === "no" ? "Not listened" : "Listened"]);
-    return out;
-  }
-  function renderFilters(quiet) {
-    const cs = chips();
-    $("filter").hidden = !cs.length;
-    $("chips").replaceChildren(...cs.map(([k, label]) => el("button", {
-      type: "button", class: "chip", "data-k": k, title: "Remove this filter", "aria-label": `${label}, remove this filter`,
-      onclick: () => { if (k === "year") { delete S.f.yfrom; setFilter("yto", null); } else setFilter(k, null); },
-    }, el("span", { class: "chip-t", text: label }), el("span", { class: "chip-x", html: I.x() }))));
-    $("filter-btn").classList.toggle("on", cs.length > 0);
-    if (!quiet && !$("fpanel").hidden) buildPanel();
-  }
-  // The filter section: opened by the funnel; the choices come from the hub (the graphs, and
-  // the tags, people and years of the papers in the library).
-  S.facets = null; S.graphs = null;
-  async function togglePanel(open) {
-    const pn = $("fpanel"), b = $("filter-btn");
-    const on = open === undefined ? pn.hidden : !!open;
-    pn.hidden = !on;
-    b.setAttribute("aria-expanded", String(on));
-    if (!on) return;
-    if (!S.facets) pn.replaceChildren(el("p", { class: "f-wait", text: "Loading…" }));
-    else buildPanel();
-    try {
-      const [g, fc] = await Promise.all([api("GET", "/api/graphs").catch(() => ({ graphs: [] })), api("GET", "/api/search/facets")]);
-      S.graphs = listOf(g, "graphs").filter((x) => x && typeof x.id === "string");
-      S.facets = fc;
-    } catch (e) {
-      if (!S.facets && !pn.hidden) pn.replaceChildren(el("p", { class: "f-wait", text: e.message }));
-      return;
-    }
-    if (!pn.hidden) buildPanel();
-  }
-  function pick(id, label, opts, value, onchange) {
-    const want = value === undefined || value === null ? "" : String(value);
-    if (!opts.some(([v]) => String(v) === want)) opts.push([want, want]);
-    const s = el("select", { class: "pick", id, "aria-label": label },
-      opts.map(([v, t]) => el("option", { value: String(v), text: t, selected: String(v) === want })));
-    s.addEventListener("change", () => onchange(s.value));
-    return s;
-  }
-  function buildPanel() {
-    const pn = $("fpanel"), fc = S.facets || { tags: [], makers: [], years: {} };
-    const graphs = S.graphs || [], f = S.f;
-    const row = (label, ...kids) => el("div", { class: "f-row" }, el("span", { class: "f-l", "aria-hidden": "true", text: label }), ...kids);
-    const gopts = [["", "Any topic"]].concat(graphs.map((g) => [g.id, g.name]));
-    if (f.graph && !graphs.some((g) => g.id === f.graph.id)) gopts.push([f.graph.id, f.graph.name || "a graph"]);
-    const gsel = pick("f-graph", "Topic", gopts, f.graph && f.graph.id, (v) => {
-      const g = graphs.find((x) => x.id === v) || (f.graph && f.graph.id === v ? f.graph : null);
-      setFilter("graph", g ? { id: g.id, name: g.name } : null, true);
-    });
-    const tsel = pick("f-tag", "Tag", [["", "Any tag"]].concat((fc.tags || []).map((t) => [t.tag, `${t.tag} (${t.n})`])), f.tag,
-      (v) => setFilter("tag", v || null, true));
-    const msel = pick("f-maker", "Made by", [["", "Anyone"]].concat((fc.makers || []).map((m) => [String(m.id), m.me ? `${m.name} (you)` : m.name])),
-      f.maker && f.maker.id, (v) => {
-        const m = (fc.makers || []).find((x) => String(x.id) === v);
-        setFilter("maker", m ? { id: m.id, name: m.name } : null, true);
-      });
-    const ys = [];
-    const y0 = fc.years && fc.years.min, y1 = fc.years && fc.years.max;
-    if (Number.isInteger(y0) && Number.isInteger(y1)) for (let y = y1; y >= y0 && ys.length < 200; y--) ys.push([String(y), String(y)]);
-    const year = (id, label, k) => pick(id, label, [["", "Any"]].concat(ys), f[k], (v) => setFilter(k, v ? parseInt(v, 10) : null, true));
-    const seg = el("div", { class: "seg f-seg", role: "radiogroup", "aria-label": "Listened" },
-      [["", "All"], ["no", "Not listened"], ["yes", "Listened"]].map(([v, t]) => el("button", {
-        type: "button", role: "radio", "aria-checked": String((f.listened || "") === v), "data-v": v,
-        onclick: () => {
-          for (const b of seg.children) b.setAttribute("aria-checked", String(b.dataset.v === v));
-          setFilter("listened", v || null, true);
-        },
-      }, t)));
-    pn.replaceChildren(row("Topic", gsel), row("Tag", tsel), row("Made by", msel),
-      row("Year", el("div", { class: "f-yr" }, year("f-yfrom", "From year", "yfrom"), el("span", { class: "f-to", text: "to" }), year("f-yto", "To year", "yto"))),
-      row("Listened", seg));
-  }
-
-  // The search box: results as it is typed; a clear button; "/" from anywhere on the page
-  // goes to it; Escape empties it (then leaves it); Enter searches at once.
-  function wireSearch() {
-    const sb = $("search"), clr = $("search-clear");
-    clr.innerHTML = I.x(16);
-    $("filter-btn").innerHTML = I.filter;
-    sb.value = S.q;
-    clr.hidden = !S.q;
-    const changed = () => {
-      const had = typed();
-      S.q = sb.value;
-      if (S.q) tab.set("pcg.q", S.q); else tab.del("pcg.q");
-      clr.hidden = !S.q;
-      S.typedAt = Date.now();
-      if (had !== typed()) { if (!typed()) S.qsort = null; sortLabel(); }
-      scheduleSearch();
-    };
-    sb.addEventListener("input", changed);
-    sb.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") {
-        e.preventDefault(); e.stopPropagation();
-        if (sb.value) { sb.value = ""; changed(); } else sb.blur();
-      } else if (e.key === "Enter") {
-        loadList();
-        if (phone()) sb.blur();             // the keyboard goes away, the results stay
-      }
-    });
-    clr.addEventListener("click", () => { sb.value = ""; changed(); sb.focus(); });
-    document.addEventListener("keydown", (e) => {
-      if (e.key !== "/" || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
-      const t = e.target;
-      if (t && t.closest && t.closest("input, textarea, select, [contenteditable], .menu, #map")) return;
-      if (!$("map").hidden || !$("overlay").hidden || (phone() && document.body.classList.contains("open"))) return;
-      e.preventDefault();
-      sb.focus();
-      sb.select();
-    });
-    $("filter-btn").addEventListener("click", (e) => { e.stopPropagation(); togglePanel(); });
-    $("filter-clear").addEventListener("click", clearFilters);
-  }
-  // A title, a snippet: text nodes, and <mark> elements for what matched (never HTML).
-  function marked(parts) {
-    const out = [];
-    (Array.isArray(parts) ? parts : []).forEach((x, i) => {
-      const t = typeof x === "string" ? x : "";
-      if (t) out.push(i % 2 ? el("mark", { text: t }) : document.createTextNode(t));
-    });
-    return out;
-  }
-  // The count and, when a word was corrected, what was searched for instead.
-  function renderStat() {
-    const box = $("sstat");
-    if (!S.match || !S.loaded) { box.hidden = true; box.replaceChildren(); return; }
-    let n = 0;
-    for (const id of S.match.keys()) if (S.papers.has(id)) n++;
-    const info = S.sinfo || {}, kids = [];
-    if (info.used && typed()) kids.push(el("span", { class: "fix" }, "Showing results for ", el("b", { text: info.used })), " · ");
-    kids.push(`${n} ${n === 1 ? "paper" : "papers"}`);
-    if (info.indexing && info.indexing.total) kids.push(` · still reading the papers’ text (${info.indexing.done} of ${info.indexing.total})`);
-    box.replaceChildren(...kids);
-    box.hidden = false;
-  }
-  // Rows past the first page come without their snippet: asked for when they are drawn.
-  S.snipWant = new Set(); S.snipTimer = null;
-  function wantSnips() { if (!S.snipTimer && S.snipWant.size) S.snipTimer = setTimeout(flushSnips, 60); }
-  async function flushSnips() {
-    S.snipTimer = null;
-    const ids = [...S.snipWant].slice(0, 50), key = S.listKey, q = S.q;
-    for (const id of ids) S.snipWant.delete(id);
+  async function loadLibrary() {
     let j;
-    try { j = await api("GET", `/api/library?q=${encodeURIComponent(q)}&ids=${ids.map(encodeURIComponent).join(",")}`); } catch (e) { return; }
-    if (key !== S.listKey || !S.match) return;
-    for (const v of j.papers || []) if (v.match && S.match.has(v.id)) { S.match.set(v.id, v.match); updateRow(v.id); }
-    wantSnips();
-  }
-
-  function ring(p) {
-    const c = chosen(p) || {};
-    const r = 19, C = 2 * Math.PI * r;
-    const arc = (frac, color) =>
-      `<circle cx="22" cy="22" r="${r}" fill="none" stroke="${color}" stroke-width="3" stroke-linecap="round" stroke-dasharray="${(C * frac).toFixed(1)} ${C.toFixed(1)}" transform="rotate(-90 22 22)"/>`;
-    const track = (color = "var(--track)", extra = "") => `<circle cx="22" cy="22" r="${r}" fill="none" stroke="${color}" stroke-width="3" ${extra}/>`;
-    let body = "", center = "";
-    const st = c.state;
-    if (c.has_audio) {
-      const d = durOf(c), t = posOf(c), f = d ? Math.min(1, t / d) : 0, played = d && t >= d - 2;
-      body = track() + (played ? arc(1, "var(--text-2)") : f > 0 ? arc(f, "var(--accent)") : "");
-      center = played ? `<path d="m16.5 22.5 4 4 7-8" fill="none" stroke="var(--text-2)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`
-        : isPlaying(c.id) ? `<rect x="16" y="15" width="4" height="14" rx="1" fill="var(--text)"/><rect x="24" y="15" width="4" height="14" rx="1" fill="var(--text)"/>`
-          : `<path d="M18.5 15.8v12.4l10-6.2z" fill="var(--text)" stroke="var(--text)" stroke-width="1.2" stroke-linejoin="round"/>`;
-    } else if (st === "speaking") {
-      const pct = speakPct(c);
-      body = track() + arc(pct / 100, "var(--text-2)");
-      center = `<text x="22" y="26" text-anchor="middle" font-size="11" font-weight="600" fill="var(--text-2)" font-family="Arial, sans-serif">${pct}</text>`;
-    } else if (st === "waiting-for-gpu") {
-      body = track("var(--warn)", 'stroke-dasharray="3 5.2" opacity=".75"');
-    } else if (st === "failed" || st === "ready") {
-      body = track("var(--danger)", 'opacity=".55"');
-      center = `<path d="M22 14.5v9" stroke="var(--danger)" stroke-width="2.4" stroke-linecap="round"/><circle cx="22" cy="28.5" r="1.5" fill="var(--danger)"/>`;
-    } else {
-      body = track() + `<g class="spin">${arc(0.25, "var(--text-2)")}</g>`;
-    }
-    return `<svg width="44" height="44" viewBox="0 0 44 44" aria-hidden="true">${body}${center}</svg>`;
+    try { j = await api("GET", "/api/library"); } catch (e) { toast(e.message); return false; }
+    const fresh = new Map((j.papers || []).map((p) => [p.id, pinEdits(p)]));
+    for (const id of [...S.papers.keys()]) if (!fresh.has(id)) S.papers.delete(id);
+    for (const [id, p] of fresh) { S.papers.set(id, p); indexEps(p); }
+    S.loaded = true;
+    refresh();
+    if (S.open) { if (!S.papers.has(S.open)) closePaper(); else renderWin(); }
+    return true;
   }
 
   // One short line for a version: how long, how much is left, or how far it has got.
@@ -640,235 +373,12 @@
     return { text: st || "" };
   }
 
-  function rowNode(id) {
-    let r = S.rows.get(id);
-    if (r) return r;
-    const li = el("li", { class: "row", "data-id": id });
-    const del = el("button", { type: "button", class: "row-del", tabindex: "-1", text: "Delete",
-      onclick: (e) => { e.stopPropagation(); const c = chosen(S.papers.get(id)); if (c && c.can_delete) deleteVersion(c.id); } });
-    const inner = el("div", { class: "row-in", tabindex: "0", role: "button" });
-    inner.addEventListener("click", () => {
-      if (swipeBusy()) return;
-      openPaper(id);
-    });
-    inner.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target === inner) openPaper(id); });
-    wireSwipe(inner, id);
-    li.append(del, inner);
-    r = { li, inner, del, sig: null };
-    S.rows.set(id, r);
-    return r;
-  }
-  function fillRow(p) {
-    const r = rowNode(p.id), { li, inner } = r;
-    li.classList.toggle("sel", p.id === S.open);
-    li.classList.toggle("listened", !!p.listened);
-    const c = chosen(p), n = (p.episodes || []).length;
-    const title = displayTitle(p), rg = ring(p), sub = stateLine(c), ptags = p.tags || [];
-    const by = c ? whoLine(c) : "", nv = n > 1 ? `${n} versions` : "";
-    const nc = S.social ? S.social.count(p.id) : 0;       // comments (social.js)
-    const canDel = !!(c && c.can_delete), audio = anyAudio(p), hasMenu = canDel || canQueue(c);
-    // Searching: the title with what matched marked, and where else it matched, in a few words.
-    const m = S.match ? S.match.get(p.id) || null : null;
-    if (m && m.more && !m.asked) { m.asked = true; S.snipWant.add(p.id); }
-    const hit = m && m.lead ? [m.lead, m.parts || []] : null;
-    // Everything the row shows, in one string: when the row shows it already, it is left as it is.
-    const sig = JSON.stringify([title, p.added_at, rg, sub, by, c && c.made_by ? c.made_by.id : null, nv, ptags, ptags.includes(S.f.tag) ? S.f.tag : null, audio, !!p.listened, canDel,
-      hasMenu, nc, m ? m.title : null, hit]);
-    if (r.sig === sig) return;
-    r.sig = sig;
-    const tnode = el("p", { class: "row-title", title: title || null });
-    if (title && m && Array.isArray(m.title) && m.title.length) tnode.replaceChildren(...marked(m.title));
-    else titleInto(tnode, p);
-    const hitl = hit ? el("div", { class: "row-hit" }, el("span", { class: "lead", text: hit[0] }), ...marked(hit[1])) : null;
-    const line = el("div", { class: `row-sub t${sub.cls ? ` ${sub.cls}` : ""}` }, el("span", { class: "st", text: sub.text }),
-      nv ? el("span", { class: "nv", text: `· ${nv}` }) : null,
-      nc ? el("span", { class: "nc", text: `· ${nc} comment${nc === 1 ? "" : "s"}` }) : null);
-    const byl = by ? el("div", { class: "row-by" }, avatarNode(c.made_by), el("span", { text: by })) : null;
-    const open = S.menu && S.menu.for === `row:${p.id}`;
-    const more = hasMenu ? el("button", { type: "button", class: "more", "aria-label": "More", "aria-haspopup": "menu",
-      "aria-expanded": open ? "true" : "false", html: I.more,
-      onclick: (e) => { e.stopPropagation(); openMenu(e.currentTarget, `row:${p.id}`, rowMenu(p)); } }) : el("span", { class: "more-sp" });
-    if (open && hasMenu) S.menu.anchor = more;       // the row's open menu closes onto the new button
-    // Tags: small plain words; a tap shows only the papers with that tag (again: all of them).
-    const tags = ptags.length ? el("div", { class: "row-tags" }, ptags.map((t) =>
-      el("button", { type: "button", class: `tag${t === S.f.tag ? " on" : ""}`, title: t === S.f.tag ? "Show all papers" : `Only “${t}”`,
-        onclick: (e) => { e.stopPropagation(); if (swipeBusy()) return; setTag(t === S.f.tag ? null : t); } }, el("span", { text: t })))) : null;
-    inner.classList.toggle("tagged", !!tags);
-    // This person's own tick, only by their tap; on a paper with an episode to listen to.
-    const tick = audio ? el("button", { type: "button", class: "tick", role: "checkbox", "aria-checked": String(!!p.listened),
-      "aria-label": "Listened", title: p.listened ? "Listened" : "Mark as listened", html: I.tick(!!p.listened),
-      onclick: (e) => { e.stopPropagation(); if (swipeBusy()) return; const q = S.papers.get(p.id) || p; setListened(q.id, !q.listened); } })
-      : el("span", { class: "tick-sp" });
-    inner.replaceChildren(el("div", { class: "ring", html: rg }),
-      el("div", { class: "row-text" }, tnode, hitl, line, byl, tags), tick, more);
-    inner.setAttribute("aria-label", [title || sub.text, by, nv].filter(Boolean).join(", "));
-  }
-  // A tap that ends a swipe, or one that only closes an open swipe, does nothing else.
-  function swipeBusy() {
-    if (Date.now() - S.swipeEnd < 400) return true;
-    if (S.swiped) { closeSwipe(); return true; }
-    return false;
-  }
-  // The list draws the first PAGE rows of its order, PAGE more whenever it is scrolled near
-  // its end (wireList), and always as far down as the open paper's row. A row is filled again
-  // only when what it shows has changed (fillRow), so a paper event touches that one row.
-  const PAGE = window.IntersectionObserver ? 50 : Infinity;     // an old browser: every row at once
-  S.limit = PAGE; S.more = false; S.nearEnd = false; S.endIO = null; S.listKey = null; S.shownKey = null;
-  function renderList() {
-    // Under the map the list is not seen: it is brought up to date when the map closes, so a
-    // paper event does not stall the map.
-    if (!$("map").hidden) { S.listStale = true; mapSync(); return; }
-    const ul = $("rows");
-    const items = shownPapers();
-    const at = S.open ? items.findIndex((p) => p.id === S.open) : -1;
-    if (at >= S.limit) S.limit = Math.ceil((at + 1) / PAGE) * PAGE;
-    const shown = items.slice(0, S.limit);
-    S.more = items.length > shown.length;
-    // A row once drawn is kept while its paper is in the list, drawn or not: drawn again, it
-    // costs nothing unless it changed.
-    for (const [id, r] of S.rows) if (!S.papers.has(id)) { r.li.remove(); S.rows.delete(id); if (S.swiped === id) S.swiped = null; }
-    shown.forEach(fillRow);
-    // Put in order, moving only what is out of place: a page loaded at the end is appended,
-    // and nothing above it moves.
-    let next = ul.firstElementChild;
-    for (const p of shown) {
-      const li = S.rows.get(p.id).li;
-      if (li === next) next = li.nextElementSibling; else ul.insertBefore(li, next);
-    }
-    while (next && next.classList.contains("row")) { const n = next.nextElementSibling; next.remove(); next = n; }
-    const sw = S.swiped && S.rows.get(S.swiped);
-    if (sw && !sw.li.isConnected) closeSwipe();
-    let empty = ul.querySelector(".empty-list");
-    if (!items.length && S.loaded) {
-      if (!empty) ul.append(empty = el("li", { class: "empty-list" }));
-      empty.textContent = typed() ? "No matches." : filtering() ? "No papers match these filters."
-        : "No episodes yet.";
-    } else if (empty) empty.remove();
-    if (S.flash && S.rows.has(S.flash)) {
-      const li = S.rows.get(S.flash).li;
-      li.classList.add("fade");
-      requestAnimationFrame(() => requestAnimationFrame(() => li.classList.remove("fade")));
-    }
-    S.flash = null;
-    renderStat();
-    wantSnips();
-    renderPlayer();
-    mapSync();
-    if (S.more && S.nearEnd) checkEnd();
-  }
-  function updateRow(id) { const p = S.papers.get(id); if (p && S.rows.has(id)) fillRow(p); }
-  // The sentinel under the rows comes within 800 px of the list's bottom edge: the next page.
-  // The observer tells only of changes, so after each page it is asked again (checkEnd): a
-  // tall screen may still see the end, and it loads on until the rows fill it.
-  function wireList() {
-    if (!window.IntersectionObserver) return;
-    S.endIO = new IntersectionObserver((es) => {
-      S.nearEnd = es[es.length - 1].isIntersecting;
-      if (S.nearEnd && S.more) { S.limit += PAGE; renderList(); }
-    }, { root: $("list-pane"), rootMargin: "0px 0px 800px 0px" });
-    S.endIO.observe($("rows-end"));
-  }
-  function checkEnd() { if (S.endIO) { S.endIO.unobserve($("rows-end")); S.endIO.observe($("rows-end")); } }
-
-  // Swipe left on a touch screen shows Delete (like Mail) on a version this person may delete;
-  // a mouse gets the ⋯ menu instead.
-  function wireSwipe(inner, id) {
-    let x0 = null, y0 = null, base = 0, dx = 0, mode = null, pid = null;
-    inner.addEventListener("pointerdown", (e) => {
-      if (e.pointerType === "mouse") return;
-      const c = chosen(S.papers.get(id));
-      if (!c || !c.can_delete) return;
-      x0 = e.clientX; y0 = e.clientY; dx = 0; mode = null; pid = e.pointerId;
-      base = S.swiped === id ? -88 : 0;
-    });
-    inner.addEventListener("pointermove", (e) => {
-      if (x0 === null || e.pointerId !== pid) return;
-      const mx = (e.clientX - x0) / zoom(), my = (e.clientY - y0) / zoom();
-      if (!mode) {
-        if (Math.abs(mx) > 8 && Math.abs(mx) > Math.abs(my)) {
-          mode = "h";
-          try { inner.setPointerCapture(e.pointerId); } catch (x) { /* already gone */ }
-          inner.classList.add("drag");
-          if (S.swiped && S.swiped !== id) closeSwipe();
-        } else if (Math.abs(my) > 8) { mode = "v"; }
-      }
-      if (mode === "h") { dx = Math.max(-140, Math.min(0, base + mx)); inner.style.transform = `translateX(${dx}px)`; }
-    });
-    const end = () => {
-      if (x0 === null) return;
-      if (mode === "h") {
-        inner.classList.remove("drag");
-        S.swipeEnd = Date.now();
-        if (dx < -44) openSwipe(id); else closeSwipe();
-      }
-      x0 = null; mode = null;
-    };
-    inner.addEventListener("pointerup", end);
-    inner.addEventListener("pointercancel", () => { if (mode === "h") { inner.classList.remove("drag"); if (S.swiped === id) openSwipe(id); else closeSwipe(); } x0 = null; mode = null; });
-  }
-  function openSwipe(id) {
-    const r = S.rows.get(id);
-    if (!r) return;
-    S.swiped = id;
-    r.inner.style.transform = "translateX(-88px)";
-    r.del.tabIndex = 0;
-  }
-  function closeSwipe() {
-    for (const [, r] of S.rows) { if (r.inner.style.transform) r.inner.style.transform = ""; if (r.del.tabIndex !== -1) r.del.tabIndex = -1; }
-    S.swiped = null;
-  }
-
-  // As it is typed, the search goes to the hub 150 ms after the last key; a filter at once.
-  let searchTimer = null;
-  function scheduleSearch() { clearTimeout(searchTimer); searchTimer = setTimeout(loadList, 150); }
-  function listParams() {
-    const u = new URLSearchParams(), f = S.f;
-    u.set("q", S.q);
-    if (f.graph) u.set("graph", f.graph.id);
-    if (f.tag) u.set("tag", f.tag);
-    if (f.maker) u.set("maker", String(f.maker.id));
-    if (f.yfrom !== undefined) u.set("year_from", String(f.yfrom));
-    if (f.yto !== undefined) u.set("year_to", String(f.yto));
-    if (f.listened) u.set("listened", f.listened);
-    return u.toString();
-  }
-  async function loadList() {
-    clearTimeout(searchTimer);
-    const key = listParams(), on = searching();
-    S.listKey = key;
-    try {
-      const j = await api("GET", `/api/library?${key}`);
-      if (key !== S.listKey) return;          // a newer search is on its way
-      if (on) {
-        // the matches, in the hub's order; the papers already known here stay (the one playing)
-        S.match = new Map();
-        for (const p of j.papers) {
-          const m = p.match || null;
-          delete p.match;
-          S.papers.set(p.id, pinEdits(p));
-          indexEps(p);
-          S.match.set(p.id, m);
-        }
-        S.sinfo = j.search || null;
-      } else {
-        S.match = null; S.sinfo = null;
-        S.papers = new Map(j.papers.map((p) => [p.id, pinEdits(p)]));
-        for (const p of S.papers.values()) indexEps(p);
-      }
-      if (key !== S.shownKey) { S.shownKey = key; S.limit = PAGE; }      // a new search: its first page
-      S.loaded = true;
-      renderList();
-      if (S.open) {
-        if (!S.papers.has(S.open) && !on) goList(); else renderWin();
-      }
-    } catch (e) { if (key === S.listKey) toast(e.message); }
-  }
   // A paper or episode event names what changed; those papers alone are read again, in one
-  // request (a big burst, or one the page cannot place, reads the whole list). One that is not
-  // in the answer has left the library.
+  // request (a big burst, or one the page cannot place, reads the whole library). One that is
+  // not in the answer has left the library.
   S.touch = new Set(); S.touchTimer = null;
   function touched(pid) {
-    if (!pid) { scheduleSearch(); return; }
+    if (!pid) { loadLibrary(); return; }
     S.touch.add(pid);
     if (!S.touchTimer) S.touchTimer = setTimeout(flushTouched, 150);
   }
@@ -876,7 +386,7 @@
     S.touchTimer = null;
     const ids = [...S.touch];
     S.touch.clear();
-    if (ids.length > 40) { loadList(); return; }
+    if (ids.length > 40) { loadLibrary(); return; }
     let j;
     try { j = await api("GET", `/api/library?ids=${ids.map(encodeURIComponent).join(",")}`); } catch (e) { return; }
     const got = new Set();
@@ -912,32 +422,116 @@
     location.reload();
   }
 
-  // ------------------------------------------------------------------ opening and closing
-  function openPaper(id) { closeSwipe(); if (location.hash === `#p=${id}`) openFromHash(true); else location.hash = `p=${id}`; }
-  function goList() {
-    if (location.hash) history.replaceState(null, "", location.pathname + location.search);
-    closeWin();
+  // ------------------------------------------------------------------ where the page is: its address
+  //   #g=<graph>             the graph on the map (a phone: its papers, as a list)
+  //   #g=<graph>&p=<paper>   a paper in it: its window over the map
+  //   #g=<graph>&map         a phone: the graph's drawing
+  //   #p=<paper>             the paper in a graph that has it (the one shown, else one subscribed
+  //                          to, else any), else in Not in any graph
+  //   #settings[=tab], #listening
+  //   nothing                where the page lands: the graph open last (the account's, on the hub),
+  //                          else the one with the most papers; afterwards, a phone's home is the
+  //                          list of graphs
+  // A step the page takes itself (a paper opened, the drawing, another graph) is pushed, so the
+  // browser's Back and the page's own back buttons undo it.
+  const GRX = /^(g_[a-z0-9]{4,32}|none)$/, PRX = /^p_[a-z0-9]{4,32}$/;
+  const hashFor = (gid, pid, map) => [gid ? `g=${gid}` : "", pid ? `p=${pid}` : "", map ? "map" : ""].filter(Boolean).join("&");
+  function nav(hash, push) {
+    if ((hash ? `#${hash}` : "") !== location.hash) {
+      const url = hash ? `#${hash}` : location.pathname + location.search;
+      if (push) history.pushState({ pcg: 1, from: location.hash }, "", url); else history.replaceState(history.state, "", url);
+    }
+    openFromHash();
   }
-  function openFromHash(force) {
+  // Back to `hash`: the browser's own step back when the page came from there, else there without a step.
+  function back(hash) {
+    const to = hash ? `#${hash}` : "";
+    if (history.state && history.state.pcg && history.state.from === to) history.back(); else nav(hash, false);
+  }
+  // Is the paper in this graph (as the library says)?
+  function inGraph(gid, pid) {
+    const p = paperOf(pid);
+    if (!p || !Array.isArray(p.graphs)) return false;
+    return gid === "none" ? !p.graphs.length : p.graphs.includes(gid);
+  }
+  function openPaper(id, gid) {
+    closeMenu();
+    const g = gid || (S.graph && inGraph(S.graph, id) ? S.graph : null);
+    nav(g ? hashFor(g, id, S.phoneMap) : `p=${id}`, true);
+  }
+  function openGraph(gid) { closeMenu(); if (gid !== S.graph || S.view !== "home" || S.phoneMap) nav(hashFor(gid), true); }
+  function closePaper() { back(hashFor(S.graph, null, S.phoneMap)); }
+  // Back from Settings or Listening, and where the tour starts from: the graph (a phone: the list of graphs).
+  function goHome() {
+    if (phone()) { S.landed = true; nav("", false); }          // a return home, not a landing: the list of graphs
+    else nav(hashFor(S.graph || (S.graphs && S.graphs.landing())), false);
+  }
+  function openFromHash() {
+    S.handled = location.hash;
     const s = /^#settings(?:=([a-z]+))?$/.exec(location.hash);
     if (s) return openSettings(s[1]);
     if (location.hash === "#listening") return openListening();
-    const m = /(?:^|[#&])p=(p_[a-z0-9]{4,32})/.exec(location.hash);
-    const id = m ? m[1] : null;
-    if (!id) return closeWin();
-    if (id === S.open && S.view === "paper" && !force) { document.body.classList.add("open"); return; }
-    openWin(id);
+    const q = new URLSearchParams(location.hash.replace(/^#/, ""));
+    const gid = GRX.test(q.get("g") || "") ? q.get("g") : null, pid = PRX.test(q.get("p") || "") ? q.get("p") : null;
+    if (pid && !gid) { placePaper(pid); return; }
+    if (!gid) { home(); return; }
+    showGraph(gid, q.has("map"));
+    if (pid) openWin(pid); else closeWin();
+  }
+  // #p=: the graph it opens in, once the library and the graph list are in.
+  async function placePaper(pid) {
+    const want = location.hash;
+    await S.ready;
+    let p = paperOf(pid);
+    if (!p) { try { p = await api("GET", `/api/papers/${pid}`); upsert(p); } catch (e) { toast(e.message); p = null; } }
+    if (location.hash !== want) return;           // gone elsewhere meanwhile
+    if (!p) { nav(hashFor(S.graph || S.graphs.landing()), false); return; }
+    nav(hashFor(S.graphs.graphFor(pid, p.graphs), pid), false);
+  }
+  function home() {
+    S.open = null;
+    closeExplainer(); closeMenu();
+    if (phone() && S.landed) { showGraph(null); showView("home"); document.title = "Papers"; return; }
+    S.ready.then(() => {
+      if (location.hash) return;
+      const gid = S.graphs.landing();
+      S.landed = true;
+      if (!gid) { showGraph(null); showView("home"); return; }
+      // a phone lands in the graph, with Back to the list of graphs
+      if (phone()) { history.pushState({ pcg: 1, from: "" }, "", `#${hashFor(gid)}`); openFromHash(); } else nav(hashFor(gid), false);
+    });
+  }
+  function showGraph(gid, map) {
+    const was = S.graph;
+    S.graph = gid;
+    S.landed = S.landed || !!gid;
+    S.phoneMap = !!(gid && map && phone());
+    if (S.graphs) { S.graphs.setCurrent(gid); S.graphs.showPapers(phone() ? gid : null); }
+    document.body.classList.toggle("gpl-open", !!gid && phone());
+    if (gid && S.map && S.map.current() !== gid) S.map.graph(gid);
+    if (gid && gid !== was) markOpened(gid);
+    mapShown();
+  }
+  // This person opened the graph: its new papers are seen, and the page lands here next time.
+  function markOpened(gid) {
+    clearTimeout(S.openedT);
+    S.openedT = setTimeout(() => {
+      if (S.graph !== gid) return;
+      api("POST", `/api/graphs/${encodeURIComponent(gid)}/opened`, {}).then(() => { if (S.graphs) S.graphs.opened(gid); }, () => {});
+    }, 300);
   }
   function showView(v) {
     S.view = v;
-    $("nothing").hidden = v !== "list";
     $("paper").hidden = v !== "paper";
     $("settings").hidden = v !== "settings";
     $("listening").hidden = v !== "listening";
-    document.body.classList.toggle("open", v !== "list");
+    for (const k of ["paper", "settings", "listening"]) document.body.classList.toggle(`v-${k}`, v === k);
+    document.body.classList.toggle("open", v !== "home");
     if (v === "settings") $("set-btn").setAttribute("aria-current", "page"); else $("set-btn").removeAttribute("aria-current");
     if (v === "listening") $("listen-btn").setAttribute("aria-current", "page"); else $("listen-btn").removeAttribute("aria-current");
     if (v !== "listening" && S.listening) S.listening.hide();
+    mapShown();
+    mapInset();
   }
   // Listening (listening.js, hub/listening.py): read from the hub each time it opens.
   function openListening() {
@@ -945,19 +539,20 @@
     closeExplainer(); closeMenu();
     showView("listening");
     document.title = "Listening · Papers";
-    renderList();
+    refresh();
     if (S.listening) S.listening.render($("ls-body"));
     $("win").scrollTop = 0;
   }
   async function openWin(id) {
     if (S.open !== id) { S.open = id; S.details = false; closeExplainer(); closeMenu(); setPane("tr"); }
     showView("paper");
-    store.set("pcg.last", id);
     if (!S.papers.has(id)) {
-      try { upsert(await api("GET", `/api/papers/${id}`)); } catch (e) { toast(e.message); return goList(); }
+      try { upsert(await api("GET", `/api/papers/${id}`)); } catch (e) { toast(e.message); return closePaper(); }
       if (S.open !== id) return;
     }
-    renderList();
+    refresh(id);
+    // its card on the map, beside the window (a wide screen; a phone's drawing, when it is open)
+    if (S.map && S.graph && (!phone() || S.phoneMap)) S.map.select(id, S.graph);
     // A paper that is playing keeps playing while another one is looked at.
     const c = chosen(S.papers.get(id));
     if (c && !isPlaying(S.audioEp)) loadAudio(c.id);
@@ -965,67 +560,63 @@
     $("win").scrollTop = 0; $("p-mid").scrollTop = 0;
   }
   function closeWin() {
+    if (S.view === "home" && !S.open) return;
     S.open = null;
     closeExplainer(); closeMenu();
-    showView("list");
+    showView("home");
     document.title = "Papers";
-    renderList();
+    refresh();
   }
 
-  // ------------------------------------------------------------------ the paper map
-  // map.js (window.PaperMap) draws it, with the group's graphs; it is loaded the first time the
-  // map is opened. The papers it colours (the Listened tick) are the live ones here.
-  S.map = null; S.mapPapers = null; S.mapLoad = null;
-  function mapCode() {
-    if (window.PaperMap && window.PaperMap.mount) return Promise.resolve(window.PaperMap);
-    if (!S.mapLoad) {
-      S.mapLoad = new Promise((resolve, reject) => {
-        const css = el("link", { rel: "stylesheet", href: "/map.css" });
-        const js = el("script", { src: "/map.js" });
-        js.addEventListener("load", () => (window.PaperMap && window.PaperMap.mount ? resolve(window.PaperMap) : reject(new Error("no map"))));
-        js.addEventListener("error", () => reject(new Error("no map")));
-        document.head.append(css, js);
-      }).catch((e) => { S.mapLoad = null; for (const n of document.head.querySelectorAll('link[href="/map.css"], script[src="/map.js"]')) n.remove(); throw e; });
-    }
-    return S.mapLoad;
-  }
-  async function openMap() {
+  // ------------------------------------------------------------------ the map
+  // map.js (window.PaperMap) draws the graph the list picks, beside it (a phone: over it, from
+  // the graph's "Map"). The papers it colours (heard: the Listened tick, or a version finished)
+  // are S.papers. Its list of graphs is the column's (onList); a graph it moves to by itself
+  // (another one a paper is "Also in", the one before a deleted one) becomes the page's.
+  S.map = null; S.ready = null;
+  function mapShown() {
     const host = $("map");
-    if (!host.hidden) return;
-    closeMenu(); closeSwipe();
-    let PM;
-    try { PM = await mapCode(); } catch (e) { toast("The map is not available yet."); return; }
-    host.hidden = false;
-    try { history.pushState({ pmap: 1 }, ""); } catch (e) { /* no history here */ }
-    if (S.map) { mapSync(); if (S.map.show) S.map.show(); return; }
-    try {
-      const all = await api("GET", "/api/library?q=");
-      S.mapPapers = new Map(all.papers.map((p) => [p.id, pinEdits(p)]));
-      for (const [id, p] of S.papers) S.mapPapers.set(id, p);
-      S.map = PM.mount(host, { api: "", graphs: true, editable: true, me: S.me, papers: S.mapPapers,
-        onOpen: (id) => { closeMap(true); openPaper(id); }, onClose: () => closeMap() }) || {};
-      if (host.hidden && S.map.hide) S.map.hide();
-    } catch (e) { closeMap(); toast(e.message); }
+    const on = phone() ? S.phoneMap && (S.view === "home" || S.view === "paper") : (S.view === "home" || S.view === "paper");
+    if (on === !host.hidden) return;
+    host.hidden = !on;
+    if (S.map) { if (on) S.map.show(); else S.map.hide(); }
   }
-  function closeMap(quiet) {
-    const host = $("map");
-    if (host.hidden) return;
-    host.hidden = true;
-    if (S.map && S.map.hide) S.map.hide();
-    if (S.listStale) { S.listStale = false; renderList(); }
-    if (!quiet && history.state && history.state.pmap) history.back();
+  // the paper's window covers the map's right side (a wide screen): papers are centred left of it
+  function mapInset() {
+    const w = !phone() && S.view === "paper" ? box($("win")).width : 0;
+    document.body.style.setProperty("--win-w", `${w}px`);       // graphs.css: the map's bar and panels stop there
+    if (S.map && S.map.inset) S.map.inset(w);
   }
-  function mapSync() {
-    if (!S.map || $("map").hidden) return;
-    for (const [id, p] of S.papers) S.mapPapers.set(id, p);
-    if (S.map.changed) S.map.changed();
+  function mapShowed(gid) {
+    if (gid === S.graph) return;
+    if (!gid) { if (S.graphs) nav(hashFor(S.graphs.landing()), false); return; }      // its graph was deleted
+    nav(hashFor(gid, null, S.phoneMap), true);
   }
+  function mapClose() {
+    if (S.phoneMap) back(hashFor(S.graph));
+    else if (S.view === "paper") closePaper();
+  }
+  function mapData(gid, data) {
+    if (S.graphs) S.graphs.graphData(gid, data);
+    // new papers in the graph on the screen: seen
+    const it = S.graphs && S.graphs.item(gid);
+    if (gid === S.graph && it && it.new && document.visibilityState === "visible") markOpened(gid);
+  }
+  function mapSync() { if (S.map && S.map.changed) S.map.changed(); }
   // Every live event also goes to the map (graph and log events are its own): as
   // map.event(kind, data) when it has one, and as a "papercast:event" on window.
   function toMap(kind, d) {
     if (S.map && typeof S.map.event === "function") { try { S.map.event(kind, d); } catch (e) { /* the map's own trouble */ } }
     window.dispatchEvent(new CustomEvent("papercast:event", { detail: { kind, data: d } }));
   }
+  // What the tour asks for: the drawing (a phone opens it for the graph; a wide screen has it as
+  // the home), and back.
+  function openMap() {
+    if (phone()) { const g = S.graph || (S.graphs && S.graphs.landing()); if (g && !S.phoneMap) nav(hashFor(g, null, true), true); }
+    else if (S.view !== "home") nav(hashFor(S.graph || (S.graphs && S.graphs.landing())), false);
+    return Promise.resolve();
+  }
+  function closeMap() { if (S.phoneMap) back(hashFor(S.graph)); }
 
   // ------------------------------------------------------------------ the window
   function renderWin() {
@@ -1135,7 +726,7 @@
       }
     }
     renderWin();
-    updateRow(pid);
+    refresh(pid);
   }
 
   // ------------------------------------------------------------------ audio player
@@ -1148,7 +739,7 @@
       if (then && S.audioReady === eid) then(a); else if (then) S.afterReady = then;
       return true;
     }
-    if (S.audioEp) { savePosition(true, false, true); const old = S.audioPaper; a.pause(); S.audioEp = null; S.audioPaper = null; if (old) updateRow(old); }
+    if (S.audioEp) { savePosition(true, false, true); const old = S.audioPaper; a.pause(); S.audioEp = null; S.audioPaper = null; if (old) refresh(old); }
     S.audioEp = eid; S.audioPaper = pid; S.audioReady = null; S.afterReady = null; S.dirty = false;
     a.src = src;
     a.playbackRate = S.speed;
@@ -1168,7 +759,7 @@
       if (!a.paused) S.dirty = true;
       if (then) then(a);
       if (S.afterReady) { const f = S.afterReady; S.afterReady = null; f(a); }
-      renderPlayer(); updateRow(pid);
+      renderPlayer(); refresh(pid);
     }, { once: true });
     if ("mediaSession" in navigator) {
       const p = paperOf(pid) || {};
@@ -1183,7 +774,7 @@
     a.pause(); a.removeAttribute("src"); a.load();
     const old = S.audioPaper;
     S.audioEp = null; S.audioPaper = null; S.audioReady = null;
-    if (old) updateRow(old);
+    if (old) refresh(old);
     renderPlayer();
   }
   // To the hub while playing every 10 s, and at once on a pause, a seek or the end; a burst of
@@ -1245,7 +836,7 @@
       S.dirty = true;
       const d = a.duration || durOf(e);
       a.currentTime = Math.max(0, Math.min(d || 0, t));
-      savePosition(true); renderPlayer(); updateRow(S.epPaper.get(e.id));
+      savePosition(true); renderPlayer(); refresh(S.epPaper.get(e.id));
     });
   }
   function skip(delta) {
@@ -1361,19 +952,25 @@
       const k = { ArrowLeft: -15, ArrowDown: -15, ArrowRight: 30, ArrowUp: 30 }[ev.key];
       if (k) { ev.preventDefault(); skip(k); } else if (ev.key === "Home") { ev.preventDefault(); seekTo(e, 0); } else if (ev.key === "End") { ev.preventDefault(); seekTo(e, durOf(e) - 1); }
     });
-    for (const ev of ["play", "pause", "durationchange", "ended", "seeked", "emptied"]) a.addEventListener(ev, () => { renderPlayer(); if (S.audioPaper) updateRow(S.audioPaper); });
+    for (const ev of ["play", "pause", "durationchange", "ended", "seeked", "emptied"]) a.addEventListener(ev, () => { renderPlayer(); if (S.audioPaper) refresh(S.audioPaper); });
     a.addEventListener("timeupdate", () => {
       savePosition(false);
       renderPlayer();
       const now = Date.now();
-      if (now - lastRowTick > 5000 && S.audioPaper) { lastRowTick = now; updateRow(S.audioPaper); }
+      if (now - lastRowTick > 5000 && S.audioPaper) { lastRowTick = now; refresh(S.audioPaper); }
     });
     // Saved as it starts playing too: the time heard counts from there (hub/listening.py).
     a.addEventListener("playing", () => { if (S.audioReady === S.audioEp) { S.dirty = true; savePosition(true); } });
     // A reload waiting for the pause goes 1.5 s after it: the position is saved, and a quick
     // pause and play again is not cut off.
     a.addEventListener("pause", () => { savePosition(true); if (S.reloadFor) setTimeout(maybeReload, 1500); });
-    a.addEventListener("ended", () => { savePosition(true); if (S.reloadFor) setTimeout(maybeReload, 1500); });
+    a.addEventListener("ended", () => {
+      savePosition(true);
+      // heard, if the hub counted it finished (listening.py): the paper read again once the last position is in
+      const pid = S.audioPaper;
+      if (pid && S.papers.has(pid) && !S.papers.get(pid).heard) setTimeout(() => touched(pid), 1500);
+      if (S.reloadFor) setTimeout(maybeReload, 1500);
+    });
     a.addEventListener("error", () => { if (a.getAttribute("src")) toast("The audio could not be loaded."); });
     window.addEventListener("pagehide", () => savePosition(true, true));
     if ("mediaSession" in navigator) {
@@ -1777,7 +1374,7 @@
     loadAudio(e.id, (au) => {
       S.dirty = true;
       au.currentTime = Math.max(0, Math.min((au.duration || durOf(e) || t + 1) - 0.1, t));
-      savePosition(true); renderPlayer(); updateRow(S.epPaper.get(e.id)); trTick();
+      savePosition(true); renderPlayer(); refresh(S.epPaper.get(e.id)); trTick();
     });
     if (a.paused || a.ended) a.play().catch((x) => { if (x.name !== "AbortError") toast(`Cannot play: ${x.message}`); });
   }
@@ -1892,15 +1489,28 @@
       api, me: () => S.me, isAdmin, phone, toast, hms, avatar: avatarNode,
       typed: () => { S.typedAt = Date.now(); },
       openPaper: (pid) => openPaper(pid),
-      rowChanged: (pid) => { updateRow(pid); if (pid === S.open) renderTabs(); },
+      rowChanged: (pid) => { refresh(pid); if (pid === S.open) renderTabs(); },
       showComments: () => setPane("c"),
       // the open paper's version in the player, and where it is
       position: () => { const e = openEp(); return e && e.has_audio ? { eid: e.id, s: posOf(e) } : null; },
       seek: seekPlay,
-      openGraph: async (gid) => {
-        await openMap();
-        if (S.map && typeof S.map.select === "function" && !$("map").hidden) S.map.select(null, gid);
-      },
+      openGraph: (gid) => openGraph(gid),
+    };
+  }
+
+  // ------------------------------------------------------------------ the graph list
+  // graphs.js (window.PaperGraphs): the home column, and a phone's list of a graph's papers.
+  function graphsCtx() {
+    return {
+      api, me: () => S.me, phone, toast, openMenu, closeMenu, paperOf, known,
+      authors: (p) => shortAuthors(p || {}),
+      typed: () => { S.typedAt = Date.now(); },
+      openGraph: (gid) => openGraph(gid),
+      openPaper: (pid, gid) => openPaper(pid, gid),
+      // a graph just made: the list again, and the graph
+      created: (gid) => { if (S.map) S.map.refreshList(); openGraph(gid); },
+      // "/" may take the keyboard to the search
+      free: () => $("overlay").hidden && $("q-overlay").hidden && !(phone() && document.body.classList.contains("open")),
     };
   }
 
@@ -1909,16 +1519,24 @@
   function tourCtx() {
     return {
       api, me: () => S.me, cfg: () => S.cfg, phone,
-      view: () => ($("map").hidden ? S.view : "map"),
+      view: () => (S.phoneMap ? "map" : S.view),
       openId: () => S.open,
-      papers: () => shownPapers(),
+      // the graph's papers first (the map's order), then the rest of the library, newest first
+      papers: () => {
+        const d = S.map && S.graph ? S.map.data(S.graph) : null, ids = d ? d.nodes.map((n) => n.id) : [];
+        const first = ids.map((id) => S.papers.get(id)).filter(Boolean);
+        const rest = [...S.papers.values()].filter((p) => !ids.includes(p.id)).sort((a, b) => (b.added_at || "").localeCompare(a.added_at || ""));
+        return first.concat(rest);
+      },
       hasAudio: anyAudio,
       // a paper opened without a step in the history
-      open: (pid) => { history.replaceState(null, "", `#p=${pid}`); openFromHash(true); },
-      list: () => { closeMenu(); closeQueue(); if (S.view !== "list") goList(); },
+      open: (pid) => { history.replaceState(history.state, "", `#${S.graph && inGraph(S.graph, pid) ? hashFor(S.graph, pid) : `p=${pid}`}`); openFromHash(); },
+      list: () => { closeMenu(); closeQueue(); if (S.view !== "home" || S.open || phone()) goHome(); },
       openMap, closeMap: () => closeMap(), closeMenu, map: () => S.map,
+      go: (h) => nav(String(h || "").replace(/^#/, ""), false),        // back to an address, without a step
       pane: (k) => setPane(k),
-      idle: () => $("overlay").hidden && $("q-overlay").hidden && !S.menu && document.visibilityState === "visible",
+      // nothing over the page, and the page has landed (the graph open last): the tour starts from where it stays
+      idle: () => S.landed && $("overlay").hidden && $("q-overlay").hidden && !S.menu && document.visibilityState === "visible",
     };
   }
 
@@ -1927,12 +1545,12 @@
   function seekPlay(eid, t) {
     const e = epById(eid), pid = S.epPaper.get(eid), p = S.papers.get(pid);
     if (!e || !e.has_audio || !p) return;
-    if (chosen(p) !== e) { store.set(mine(`pick.${pid}`), eid); if (S.open === pid) renderWin(); updateRow(pid); }
+    if (chosen(p) !== e) { store.set(mine(`pick.${pid}`), eid); if (S.open === pid) renderWin(); refresh(pid); }
     const a = A();
     loadAudio(eid, (x) => {
       S.dirty = true;
       x.currentTime = Math.max(0, Math.min(x.duration || durOf(e) || 0, t));
-      savePosition(true); renderPlayer(); updateRow(pid);
+      savePosition(true); renderPlayer(); refresh(pid);
     });
     a.play().catch((x) => { if (x.name !== "AbortError") toast(`Cannot play: ${x.message}`); });
   }
@@ -2000,7 +1618,7 @@
     S.setTab = ok.includes(which) ? which : ok.includes(S.setTab) ? S.setTab : "prefs";
     showView("settings");
     document.title = "Settings · Papers";
-    renderList();
+    refresh();
     renderSettings();
     $("win").scrollTop = 0;
   }
@@ -2948,7 +2566,8 @@
       if (t !== "hello" && t !== "resync" && t !== "graph" && t !== "log") toMap(t, d);
     });
     on("hello", (d) => checkBuild(d.build));
-    on("resync", () => { loadList(); toMap("resync", {}); });      // the map missed events too: it reads its graphs again
+    on("resync", () => { loadLibrary(); toMap("resync", {}); });      // the map missed events too: it reads its graphs again
+    on("mygraphs", () => { if (S.map && S.map.refreshList) S.map.refreshList(); });     // my subscriptions, from another tab
     on("paper", (d) => touched(d.paper_id || d.id || (d.paper && d.paper.id)));
     on("episode", (d) => touched(d.paper_id || (d.paper && d.paper.id) || S.epPaper.get(d.episode_id || d.id)));
     on("graph", (d) => toMap("graph", d));
@@ -2967,62 +2586,66 @@
   // ------------------------------------------------------------------ start
   async function start() {
     $("back").innerHTML = I.back; $("set-back").innerHTML = I.back; $("ls-back").innerHTML = I.back;
-    $("w-more").innerHTML = I.more; $("w-more-phone").innerHTML = I.more;
+    $("w-more").innerHTML = I.more; $("w-more-phone").innerHTML = I.more; $("w-close").innerHTML = I.close;
     $("x-close").innerHTML = I.close;
-    $("sort-btn").innerHTML = I.sort;
     try { S.cfg = await api("GET", "/api/config"); } catch (e) { toast(e.message); return; }
     S.me = S.cfg.me || {};
     if (window.PcgAvatar) window.PcgAvatar.seed(S.cfg.avatars);       // everyone's profile picture
     S.build = S.cfg.build || "";        // the build this page's code came with
     S.social = window.PaperSocial ? window.PaperSocial.mount(socialCtx()) : null;     // comments and the board
     S.listening = window.PaperListening ? window.PaperListening.mount({ api, avatar: avatarNode }) : null;
-    wireList();
-    S.q = tab.get("pcg.q") || "";
-    S.f = readFilters();
-    const sort = store.get("pcg.sort");
-    S.sort = ORDER[sort] ? sort : "added_desc";        // a search the tab kept is shown best match first
-    sortLabel();
-    $("sort-btn").addEventListener("click", (e) => { e.stopPropagation(); openMenu(e.currentTarget, "sort", sortMenu()); });
-    wireSearch();
-    renderFilters();
+    S.graphs = window.PaperGraphs.mount(graphsCtx());                                 // the home column
     $("w-listened").addEventListener("click", () => { const p = S.papers.get(S.open); if (p) setListened(p.id, !p.listened); });
     wirePlayer();
     wireQueue();
     wireTranscript();
-    $("back").addEventListener("click", goList);
+    $("back").addEventListener("click", closePaper);
+    $("w-close").addEventListener("click", closePaper);
     $("pt-tr").addEventListener("click", () => setPane("tr"));
     $("pt-c").addEventListener("click", () => setPane("c"));
-    $("set-back").addEventListener("click", goList);
-    $("ls-back").addEventListener("click", goList);
-    $("listen-btn").addEventListener("click", () => { if (S.view === "listening") goList(); else location.hash = "listening"; });
-    $("set-btn").addEventListener("click", () => { if (S.view === "settings") goList(); else location.hash = "settings"; });
+    $("set-back").addEventListener("click", goHome);
+    $("ls-back").addEventListener("click", goHome);
+    $("gpl-back").addEventListener("click", () => back(""));
+    $("gpl-map").addEventListener("click", () => { if (S.graph) nav(hashFor(S.graph, null, true), true); });
+    $("listen-btn").addEventListener("click", () => { if (S.view === "listening") goHome(); else location.hash = "listening"; });
+    $("set-btn").addEventListener("click", () => { if (S.view === "settings") goHome(); else location.hash = "settings"; });
     $("w-more").addEventListener("click", (e) => { e.stopPropagation(); openMenu(e.currentTarget, "win", winMenu()); });
     $("w-more-phone").addEventListener("click", (e) => { e.stopPropagation(); openMenu(e.currentTarget, "win", winMenu()); });
     $("x-open").addEventListener("click", openExplainer);
     $("x-close").addEventListener("click", closeExplainer);
     $("overlay").addEventListener("click", (e) => { if (e.target === $("overlay")) closeExplainer(); });
     document.addEventListener("click", (e) => { if (S.menu && !S.menu.node.contains(e.target) && !S.menu.anchor.contains(e.target)) closeMenu(); });
-    document.addEventListener("pointerdown", (e) => {
-      if (S.swiped && !e.target.closest(`.row[data-id="${S.swiped}"]`)) closeSwipe();
-    });
     document.addEventListener("keydown", (e) => {
-      if (e.key !== "Escape") return;
+      if (e.key !== "Escape" || e.defaultPrevented) return;
       if (S.menu) { const a = S.menu.anchor; closeMenu(); a.focus(); } else if (!$("overlay").hidden) closeExplainer();
-      else if (S.swiped) closeSwipe();
-      else if (!$("fpanel").hidden && $("fpanel").contains(document.activeElement)) { togglePanel(false); $("filter-btn").focus(); }
+      else if (S.view === "paper" && !phone() && !(e.target && e.target.closest && e.target.closest("input, textarea, select"))) closePaper();
     });
-    window.addEventListener("hashchange", () => openFromHash());
-    $("map-btn").addEventListener("click", openMap);
-    window.addEventListener("popstate", () => closeMap(true));
-    connect();          // first: nothing that changes while the list loads is missed
+    // the address: a step back or forward (each one reaches the page once)
+    const address = () => { if (location.hash !== S.handled) openFromHash(); };
+    window.addEventListener("hashchange", address);
+    window.addEventListener("popstate", address);
+    // a phone's layout and a wide screen's differ (the drawing, a graph's papers): the address again
+    // (not over Settings or Listening, which keep a draft)
+    window.matchMedia("(max-width: 720px)").addEventListener("change", () => { if (S.view !== "settings" && S.view !== "listening") openFromHash(); });
+    // The map, the page's home: mounted at once, shown beside the column (a phone: from a graph's "Map").
+    let listIn = null;
+    const listReady = new Promise((res) => { listIn = res; });
+    mapShown();
+    S.map = window.PaperMap.mount($("map"), {
+      api: "", column: true, live: true, editable: true, me: S.me, papers: S.papers, head: S.graphs.head,
+      onOpen: (id) => openPaper(id, S.map.current()), onClose: mapClose, onShow: mapShowed, onData: mapData,
+      onList: (r) => {
+        S.graphs.setList(r);
+        listIn();
+        // a graph the address names that is not there (deleted, or never was): where the page lands
+        if (S.graph && !S.graphs.item(S.graph) && S.view !== "settings" && S.view !== "listening") nav(hashFor(S.graphs.landing()), false);
+      },
+    }) || {};
+    if ($("map").hidden && S.map.hide) S.map.hide();
+    connect();          // first: nothing that changes while the library loads is missed
     loadQueue();
-    await loadList();
-    if (location.hash) openFromHash();
-    else {
-      // On a wide screen the window is never an empty pane: the last paper opened here, if any.
-      const last = store.get("pcg.last");
-      if (!phone() && last && S.papers.has(last)) { history.replaceState(null, "", `#p=${last}`); openFromHash(); }
-    }
+    S.ready = Promise.all([loadLibrary(), listReady]);
+    openFromHash();
     S.tour = window.PaperTour ? window.PaperTour.mount(tourCtx()) : null;
   }
   document.addEventListener("DOMContentLoaded", start);

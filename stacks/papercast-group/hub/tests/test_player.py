@@ -362,10 +362,12 @@ except ImportError:
     SKIP = "websocket-client not installed"
 
 # test_page's tap-target check, with the Up next panel as a top layer like the explainer
-_TOP = "const top = !document.getElementById('overlay').hidden ? document.getElementById('overlay') : document.querySelector('.menu');"
+_TOP = ("const top = !document.getElementById('overlay').hidden ? document.getElementById('overlay') : document.querySelector('.menu')"
+        " || (bell && !bell.hidden ? bell : null);")
 assert _TOP in tp.TAP_TARGETS
 TAP_TARGETS = tp.TAP_TARGETS.replace(_TOP, "const top = !document.getElementById('overlay').hidden ? document.getElementById('overlay')"
-                                     " : !document.getElementById('q-overlay').hidden ? document.getElementById('q-overlay') : document.querySelector('.menu');")
+                                     " : !document.getElementById('q-overlay').hidden ? document.getElementById('q-overlay')"
+                                     " : document.querySelector('.menu') || (bell && !bell.hidden ? bell : null);")
 AUDIO = "document.getElementById('audio')"
 SEG = "document.querySelector('#tr-body .tr-s[data-seg=\"{}\"]')"
 NOW = "(document.querySelector('#tr-body .tr-s.now') || {dataset: {}}).dataset.seg"
@@ -464,31 +466,35 @@ class PlayerPage(tp.PageBase):
         return max(i for i, s in enumerate(segs) if s["start"] <= t)
 
     # -- tests
+    def window_menu(self, pid):
+        """A paper's window, then its ⋯ menu."""
+        self.open(pid)
+        self.b.js("document.getElementById('w-more').click()")
+        self.b.wait_js("!!document.querySelector('.menu')", 3, "the window's menu")
+
     def test_1_menus_and_the_up_next_panel(self):
         b = self.b
         e1, e2, e3 = self.es
         self.home(A)
-        self.open(self.read)
-        # a row's menu: Play next and Add to Up next, then what was there
-        b.js(f"document.querySelector('{tp.ROW.format(self.short[0])} .more').click()")
-        b.wait_js("!!document.querySelector('.menu')", 3, "row menu")
-        self.assertEqual(self.menu(), ["Play next", "Add to Up next", "Delete my version"])
+        # the window's menu: Play next and Add to Up next, then what was there
+        self.window_menu(self.short[0])
+        self.assertEqual(self.menu(), ["Play next", "Add to Up next", "Details", "Delete my version"])
         self.pick("Add to Up next")
         self.r.wait(lambda: self.queue() == [e1], 5, "added on the hub")
         b.wait_js("document.getElementById('toast-msg').textContent === 'Added to Up next'", 3, "toast")
-        b.js(f"document.querySelector('{tp.ROW.format(self.short[1])} .more').click()")
+        self.window_menu(self.short[1])
         self.pick("Play next")
         self.r.wait(lambda: self.queue() == [e2, e1], 5, "first on the hub")
         # queued already: the menu offers to take it out instead
-        b.js(f"document.querySelector('{tp.ROW.format(self.short[0])} .more').click()")
-        self.assertEqual(self.menu(), ["Play next", "Remove from Up next", "Delete my version"])
-        b.js(f"document.querySelector('{tp.ROW.format(self.short[0])} .more').click()")
-        # nothing to listen to yet: nothing to queue (an admin still gets Delete)
-        b.js(f"document.querySelector('{tp.ROW.format(self.wait)} .more').click()")
-        self.assertEqual(self.menu(), ["Delete Bob’s version"])
-        b.js(f"document.querySelector('{tp.ROW.format(self.wait)} .more').click()")
-        # the window's menu has them too
+        self.window_menu(self.short[0])
+        self.assertEqual(self.menu(), ["Play next", "Remove from Up next", "Details", "Delete my version"])
         b.js("document.getElementById('w-more').click()")
+        # nothing to listen to yet: nothing to queue (an admin still gets Delete)
+        self.window_menu(self.wait)
+        self.assertEqual(self.menu(), ["Details", "Delete Bob’s version"])
+        b.js("document.getElementById('w-more').click()")
+        # the one in the player: the paper read along
+        self.window_menu(self.read)
         self.assertEqual(self.menu()[:3], ["Play next", "Add to Up next", "Details"])
         b.js("document.getElementById('w-more').click()")
         # the player says what is next
@@ -542,14 +548,16 @@ class PlayerPage(tp.PageBase):
         # the next plays, leaves the queue, and the window follows it
         b.wait_js(f"{src} === '/audio/{e2}.mp3' && !{AUDIO}.paused && {AUDIO}.currentTime > 0.1", 10, "the next one playing")
         self.r.wait(lambda: self.queue() == [e3], 5, "gone from the queue")
-        b.wait_js(f"location.hash === '#p={self.short[1]}' && document.getElementById('w-title').textContent === 'Short fake paper two'", 5, "window followed")
+        b.wait_js(f"location.hash.endsWith('&p={self.short[1]}') && document.getElementById('w-title').textContent === 'Short fake paper two'", 5, "window followed")
         self.assertEqual(self.text("#p-next-t"), "Short fake paper three")
-        b.wait_js(f"document.querySelector('{tp.ROW.format(self.short[0])} .row-sub .st').textContent === 'Played'", 5, "the first played")
+        # the first is played: kept at its end on the hub
+        self.r.wait(lambda: (self.r.q("SELECT seconds FROM positions WHERE episode_id = ?", e1) or [[0]])[0][0] >= 3.5, 5, "the first played")
         # on a phone, from the list: the player bar goes on to the next
         try:
             self.phone()
             b.js("document.getElementById('back').click()")
-            b.wait_js("!document.getElementById('bar').hidden && !document.body.classList.contains('open')", 5, "the bar on the list")
+            b.wait_js("!document.getElementById('bar').hidden && !document.body.classList.contains('open')"
+                      " && document.body.classList.contains('gpl-open')", 5, "the bar on the graph's papers")
             self.assertFalse(b.js("document.getElementById('p-next').hidden"))
             b.js(f"{AUDIO}.currentTime = {AUDIO}.duration - 0.4")
             b.wait_js(f"{src} === '/audio/{e3}.mp3' && !{AUDIO}.paused && {AUDIO}.currentTime > 0.1", 10, "the last one playing")
@@ -616,9 +624,12 @@ class PlayerPage(tp.PageBase):
         b.wait_js(f"Number({NOW}) >= 70 && {in_view(cur)}", 5, "kept in view")
         time.sleep(1.2)
         b.wait_js(f"!{AUDIO}.paused && Number({NOW}) > 72 && {in_view(cur)}", 5, "still in view")
-        # the person scrolls away: the page no longer moves, and offers Back to now
+        # the person scrolls away: the page no longer moves, and offers Back to now (a wheel is a
+        # few events: the first ends the page's own smooth scroll if one is under way, the rest scroll)
         x, y = self.center("document.getElementById('win')")
-        self.mouse("mouseWheel", x, y, deltaX=0, deltaY=-2500)
+        for _ in range(3):
+            self.mouse("mouseWheel", x, y, deltaX=0, deltaY=-900)
+            time.sleep(0.05)
         b.wait_js(f"!{in_view(cur)} && !document.getElementById('tr-now').hidden", 5, "scrolled away")
         time.sleep(0.3)
         top = b.js(f"{SCROLLER}.scrollTop")
@@ -700,9 +711,21 @@ class PlayerPage(tp.PageBase):
         b.wait_js("document.getElementById('tr').hidden && document.getElementById('w-title').textContent === 'Short fake paper one'", 5, "none")
 
     def test_7_the_transcript_rolls_while_it_plays(self):
-        """Playing, the window rolls with the sentence (about a third of the way down), the
-        comments' column staying where it is; scrolled by hand, it stops, and Back to now shows;
-        Play (after a pause) follows again."""
+        """Playing, the window rolls with the sentence (about a third of the way down); scrolled
+        by hand, it stops, and Back to now shows; Play (after a pause) follows again. The paper's
+        window is beside the map: at 1440 px the transcript and the comments are two tabs and the
+        window is what scrolls; on a wide screen (2560 px) the comments have their column, which
+        stays where it is while the middle rolls."""
+        for w, h in ((1440, 900), (2560, 1440)):
+            with self.subTest(width=w):
+                try:
+                    self.b.viewport(w, h)
+                    self.rolls(wide=w > 2000)
+                finally:
+                    self.b.js(f"{AUDIO}.pause()")
+                    self.b.viewport(1440, 900)
+
+    def rolls(self, wide):
         b = self.b
         segs = self.timed["segments"]
         cur = "document.querySelector('#tr-body .tr-s.now')"
@@ -710,10 +733,14 @@ class PlayerPage(tp.PageBase):
         self.home(A)
         self.open(self.read)
         b.wait_js(f"!document.getElementById('tr').hidden && {AUDIO}.duration > 20", 10, "transcript")
-        # the middle scrolls on its own, left of the comments
-        self.assertEqual(b.js("getComputedStyle(document.getElementById('p-mid')).overflowY"), "auto")
-        self.assertLessEqual(b.js("document.getElementById('tr').getBoundingClientRect().right"), b.js(f"{col}[0]") + 1)
-        c0 = b.js(col)
+        if wide:
+            # the middle scrolls on its own, left of the comments
+            self.assertEqual(b.js("getComputedStyle(document.getElementById('ptabs')).display"), "none")
+            self.assertEqual(b.js("getComputedStyle(document.getElementById('p-mid')).overflowY"), "auto")
+            self.assertLessEqual(b.js("document.getElementById('tr').getBoundingClientRect().right"), b.js(f"{col}[0]") + 1)
+            c0 = b.js(col)
+        else:
+            self.assertEqual(b.js("getComputedStyle(document.getElementById('ptabs')).display"), "flex")
         b.js(f"{AUDIO}.muted = true; document.getElementById('p-play').click()")
         b.wait_js(f"!{AUDIO}.paused", 5, "playing")
         b.js(f"{AUDIO}.currentTime = {segs[80]['start'] + 0.05}")
@@ -721,8 +748,9 @@ class PlayerPage(tp.PageBase):
         top = b.js(f"{SCROLLER}.scrollTop")
         time.sleep(1.5)             # six more sentences: the view went on with them
         b.wait_js(f"!{AUDIO}.paused && Number({NOW}) >= 85 && {at_third(cur)} && {SCROLLER}.scrollTop > {top}", 5, "rolling")
-        self.assertEqual(b.js(col), c0, "the comments' column moved")
-        self.assertEqual(b.js("document.getElementById('win').scrollTop"), 0, "the window scrolled, not the middle")
+        if wide:
+            self.assertEqual(b.js(col), c0, "the comments' column moved")
+            self.assertEqual(b.js("document.getElementById('win').scrollTop"), 0, "the window scrolled, not the middle")
         # scrolled by hand: it stays put, and Back to now shows
         x, y = self.center(SCROLLER)
         self.mouse("mouseWheel", x, y, deltaX=0, deltaY=-20000)

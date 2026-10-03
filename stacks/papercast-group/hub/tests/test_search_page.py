@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""The search and the filters on the page (hub/static), in a real headless Chrome, against the
-real hub (PCG_AUTH=header, as test_page.py).
+"""The column's one search box (hub/static/graphs.js, GET /api/library?q=), in a real headless
+Chrome, against the real hub (PCG_AUTH=header, as test_page.py).
 
-    python3 -m unittest discover -s stacks/papercast-group/hub/tests -p 'test_search_page.py' -v
+    python3 -m unittest discover -s stacks/papercast-group/hub/tests -t stacks/papercast-group -p 'test_search_page.py' -v
 
-Results as you type, with where each paper matched and the match marked (DOM nodes: a paper
-text holding <script> shows it as text and runs nothing); a clear button, "/" to the search,
-Escape to empty it; the count; "Showing results for" a corrected word; snippets for rows past
-the first ones; the filter section (topic, tag, maker, years, listened) with one chip per
-filter, a tap on a chip removing it; filters with and without a query and with the sorts; the
-search and filters kept over a reload in the tab; on a phone every control a 44 px tap. No
-test may leave an error in the console (a CSP violation is one). Screenshots go to
-$PCG_TEST_SHOTS if set. Fake titles and people only."""
+Papers and graphs as you type: the graphs whose name matches, then the papers, best first, each
+with what matched marked and, when it matched elsewhere than in its title, where (DOM nodes: a
+paper text holding <script> shows it as text and runs nothing); the first rows with their
+snippets, the first thirty papers then "Show all"; a clear button; "/" to the search, Escape
+to empty it, then to leave it; a corrected word still finds the paper; Enter opens the first
+result; a paper picked opens in its graph. On a phone every control a 44 px tap. No test may
+leave an error in the console (a CSP violation is one). Screenshots go to $PCG_TEST_SHOTS if
+set. Fake titles and people only. (The list page's filters, chips, sort of papers and the
+search kept over a reload went with the list.)"""
 from __future__ import annotations
 
 import json
@@ -21,14 +22,16 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from test_page import A, ROW, ROWS, SKIP, PageBase, js_list  # noqa: E402
+from test_page import A, GROW, SKIP, PageBase, js_list  # noqa: E402
 
-from hub import search  # noqa: E402
+from hub import db, search  # noqa: E402
 
 TYPE = "{ const s = document.getElementById('search'); s.value = %s; s.dispatchEvent(new Event('input')); }"
-HITS = "[...document.querySelectorAll('#rows .row .row-hit')].length"
-CHIPS = "[...document.querySelectorAll('#chips .chip .chip-t')].map(x => x.textContent)"
-STAT = "document.getElementById('sstat').textContent"
+PAPERS = "[...document.querySelectorAll('#gl .gl-papers .gl-prow')].map(x => x.dataset.id)"
+GHITS = "[...document.querySelectorAll('#gl .gl-hits .gl-row')].map(x => x.dataset.id)"
+SNIPS = "[...document.querySelectorAll('#gl .gl-papers .gl-phit')].map(x => x.textContent)"
+PROW = "#gl .gl-papers .gl-prow[data-id=\"{}\"]"
+SECTIONS = "!!document.querySelector('#gl .gl-subs, #gl .gl-rest')"
 
 
 @unittest.skipIf(SKIP, SKIP or "")
@@ -67,8 +70,8 @@ class SearchPage(PageBase):
     def type(self, q):
         self.b.js(TYPE % json.dumps(q))
 
-    def rows_are(self, ids, what):
-        self.b.wait_js(f"JSON.stringify({ROWS}) === {js_list(ids)}", 8, what)
+    def papers_are(self, ids, what):
+        self.b.wait_js(f"JSON.stringify({PAPERS}) === {js_list(ids)}", 8, what)
 
     def key(self, key, code=None, text=None):
         b = self.b
@@ -76,37 +79,47 @@ class SearchPage(PageBase):
         b.call("Input.dispatchKeyEvent", type="keyDown", **kw, **({"text": text} if text else {}))
         b.call("Input.dispatchKeyEvent", type="keyUp", **kw)
 
+    def hub_order(self, q):
+        st, js, _ = self.r.req("GET", f"/api/library?q={q}", user=A)
+        return [p["id"] for p in js["papers"]]
+
     # ------------------------------------------------------------ the box
     def test_1_results_as_you_type_with_marks(self):
         b = self.b
         self.home(A)
         self.assertTrue(b.js("document.getElementById('search-clear').hidden"))
-        self.assertTrue(b.js("document.getElementById('sstat').hidden"))
         self.type("zebr")                                         # a prefix, in the paper's own text
-        self.rows_are([self.xss], "the hostile paper")
-        b.wait_js(f"{STAT} === '1 paper'", 5, "the count")
-        hit = ROW.format(self.xss) + " .row-hit"
+        self.papers_are([self.xss], "the hostile paper")
+        self.assertEqual(b.js(GHITS), [])                         # no graph is called that
+        hit = PROW.format(self.xss) + " .gl-phit"
         b.wait_js(f"!!document.querySelector('{hit}')", 5, "the snippet")
         self.assertEqual(self.text(hit + " .lead"), "in the paper: ")
         self.assertEqual(b.js(f"[...document.querySelectorAll('{hit} mark')].map(m => m.textContent)"), ["zebrafinch"])
         # the text's markup is text: shown, never run
         self.assertEqual(self.text(hit), 'in the paper: Before <b>it</b> the zebrafinch <script>window.__xss = 1</script>'
                          '<img src=x onerror="window.__xss = 2"> sings.')
-        self.assertEqual(b.js("document.querySelectorAll('#rows script, #rows img, #rows b').length"), 0)
+        self.assertEqual(b.js("document.querySelectorAll('#gl script, #gl img, #gl b').length"), 0)
         self.assertIsNone(b.js("window.__xss === undefined ? null : window.__xss"))
         self.assertFalse(b.js("document.getElementById('search-clear').hidden"))
-        # a title's match is marked in the title
+        # a title's match is marked in the title, and no snippet says so again
         self.type("denoising diffusion")
-        self.rows_are([self.diff], "by the title")
-        self.assertEqual(b.js(f"[...document.querySelectorAll('{ROW.format(self.diff)} .row-title mark')].map(m => m.textContent)"),
+        self.papers_are([self.diff], "by the title")
+        self.assertEqual(b.js(f"[...document.querySelectorAll('{PROW.format(self.diff)} .gl-ptitle mark')].map(m => m.textContent)"),
                          ["Denoising", "Diffusion"])
-        self.assertEqual(self.text(ROW.format(self.diff) + " .row-title"), "Denoising Diffusion For Fake Pictures")
+        self.assertEqual(self.text(PROW.format(self.diff) + " .gl-ptitle"), "Denoising Diffusion For Fake Pictures")
+        self.assertIsNone(b.js(f"document.querySelector('{PROW.format(self.diff)} .gl-phit')"))
+        self.assertEqual(self.text(PROW.format(self.diff) + " .gl-psub"), "Lovelace and Turing · 2020")
         self.shot("search-desktop")
-        # the clear button empties it
+        # the clear button empties it: the graph list again
         b.js("document.getElementById('search-clear').click()")
-        b.wait_js(f"{ROWS}.length === 42 && document.getElementById('search').value === ''"
-                  " && document.getElementById('sstat').hidden && !document.querySelector('#rows mark')", 5, "cleared")
+        b.wait_js(f"{SECTIONS} && document.getElementById('search').value === '' && !document.querySelector('#gl mark')"
+                  " && document.getElementById('search-clear').hidden", 5, "cleared")
         self.assertEqual(b.js("document.activeElement.id"), "search")
+        # nothing found: the word for it
+        self.type("qqqqzzzz")
+        b.wait_js("(document.querySelector('#gl .gl-none-t') || {}).textContent === 'No matches'", 5, "no matches")
+        self.type("")
+        b.wait_js(SECTIONS, 5, "the list again")
 
     def test_2_slash_focuses_and_escape_empties(self):
         b = self.b
@@ -116,9 +129,9 @@ class SearchPage(PageBase):
         b.wait_js("document.activeElement && document.activeElement.id === 'search'", 3, "/ to the search")
         self.assertEqual(b.js("document.getElementById('search').value"), "")        # the / is not typed
         b.call("Input.insertText", text="wombat")
-        b.wait_js(f"{ROWS}.length === 40", 5, "typed")
+        b.wait_js(f"{PAPERS}.length === 30", 5, "typed")
         self.key("Escape")
-        b.wait_js(f"document.getElementById('search').value === '' && {ROWS}.length === 42", 5, "Escape empties it")
+        b.wait_js(f"document.getElementById('search').value === '' && {SECTIONS}", 5, "Escape empties it")
         self.assertEqual(b.js("document.activeElement.id"), "search")
         self.key("Escape")
         self.assertNotEqual(b.js("document.activeElement && document.activeElement.id"), "search")
@@ -131,110 +144,51 @@ class SearchPage(PageBase):
         self.assertEqual(b.js("document.activeElement.id"), "pref-note")
         self.assertEqual(b.js("document.getElementById('pref-note').value"), "/")
 
-    def test_3_a_corrected_word_says_so(self):
+    def test_3_a_corrected_word_still_finds_it(self):
         b = self.b
         self.home(A)
         self.type("difusion ")
-        self.rows_are([self.diff], "corrected")
-        b.wait_js(f"{STAT}.startsWith('Showing results for diffusion')", 5, "Showing results for")
-        self.assertEqual(b.js("document.querySelector('#sstat b').textContent"), "diffusion")
-        self.assertIn("1 paper", self.text("#sstat"))
+        self.papers_are([self.diff], "corrected")
+        gen = db.conn().execute("SELECT id FROM graphs WHERE name = 'Diffusion and generative models'").fetchone()[0]
+        b.wait_js(f"{GHITS}.includes({json.dumps(gen)})", 5, "the graph's name, corrected too")
+        self.assertEqual(b.js(f"[...document.querySelectorAll('{PROW.format(self.diff)} .gl-ptitle mark')].map(m => m.textContent)"),
+                         ["Diffusion"])
 
-    def test_4_snippets_for_every_row(self):
-        """The first rows come with their snippets, the rest are asked for as they are drawn."""
+    def test_4_papers_and_graphs_snippets_and_show_all(self):
+        """The graphs whose name matches first, then the papers in the hub's order: the first rows
+        with their snippets, thirty of them, then "Show all"."""
         b = self.b
         self.home(A)
         self.type("wombat")
-        b.wait_js(f"{ROWS}.length === 40 && {STAT} === '40 papers'", 8, "forty")
-        b.wait_js(f"{HITS} === 40", 8, "every row's snippet")
-        texts = b.js("[...document.querySelectorAll('#rows .row .row-hit')].map(x => x.textContent)")
-        self.assertTrue(all(t.startswith(("in the episode: ", "in the tags: ")) and "wombat" in t for t in texts), texts[:3])
-        self.assertEqual(sum(t.startswith("in the tags: ") for t in texts), 20)       # the tag wins where there is one
-        # the best matches first; another sort is there, and Best match comes back
-        b.js("document.getElementById('sort-btn').click()")
-        items = b.js("[...document.querySelectorAll('.menu button')].map(x => [x.textContent, x.getAttribute('aria-checked')])")
-        self.assertEqual(items[0], ["Best match", "true"])
-        b.js("[...document.querySelectorAll('.menu button')].find(x => x.textContent === 'Title A–Z').click()")
-        self.rows_are(self.wombats, "by title")
-        self.assertIn("Title", b.js("document.getElementById('sort-btn').getAttribute('aria-label')"))
-        b.js("document.getElementById('sort-btn').click()")
-        b.js("[...document.querySelectorAll('.menu button')].find(x => x.textContent === 'Best match').click()")
-        self.assertEqual(b.js("document.getElementById('sort-btn').getAttribute('aria-label')"), "Sort: Best match")
-        b.js("localStorage.removeItem('pcg.sort')")
-
-    # ------------------------------------------------------------ filters
-    def open_panel(self):
-        b = self.b
-        b.js("document.getElementById('filter-btn').click()")
-        b.wait_js("!document.getElementById('fpanel').hidden && !!document.getElementById('f-graph')"
-                  " && document.getElementById('f-graph').options.length > 1", 5, "the filter section")
-
-    def choose(self, sel, value):
-        self.b.js(f"{{ const s = document.getElementById({json.dumps(sel)}); s.value = {json.dumps(value)}; s.dispatchEvent(new Event('change')); }}")
-
-    def test_5_filters_chips_and_a_reload(self):
-        b, r = self.b, self.r
-        self.home(A)
-        self.open_panel()
-        self.assertEqual(b.js("document.getElementById('filter-btn').getAttribute('aria-expanded')"), "true")
-        opts = b.js("[...document.getElementById('f-graph').options].map(o => o.textContent)")
-        self.assertIn("Wombat Topics", opts)
-        self.assertEqual(b.js("document.getElementById('f-maker').options.length"), 4)    # Anyone, Alice, Bob, Carol
-        self.choose("f-graph", self.gid)
-        members = sorted(self.members, key=lambda p: self.wombats.index(p), reverse=True)     # newest first
-        self.rows_are(members, "the graph's members")
-        b.wait_js(f"JSON.stringify({CHIPS}) === {js_list(['Topic: Wombat Topics'])}", 5, "a chip")
-        b.wait_js(f"{STAT} === '20 papers'", 5, "the count")
-        # together with a maker and a year range, and with a search
-        self.choose("f-maker", str(self.bob))
-        self.choose("f-yfrom", "2010")
-        want = [p for p in members if self.wombats.index(p) % 3 == 0 and 2000 + self.wombats.index(p) % 20 >= 2010]
-        self.rows_are(want, "graph, maker and years")
-        self.assertEqual(b.js(CHIPS), ["Topic: Wombat Topics", "By Bob", "From 2010"])
-        self.type("burrow")
-        self.rows_are(sorted(want, key=lambda p: -(2000 + self.wombats.index(p) % 20)), "and a search")
-        self.shot("filters-desktop")
-        # the tab keeps the search and the filters over a reload
-        self.load()
-        b.wait_js(f"JSON.stringify({CHIPS}) === {js_list(['Topic: Wombat Topics', 'By Bob', 'From 2010'])}", 8, "chips again")
-        self.assertEqual(b.js("document.getElementById('search').value"), "burrow")
-        b.wait_js(f"{ROWS}.length === {len(want)}", 8, "the same rows")
-        self.assertEqual(b.js("document.getElementById('sort-btn').getAttribute('aria-label')"), "Sort: Best match")
-        # a tap on a chip takes that filter away; Clear takes them all
-        b.js("[...document.querySelectorAll('#chips .chip')].find(c => c.dataset.k === 'maker').click()")
-        b.wait_js(f"JSON.stringify({CHIPS}) === {js_list(['Topic: Wombat Topics', 'From 2010'])}", 5, "one chip less")
-        b.wait_js(f"{ROWS}.length === {len([p for p in members if 2000 + self.wombats.index(p) % 20 >= 2010])}", 5, "wider")
-        b.js("document.getElementById('filter-clear').click()")
-        b.wait_js(f"document.getElementById('filter').hidden && {ROWS}.length === 40", 5, "cleared, the search left")
-        self.type("")
-        b.wait_js(f"{ROWS}.length === 42", 5, "everything")
-
-    def test_6_listened_and_the_tag_filter(self):
-        b, r = self.b, self.r
-        try:
-            r.req("PUT", f"/api/papers/{self.diff}/listened", {"listened": True}, user=A)
-            self.home(A)
-            self.open_panel()
-            b.js("[...document.querySelectorAll('#fpanel .f-seg button')].find(x => x.textContent === 'Listened').click()")
-            self.rows_are([self.diff], "listened")
-            self.assertEqual(b.js(CHIPS), ["Listened"])
-            b.js("[...document.querySelectorAll('#fpanel .f-seg button')].find(x => x.textContent === 'Not listened').click()")
-            b.wait_js(f"{ROWS}.length === 41 && JSON.stringify({CHIPS}) === {js_list(['Not listened'])}", 5, "not listened")
-            # a row's tag is a filter too, with its chip
-            b.js("document.getElementById('filter-clear').click()")
-            b.wait_js(f"{ROWS}.length === 42", 5, "all")
-            b.js(f"[...document.querySelectorAll('{ROW.format(self.diff)} .tag')].find(t => t.textContent === 'generative models').click()")
-            self.rows_are([self.diff], "the tag")
-            self.assertEqual(b.js(CHIPS), ["Tag: generative models"])
-            self.assertEqual(b.js("document.getElementById('f-tag').value"), "generative models")   # the open section follows
-            b.js("document.querySelector('#chips .chip').click()")
-            b.wait_js(f"{ROWS}.length === 42 && document.getElementById('filter').hidden", 5, "chip gone")
-            # Escape inside the section closes it
-            b.js("document.getElementById('f-tag').focus()")
-            self.key("Escape")
-            b.wait_js("document.getElementById('fpanel').hidden && document.activeElement.id === 'filter-btn'", 3, "closed")
-        finally:
-            r.q("DELETE FROM listened")
+        b.wait_js(f"JSON.stringify({GHITS}) === {js_list([self.gid])}", 8, "the wombat graph")
+        self.assertEqual(b.js(f"document.querySelector('{GROW.format(self.gid)} .gl-name mark').textContent"), "Wombat")
+        want = self.hub_order("wombat")
+        self.assertEqual(len(want), 40)
+        self.papers_are(want[:30], "the first thirty, best first")
+        self.assertEqual(self.text("#gl-all"), "Show all 40")
+        texts = b.js(SNIPS)
+        self.assertEqual(len(texts), search.SNIPPETS)                 # the rows past them come without
+        self.assertTrue(all(t.startswith(("in the episode: ", "in the tags: ")) and "wombat" in t.lower() for t in texts), texts[:3])
+        b.js("document.getElementById('gl-all').click()")
+        self.papers_are(want, "all forty")
+        self.assertIsNone(b.js("document.getElementById('gl-all')"))
+        # Enter opens the first result: here the graph
+        b.js("document.getElementById('search').focus()")
+        self.key("Enter")
+        b.wait_js(f"location.hash === '#g={self.gid}'", 5, "the graph opened")
+        # a paper picked opens in its graph, with its window
+        self.type("denoising")
+        self.papers_are([self.diff], "the diffusion paper")
+        gen = db.conn().execute("SELECT id FROM graphs WHERE name = 'Diffusion and generative models'").fetchone()[0]
+        b.js(f"document.querySelector('{PROW.format(self.diff)} .gl-popen').click()")
+        b.wait_js(f"location.hash === '#g={gen}&p={self.diff}' && !document.getElementById('paper').hidden"
+                  " && document.getElementById('w-title').textContent === 'Denoising Diffusion For Fake Pictures'", 5, "opened in its graph")
+        # Enter with a paper alone: that paper
+        self.type("zebr")
+        self.papers_are([self.xss], "the hostile paper")
+        b.js("document.getElementById('search').focus()")
+        self.key("Enter")
+        b.wait_js(f"location.hash === '#g=none&p={self.xss}' && document.getElementById('w-title').textContent === 'A Hostile Fake Text'", 5, "opened")
 
     # ------------------------------------------------------------ phone
     def test_z_phone(self):
@@ -242,27 +196,23 @@ class SearchPage(PageBase):
         try:
             self.phone()
             self.home(A)
+            b.js("document.getElementById('gpl-back').click()")              # it lands in a graph: back to the list of graphs
+            b.wait_js("!document.body.classList.contains('gpl-open')", 5, "the list of graphs")
             self.type("wombat")
-            b.wait_js(f"{HITS} === 40", 8, "snippets")
-            self.assertTargets("a search with its clear button and snippets")
+            b.wait_js(f"{PAPERS}.length === 30 && {GHITS}.length === 1", 8, "results")
+            self.assertTargets("a search with its clear button, graphs and papers")
             self.no_side_scroll("a search")
-            self.open_panel()
-            self.choose("f-graph", self.gid)
-            self.choose("f-yto", "2015")
-            b.wait_js(f"{CHIPS}.length === 2", 5, "chips")
-            self.assertTargets("the filter section and chips")
-            self.no_side_scroll("the filter section")
-            self.shot("phone-filters")
-            b.js("document.getElementById('filter-btn').click()")
-            self.assertTargets("the chips alone")
+            b.js("document.getElementById('gl-all').click()")
+            b.wait_js(f"{PAPERS}.length === 40", 5, "all")
+            self.assertTargets("all the papers")
             self.shot("phone-search")
-            # Enter searches and puts the keyboard away
+            # Enter opens the first result and puts the keyboard away
             b.js("document.getElementById('search').focus()")
             self.key("Enter")
-            b.wait_js("document.activeElement.id !== 'search'", 3, "blurred")
+            b.wait_js(f"document.activeElement.id !== 'search' && location.hash === '#g={self.gid}'"
+                      " && document.body.classList.contains('gpl-open')", 3, "the graph's papers, blurred")
         finally:
             b.viewport(1440, 900)
-            b.js("sessionStorage.clear()")
 
 
 if __name__ == "__main__":

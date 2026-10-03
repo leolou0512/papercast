@@ -10,17 +10,21 @@
 <link rel="stylesheet" href="/social.css">
 <link rel="stylesheet" href="/tour.css">
 <link rel="stylesheet" href="/listening.css">
+<link rel="stylesheet" href="/map.css">
+<link rel="stylesheet" href="/graphs.css">
 <link rel="stylesheet" href="/themes.css">
 <script src="/theme.js"></script>
 <script src="/avatar.js" defer></script>
 <script src="/social.js" defer></script>
 <script src="/tour.js" defer></script>
 <script src="/listening.js" defer></script>
+<script src="/map.js" defer></script>
+<script src="/graphs.js" defer></script>
 <script src="/app.js" defer></script>
 </head>
 <body>
 <div class="app">
-  <aside class="list-pane" id="list-pane">
+  <aside class="gcol" id="gcol">
     <div class="offline" id="offline" hidden></div>
     <header class="list-head">
       <h1>Papers</h1>
@@ -28,11 +32,12 @@
         <button type="button" class="icon-btn help-btn" id="help-btn" aria-label="Help" title="Help" aria-haspopup="dialog" aria-expanded="false">
           <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10" cy="10" r="7.8"/><path d="M7.8 7.9a2.3 2.3 0 1 1 3.3 2.1c-.7.3-1.1.8-1.1 1.5v.2"/><circle cx="10" cy="14.1" r=".5" fill="currentColor"/></svg>
         </button>
+        <button type="button" class="icon-btn bell-btn" id="bell-btn" aria-label="Board" title="Board" aria-haspopup="dialog" aria-expanded="false" aria-controls="bell-panel">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5.2 8.4a4.8 4.8 0 0 1 9.6 0v3.3l1.6 2.6H3.6l1.6-2.6z"/><path d="M8.3 16.6a1.9 1.9 0 0 0 3.4 0"/></svg>
+          <span class="bell-dot" id="bell-dot" hidden></span>
+        </button>
         <button type="button" class="icon-btn" id="listen-btn" aria-label="Listening" title="Listening">
           <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><rect x="2" y="2" width="4.4" height="4.4" rx="1" opacity=".3"/><rect x="7.8" y="2" width="4.4" height="4.4" rx="1"/><rect x="13.6" y="2" width="4.4" height="4.4" rx="1" opacity=".6"/><rect x="2" y="7.8" width="4.4" height="4.4" rx="1"/><rect x="7.8" y="7.8" width="4.4" height="4.4" rx="1" opacity=".3"/><rect x="13.6" y="7.8" width="4.4" height="4.4" rx="1"/><rect x="2" y="13.6" width="4.4" height="4.4" rx="1" opacity=".6"/><rect x="7.8" y="13.6" width="4.4" height="4.4" rx="1"/><rect x="13.6" y="13.6" width="4.4" height="4.4" rx="1" opacity=".3"/></svg>
-        </button>
-        <button type="button" class="icon-btn" id="map-btn" aria-label="Paper map" title="Paper map">
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M6.4 6.9 8.7 12.4M13.6 6.2 11.3 12.2M7.4 5.2h5.2"/><circle cx="5.4" cy="5.2" r="2"/><circle cx="14.6" cy="4.6" r="2"/><circle cx="10" cy="14.6" r="2.4"/></svg>
         </button>
         <button type="button" class="icon-btn" id="set-btn" aria-label="Settings" title="Settings">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -42,24 +47,29 @@
     <div class="search">
       <div class="s-box">
         <svg class="s-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="7" cy="7" r="5"/><path d="m11 11 3.5 3.5" stroke-linecap="round"/></svg>
-        <input class="s-in" type="search" id="search" placeholder="Search papers, topics, people" aria-label="Search papers" aria-keyshortcuts="/" autocomplete="off" spellcheck="false" enterkeyhint="search">
+        <input class="s-in" type="search" id="search" placeholder="Search papers and graphs" aria-label="Search papers and graphs" aria-keyshortcuts="/" autocomplete="off" spellcheck="false" enterkeyhint="search">
         <button type="button" class="s-clear" id="search-clear" aria-label="Clear the search" hidden></button>
       </div>
-      <button type="button" class="icon-btn filter-btn" id="filter-btn" aria-label="Filters" aria-expanded="false" aria-controls="fpanel"></button>
-      <button type="button" class="icon-btn sort-btn" id="sort-btn" aria-label="Sort" aria-haspopup="menu" aria-expanded="false"></button>
     </div>
-    <div class="fpanel" id="fpanel" hidden></div>
-    <div class="filter" id="filter" hidden><div class="chips" id="chips"></div><button type="button" class="text-btn" id="filter-clear">Clear</button></div>
-    <div class="sstat" id="sstat" role="status" hidden></div>
-    <ul class="rows" id="rows"></ul>
-    <div class="rows-end" id="rows-end" aria-hidden="true"></div>
+    <div class="gl-bar"><button type="button" class="gl-sortb" id="sort-btn" aria-haspopup="menu" aria-expanded="false"><span class="gl-sorti" id="sort-icon"></span><span id="sort-label">Recently updated</span></button></div>
+    <div class="gl" id="gl"></div>
   </aside>
 
+  <section class="gpl" id="gpl" aria-labelledby="gpl-name">
+    <div class="phone-top gpl-top">
+      <button type="button" class="icon-btn" id="gpl-back" aria-label="Back to graphs"></button>
+      <h2 class="gpl-name" id="gpl-name"></h2>
+      <span class="gpl-acts" id="gpl-acts"></span>
+      <button type="button" class="text-btn gpl-map" id="gpl-map">Map</button>
+    </div>
+    <ul class="gpl-rows" id="gpl-rows"></ul>
+  </section>
+
+  <div id="map" class="pm-page" hidden></div>
   <main class="window" id="win">
-    <div class="nothing" id="nothing"><div><div class="big">Nothing open</div><div>Pick a paper.</div></div></div>
     <div class="paper" id="paper" hidden>
       <div class="phone-top">
-        <button type="button" class="icon-btn" id="back" aria-label="Back to papers"></button>
+        <button type="button" class="icon-btn" id="back" aria-label="Back"></button>
         <button type="button" class="icon-btn" id="w-more-phone" aria-label="More"></button>
       </div>
       <div class="p-mid" id="p-mid">
@@ -71,6 +81,7 @@
             </div>
             <button type="button" class="w-play" id="w-play" aria-label="Play" hidden></button>
             <button type="button" class="icon-btn" id="w-more" aria-label="More"></button>
+            <button type="button" class="icon-btn w-close" id="w-close" aria-label="Close"></button>
           </div>
           <div class="pz-who"><p class="maker" id="w-maker"></p></div>
           <p class="details" id="w-details" hidden></p>
@@ -106,7 +117,7 @@
     </div>
     <div class="settings" id="settings" hidden>
       <div class="phone-top">
-        <button type="button" class="icon-btn" id="set-back" aria-label="Back to papers"></button>
+        <button type="button" class="icon-btn" id="set-back" aria-label="Back"></button>
       </div>
       <section class="pz set-head"><div class="col">
         <h2>Settings</h2>
@@ -117,7 +128,7 @@
     </div>
     <div class="listening" id="listening" hidden>
       <div class="phone-top">
-        <button type="button" class="icon-btn" id="ls-back" aria-label="Back to papers"></button>
+        <button type="button" class="icon-btn" id="ls-back" aria-label="Back"></button>
       </div>
       <section class="pz ls-head"><div class="col"><h2>Listening</h2></div></section>
       <section class="ls-body"><div class="col" id="ls-body"></div></section>
@@ -152,7 +163,7 @@
 </footer>
 <audio id="audio" preload="metadata"></audio>
 <div class="toast" id="toast" role="status" hidden><span class="msg-t" id="toast-msg"></span><button type="button" id="toast-act" hidden></button></div>
-<div id="map" hidden></div>
+<div class="bell-panel" id="bell-panel" role="dialog" aria-label="Board" tabindex="-1" hidden></div>
 <div class="scrim" id="overlay" hidden>
   <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="ov-label">
     <div class="sheet-h"><span id="ov-label">Explainer</span>

@@ -154,7 +154,7 @@
         closeHelp(true);
       }, true);
       window.addEventListener("resize", placeHelp);
-      $("list-pane").addEventListener("scroll", placeHelp, { passive: true });
+      $("gcol").addEventListener("scroll", placeHelp, { passive: true });
     }
 
     // ================================================================ the tour
@@ -170,16 +170,18 @@
       ctx.closeMap();
       await waitFor(() => !(history.state && history.state.pmap), 600);
     }
+    // The home: the graph list, the graph on the map beside it (a phone: the list alone).
     async function onList() {
       ctx.closeMenu();
       await mapClosed();
-      if (ctx.phone()) ctx.list();          // on a phone the list is under the window
+      ctx.list();
+      await waitFor(() => ctx.view() === "home", 1000);
     }
     async function inPaper(pid) {
       ctx.closeMenu();
       await mapClosed();
       if (!pid) return;
-      if (!(ctx.view() === "paper" && ctx.openId() === pid)) ctx.open(pid);
+      if (!(ctx.view() === "paper" && ctx.openId() === pid)) { T.picked = true; ctx.open(pid); }     // its card on the map too
       await waitFor(() => ctx.view() === "paper" && ctx.openId() === pid, 1500);
     }
     function openMore() {
@@ -191,21 +193,26 @@
     const pane = (k) => { if (ctx.pane) ctx.pane(k); };
     const upNext = () => [...document.querySelectorAll(".menu [role=menuitem]")].find((b) => /Up next$/.test(b.textContent.trim())) || null;
     const linkTo = () => shown(document.querySelector("#map .pm-card .pm-linkto"));
-    // The map, with a paper picked in a graph this person may change, so its card shows Link to…
+    // The map, with a paper picked in a graph whose links this person may change, so its card
+    // shows Link to… (the graph shown first).
     async function inMap() {
       ctx.closeMenu();
+      if (ctx.view() === "paper") { ctx.list(); await waitFor(() => ctx.view() === "home", 1000); }
       if (ctx.view() !== "map") await ctx.openMap();
-      const m = await waitFor(() => { const x = ctx.map(); return x && typeof x.select === "function" && document.querySelector("#map .pm-tab") ? x : null; }, 4000);
+      const m = await waitFor(() => { const x = ctx.map(); return x && typeof x.select === "function" && typeof x.current === "function" && x.current() ? x : null; }, 4000);
       if (!m || linkTo()) return;
       let gs;
       try { gs = await ctx.api("GET", "/api/graphs"); } catch (e) { return; }
-      const list = (Array.isArray(gs) ? gs : (gs && gs.graphs) || []).filter((g) => g && typeof g.id === "string" && g.n > 0 && g.can_edit !== false);
+      const now = m.current();
+      const list = (Array.isArray(gs) ? gs : (gs && gs.graphs) || []).filter((g) => g && typeof g.id === "string" && g.n > 0 && g.can_link !== false)
+        .sort((a, b) => (b.id === now) - (a.id === now));
       for (const g of list.slice(0, 6)) {
         let d;
         try { d = await ctx.api("GET", `/api/graphs/${encodeURIComponent(g.id)}`); } catch (e) { continue; }
         const ids = ((d && d.nodes) || []).map((n) => n && n.id).filter(Boolean);
         if (!ids.length) continue;
-        if (!T.on || ctx.view() !== "map") return;
+        if (!T.on || (ctx.view() !== "map" && ctx.view() !== "home")) return;
+        T.picked = true;
         m.select(ids.includes(T.paper) ? T.paper : ids[0], g.id);
         return;
       }
@@ -213,8 +220,10 @@
 
     // At most ten, in the order a newcomer meets them. `need`: a paper with audio, or any paper.
     const STEPS = [
-      { id: "search", text: () => "Search inside papers, or filter", prep: onList,
-        at: () => shown(document.querySelector("#list-pane .search")) },
+      { id: "search", text: () => "Search papers and graphs", prep: onList,
+        at: () => shown(document.querySelector("#gcol .search")) },
+      { id: "subscribe", text: () => "Subscribe to a graph", prep: onList,
+        at: () => [...document.querySelectorAll("#gl .gl-sub")].map(shown).find(Boolean) || null },
       { id: "play", need: "audio", text: () => "Play the episode", prep: () => inPaper(T.audio),
         at: () => shown($("w-play")) || shown($("p-play")) },
       { id: "listened", need: "audio", text: () => "Tick it when you’ve listened", prep: () => inPaper(T.audio),
@@ -225,7 +234,6 @@
         at: () => ($("tr-body").classList.contains("live") ? shown(document.querySelector("#tr-body .tr-p .tr-s")) : null) },
       { id: "comments", need: "paper", text: () => "Comment on the paper", prep: () => inPaper(T.paper).then(() => pane("c")), wait: 2000,
         at: () => shown($("c-text")) },
-      { id: "map", text: () => "The map of how papers connect", prep: onList, at: () => shown($("map-btn")) },
       { id: "link", need: "paper", text: () => "Link two papers", prep: inMap, wait: 3000, at: linkTo },
       { id: "settings", text: () => (maker() ? "Your voice and preferences" : "Your settings"), prep: onList, at: () => shown($("set-btn")) },
       { id: "help", text: () => (maker() ? "How to add papers" : "Help"), prep: onList, at: () => shown(helpBtn) },
@@ -298,9 +306,8 @@
       T.audio = audio ? audio.id : null;
       T.paper = T.audio || (papers[0] ? papers[0].id : null);
       T.plan = STEPS.filter((s) => !s.need || (s.need === "audio" ? T.audio : T.paper));
-      T.before = { hash: location.hash, last: store.get("pcg.last"), tab: store.get("pcg.map.tab"),
-        listTop: $("list-pane").scrollTop, winTop: $("win").scrollTop, focus: document.activeElement };
-      T.on = true; T.replay = replay; T.i = -1; T.target = null; T.key = "";
+      T.before = { hash: location.hash, listTop: $("gcol").scrollTop, winTop: $("win").scrollTop, focus: document.activeElement };
+      T.on = true; T.replay = replay; T.i = -1; T.target = null; T.key = ""; T.picked = false;
       build();
       document.body.classList.add("touring");
       window.addEventListener("keydown", onKey, true);
@@ -477,19 +484,17 @@
       if (st) T.state = st;
       drawAgain();
     }
-    // The page as it was before the tour: what was open, where the lists were scrolled, the paper
-    // a wide screen reopens next time, the map's graph.
+    // The page as it was before the tour: what was open (the address: the graph, the paper), where
+    // the list and the window were scrolled.
     async function restore() {
       const b = T.before;
       ctx.closeMenu();
       await mapClosed();
-      if (b.hash !== location.hash) {
-        const m = /^#p=(p_[a-z0-9]{4,32})/.exec(b.hash);
-        if (!b.hash) ctx.list(); else if (m) ctx.open(m[1]); else location.hash = b.hash.slice(1);
-      }
-      store.put("pcg.last", b.last);
-      store.put("pcg.map.tab", b.tab);
-      $("list-pane").scrollTop = b.listTop;
+      const m = ctx.map();
+      if (T.picked && m && m.deselect) m.deselect();          // the paper's card it picked on the map
+      T.picked = false;
+      if (b.hash !== location.hash) ctx.go(b.hash);
+      $("gcol").scrollTop = b.listTop;
       $("win").scrollTop = b.winTop;
       const f = b.focus;
       if (f && f !== document.body && f.isConnected && shown(f)) f.focus({ preventScroll: true });
@@ -509,10 +514,10 @@
       }
     }
 
-    // It starts by itself on the library, the first time; opened elsewhere, when the person gets there.
+    // It starts by itself at home (the graph list), the first time; opened elsewhere, when the person gets there.
     function maybeAuto() {
       if (!T.state || !T.state.auto || T.on || T.autoDone) return;
-      if (ctx.view() !== "list" || !ctx.idle()) return;
+      if (ctx.view() !== "home" || !ctx.idle()) return;
       T.autoDone = true;
       run(false);
     }

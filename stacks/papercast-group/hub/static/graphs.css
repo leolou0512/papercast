@@ -1,0 +1,135 @@
+/* papercast-group: the graph list (graphs.js) and the map as the page's home: the column on the
+   left, the map beside it, a paper's window over the map's right side (Settings and Listening
+   over all of it). On a phone (720 px and under, as everywhere on the page) the column is the
+   whole screen, a graph's papers slide over it, the map's drawing over those, and the window
+   over everything. The page's own tokens only (app.css, themes.css), so every theme, light or
+   dark, draws it; subscribed graphs in the text colour, the rest in the muted one. Every
+   control a 44 px tap on a phone. */
+:root { --col-w: 340px; }
+
+/* ---------- the layout ---------- */
+.app { display: block; }
+.gcol { position: absolute; top: 0; left: 0; bottom: 0; width: var(--col-w); overflow-y: auto; background: var(--side);
+  border-right: 1px solid var(--hairline); }
+#map.pm-page { inset: 0 0 var(--bar-h, 0px) var(--col-w); z-index: 1; }
+.window { position: fixed; top: 0; right: 0; bottom: var(--bar-h, 0px); z-index: 38; visibility: hidden;
+  scrollbar-gutter: stable; }        /* a scroll bar that comes as the paper loads moves nothing (a menu open under its button) */
+body.v-paper .window { visibility: visible; width: min(760px, max(400px, calc((100vw / var(--pcg-zoom, 1) - var(--col-w)) * .55)));
+  border-left: 1px solid var(--hairline); box-shadow: -10px 0 28px rgba(0, 0, 0, .10); }
+body.v-settings .window, body.v-listening .window { visibility: visible; left: var(--col-w); }
+.gpl { display: none; }
+.w-close { flex: none; }
+.pz-head .w-close:hover { background: var(--sel); }
+
+/* ---------- the column ---------- */
+.gl-bar { padding: 0 16px; display: flex; }
+.gl-sortb { display: inline-flex; align-items: center; gap: 6px; height: 44px; margin: 0 0 0 -8px; padding: 0 8px; border-radius: 6px;
+  color: var(--text-2); font-size: 13px; line-height: 18px; }
+.gl-sortb:hover, .gl-sortb[aria-expanded="true"] { color: var(--text); background: var(--sel); }
+.gl-sorti { display: grid; }
+.gl { padding: 0 0 120px; }
+.gl-h { margin: 12px 16px 2px; font-size: 12px; line-height: 16px; font-weight: 500; color: var(--text-2); letter-spacing: .02em; }
+.gl-list { list-style: none; margin: 0; padding: 0; }
+.gl-row { display: flex; align-items: stretch; }
+.gl-open { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 6px 4px 6px 16px; text-align: left;
+  color: var(--text-2); font-size: 15px; line-height: 20px; }
+.gl-row.on .gl-open { color: var(--text); }
+.gl-open:hover, .gl-sub:hover { background: var(--hover); }
+.gl-row.cur .gl-open { background: var(--sel); }
+.gl-row.on.cur .gl-open { font-weight: 600; }
+.gl-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gl-lock { flex: none; display: grid; color: var(--text-2); }
+.gl-n { flex: none; min-width: 24px; text-align: right; font-size: 13px; color: var(--text-2); font-weight: 400; }
+.gl-new { flex: none; padding: 1px 7px; border-radius: 10px; background: var(--accent); color: var(--on-accent); font-size: 12px; line-height: 17px; font-weight: 600; }
+.gl-sub { flex: none; width: 44px; display: grid; place-items: center; color: var(--text-2); margin-right: 4px; }
+.gl-row.on .gl-sub { color: var(--accent); }
+.gl-sub-sp { flex: none; width: 48px; }
+.gl-row.cur .gl-sub { background: var(--sel); }
+.gl-none { margin-top: 12px; border-top: 1px solid var(--hairline); padding-top: 4px; }
+.gl-none .gl-open { font-style: italic; }
+.gl-newb { display: block; margin: 8px 0 0; padding: 0 16px; height: 44px; color: var(--accent); font-size: 14px; font-weight: 500; }
+.gl-newb:hover { text-decoration: underline; text-underline-offset: 2px; }
+.gl-form { padding: 10px 16px 4px; display: flex; flex-direction: column; gap: 8px; }
+.gl-form .field { margin: 0; width: 100%; }
+.gl-frow { display: flex; align-items: center; gap: 8px; }
+.gl-frow .btn-accent { margin: 0; border: 0; border-radius: 6px; }
+.gl-frow .text-btn { margin: 0; padding: 0 8px; min-width: 44px; }
+.gl-msg { margin: 0; color: var(--danger); font-size: 13px; line-height: 18px; }
+.gl-msg:empty { display: none; }
+.gl-popen { display: flex; flex-direction: column; width: 100%; min-height: 44px; padding: 7px 16px; text-align: left; }
+.gl-popen:hover { background: var(--hover); }
+.gl-ptitle { font-size: 15px; line-height: 20px; font-weight: 600; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.gl-psub { font-size: 13px; line-height: 18px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gl-phit { font-size: 13px; line-height: 18px; color: var(--text-2); margin-top: 1px; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.gl-phit mark { color: var(--text); }
+.gl-all { margin: 4px 16px 0; padding: 0; color: var(--accent); font-weight: 500; }
+.gl-none-t { margin: 12px 16px; font-size: 14px; color: var(--text-2); }
+
+/* ---------- the graph's header on the map (and over a phone's list of its papers) ---------- */
+.gh { display: flex; align-items: center; gap: 10px; min-width: 0; pointer-events: auto; }
+.gh-name { margin: 0; font-size: 17px; line-height: 22px; font-weight: 700; color: var(--pm-text, var(--text)); min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gh-lock { flex: none; display: grid; color: var(--text-2); }
+.gh-sub { flex: none; display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px 0 8px; border-radius: 16px;
+  border: 1px solid var(--hairline); background: var(--bg); color: var(--text-2); font-size: 13px; font-weight: 600; white-space: nowrap; }
+.gh-sub:hover { color: var(--text); background: var(--hover); }
+.gh-sub.on { color: var(--accent); border-color: var(--accent); }
+.gh-i { display: grid; }
+.gh-i svg { width: 18px; height: 18px; }
+.pm-col .pm-head { align-items: center; overflow: hidden; }          /* a narrow bar: the name gives way, nothing overlaps */
+
+/* ---------- the board, from the bell ---------- */
+.bell-btn { position: relative; }
+.bell-btn[aria-expanded="true"] { color: var(--accent); }
+.bell-dot { position: absolute; top: 7px; right: 7px; width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
+  box-shadow: 0 0 0 2px var(--side); pointer-events: none; }
+.bell-panel { position: fixed; z-index: 42; width: min(420px, calc(100vw / var(--pcg-zoom, 1) - 16px));
+  max-height: calc(100vh / var(--pcg-zoom, 1) - var(--bar-h, 0px) - 96px); max-height: calc(100dvh / var(--pcg-zoom, 1) - var(--bar-h, 0px) - 96px); overflow-y: auto;
+  background: var(--bg); color: var(--text); border: 1px solid var(--hairline); border-radius: 10px; box-shadow: 0 8px 24px rgba(0, 0, 0, .18);
+  padding: 6px 0 8px; }
+.bell-panel:focus { outline: none; }
+.bell-panel .board { padding: 0 16px 4px; }      /* the items' hover reaches the panel's edges (social.css) */
+
+@media (min-width: 721px) {
+  #map.pm-page .pm-closebox { display: none; }
+  /* a paper's window over the map's right side: the map's bar, panels and legend stop at it */
+  body.v-paper #map.pm-page .pm-top { right: calc(var(--win-w, 0px) + 16px); }
+  body.v-paper #map.pm-page .pm-panel { right: calc(var(--win-w, 0px) + 16px); }
+  body.v-paper #map.pm-page .pm-legend { display: none; }
+  /* ... and the graph's toggle is its icon alone there, so its name keeps some room */
+  body.v-paper #map.pm-page .gh-sub { padding: 0 6px; }
+  body.v-paper #map.pm-page .gh-sub > span:last-child { display: none; }
+}
+
+/* ---------- phone ---------- */
+@media (max-width: 720px) {
+  .gcol { position: absolute; inset: 0; width: auto; border-right: 0; background: var(--bg); }
+  #map.pm-page { inset: 0 0 var(--bar-h, 0px) 0; z-index: 35; }
+  .window { left: 0; width: auto !important; border-left: 0 !important; box-shadow: none !important; }
+  body.v-paper .window, body.v-settings .window, body.v-listening .window { left: 0; }
+  .gpl { display: flex; flex-direction: column; position: fixed; inset: 0 0 var(--bar-h, 0px) 0; z-index: 8; background: var(--bg);
+    overflow-y: auto; transform: translateX(100%); visibility: hidden; transition: transform .25s ease, visibility 0s linear .25s; }
+  body.gpl-open .gpl { transform: none; visibility: visible; transition: transform .25s ease; }
+  .gpl-top { position: sticky; top: 0; z-index: 2; gap: 4px; justify-content: flex-start; }
+  .gpl-name { flex: 1; min-width: 0; margin: 0 4px; font-size: 17px; line-height: 22px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .gpl-acts { flex: none; display: flex; }
+  .gpl-acts .gh-sub { height: 44px; border-color: transparent; background: transparent; padding: 0 8px; }
+  .gpl-map { flex: none; margin: 0; padding: 0 12px; min-width: 44px; color: var(--accent); font-weight: 600; }
+  .gpl-rows { list-style: none; margin: 0; padding: 4px 0 96px; }
+  .gpl-row { display: flex; align-items: center; }
+  .gpl-btn { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 44px; padding: 9px 16px; text-align: left; }
+  .gpl-t { font-size: 16px; line-height: 21px; font-weight: 600; overflow-wrap: anywhere;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .gpl-row.heard .gpl-t { color: var(--text-2); font-weight: 500; }
+  .gpl-s { font-size: 13px; line-height: 18px; color: var(--text-2); }
+  .gpl-heard { flex: none; display: grid; place-items: center; width: 44px; }
+  .gpl-empty { padding: 24px 16px; color: var(--text-2); font-size: 14px; }
+  .gl-open { font-size: 16px; }
+  .gh-sub { height: 44px; border-radius: 22px; }
+  #map.pm-page .gh-name { font-size: 16px; }
+  #map.pm-page .gh-sub { width: 44px; padding: 0; justify-content: center; border-color: transparent; background: transparent; }
+  #map.pm-page .gh-sub > span:last-child { display: none; }       /* the drawing's bar is narrow: the toggle's icon alone */
+  .bell-panel { left: 8px !important; right: 8px; width: auto; }
+}

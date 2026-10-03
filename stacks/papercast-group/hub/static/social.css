@@ -1,9 +1,7 @@
-/* papercast-group: comments beside the transcript and the board above the list (social.js). The
+/* papercast-group: comments beside the transcript and the board in the bell's panel (social.js). The
    page's own colours and type (app.css); no cards, no shadows. Every control is a 44 x 44 px tap
    (test_social.py, as test_page.py); links inside a person's text are inline, in .md blocks. */
 
-/* the row's count, next to "2 versions" */
-.row-sub .nc { flex: none; margin-left: -5px; }
 
 /* ---------- the board ---------- */
 /* a paper's title on the board: regular weight, a muted shade of the accent (Leo, 2026-09-28) */
@@ -12,17 +10,9 @@
 :root[data-theme="dark"] { --bd-title: #D6A591; }
 .board { padding: 0 16px 8px; }
 .bd-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; }
-.bd-toggle {
-  display: flex; align-items: center; gap: 6px; height: 44px; min-width: 44px; padding: 0 8px; margin-left: -8px;
-  border-radius: 6px; font-size: 13px; line-height: 16px; font-weight: 600; color: var(--text-2);
-}
-.bd-toggle:hover { color: var(--text); background: var(--sel); }
-.bd-toggle::after {
-  content: ""; width: 6px; height: 6px; margin-left: 2px; border: solid currentColor; border-width: 0 1.5px 1.5px 0;
-  transform: translateY(-2px) rotate(45deg); opacity: .7;
-}
-.board.closed .bd-toggle::after { transform: rotate(-45deg); }
-.bd-dot, .bd-item.unread .bd-link::before {
+/* the panel's title: not bold, muted (Leo) */
+.bd-toggle { display: flex; align-items: center; margin: 0; font-size: 13px; line-height: 16px; font-weight: 400; color: var(--text-2); }
+.bd-item.unread .bd-link::before {
   width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none;
 }
 .bd-pin { margin: 0; padding: 0 8px; min-width: 44px; }

@@ -17,7 +17,14 @@
    runs these same equations to rest), so the map opens at rest: the browser never warms the
    layout up, it only eases a node to where the hub puts it. An arrow goes from a paper to a paper built on it. Grey: not
    listened; green: listened (by whoever is looking); accent: a place to start. Mounted by app.js:
-   window.PaperMap.mount(host, opts) -> {changed, show, hide, refresh, select, event}. */
+   window.PaperMap.mount(host, opts) -> {changed, show, hide, refresh, select, event, graph, refreshList}.
+   With opts.column (the page's home: its graph list chooses the graph) there are no tabs and no
+   search of its own: opts.head goes where the tabs were, the page is told of the list
+   (opts.onList), the graph shown (opts.onShow) and each graph's answer (opts.onData), and
+   "Not in any graph" (the list's `unfiled`) is one more graph, whose papers nobody adds or takes
+   out; opts.live: the list and the graph shown are kept current while the map is hidden too.
+   Who changes what is the hub's word (can_edit: the graph's papers, name, tags, deletion;
+   can_link: links and labels, everyone's), else the old rule (a locked graph: admins). */
 (function () {
   "use strict";
   var DEFAULTS = { arrows: true, fade: 0.5, node: 1, line: 1, center: 0.4, repel: 10, link: 0.7, dist: 70 };
@@ -34,7 +41,7 @@
   function svg(html) { var s = h("span"); s.innerHTML = html; return s.firstChild; }
   function load(k) { try { return JSON.parse(localStorage.getItem(k) || "null"); } catch (e) { return null; } }
   function save(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* private window */ } }
-  function phone() { return window.matchMedia("(max-width: 760px)").matches; }
+  function phone() { return window.matchMedia("(max-width: 720px)").matches; }
   function surname(n) { n = String(n || "").replace(/\s+/g, " ").trim(); var w = n.split(" "); return w[w.length - 1] || n; }
   function nameOf(u) { return !u ? "" : typeof u === "string" ? u : String(u.name || u.email || ""); }
   function same(a, b) { return a != null && b != null && String(a) === String(b); }
@@ -68,7 +75,7 @@
 
   function mount(root, opts) {
     opts = opts || {};
-    var API = opts.api || "", ME = opts.me || {}, ADMIN = ME.role === "admin", EDIT = opts.editable !== false;
+    var API = opts.api || "", ME = opts.me || {}, ADMIN = ME.role === "admin", EDIT = opts.editable !== false, COL = !!opts.column;
     var papers = opts.papers || new Map();
     var S = Object.assign({}, DEFAULTS, load(SKEY) || {});
     // W, H and everything drawn are in the page's CSS px; under the page's zoom (theme.js's size, CSS
@@ -127,13 +134,15 @@
     var bClose = opts.onClose ? ib("close", "Close the map", closeBox) : null;
     if (!EDIT) undoBox.hidden = true;
     if (opts.title) head.appendChild(h("span", "pm-title", opts.title));
-    if (opts.graphs !== false) head.appendChild(tabsEl);
+    if (opts.graphs !== false && !COL) head.appendChild(tabsEl);
+    if (opts.head) head.appendChild(opts.head);
+    if (COL) root.classList.add("pm-col");
     // under the search: Show suggestions, and who else changed this graph in the last minute
     var subRow = h("div", "pm-sub"), bSugg = h("button", "pm-btn pm-small pm-suggb"); bSugg.type = "button"; bSugg.hidden = true;
     bSugg.setAttribute("aria-pressed", "false");
     var live = h("div", "pm-live"); live.hidden = true; live.setAttribute("aria-live", "polite");
     subRow.appendChild(bSugg); subRow.appendChild(live);
-    [head, undoBox, icons, closeBox, qEl, subRow].forEach(function (e) { top.appendChild(e); });
+    [head, undoBox, icons, closeBox].concat(COL ? [] : [qEl]).concat([subRow]).forEach(function (e) { top.appendChild(e); });
     var PANELS = {}, PBTN = { start: bStart, undo: bUndo, redo: bRedo, hist: bHist, set: bSet };
     function panel(key, label) { var e = h("div", "pm-panel"); e.hidden = true; e.setAttribute("data-panel", key); e.setAttribute("role", "region"); e.setAttribute("aria-label", label); PANELS[key] = e; return e; }
     var startEl = panel("start", "Start here"), undoEl = panel("undo", "Undo"), redoEl = panel("redo", "Redo"), histEl = panel("hist", "History"), setEl = panel("set", "Graph settings"), newEl = panel("newg", "New graph");
@@ -207,7 +216,9 @@
       if (a.length === 2) return surname(a[0]) + " & " + surname(a[1]);
       return surname(a[0]) + " et al.";
     }
-    function listened(id) { var p = paper(id); return !!(p && p.listened); }
+    // heard (green): ticked as listened, or a version finished (the hub's `heard`); the page's
+    // copy of the paper is the newest word, else the graph's answer
+    function listened(id) { var p = paper(id); if (p) return !!(p.listened || p.heard); var o = info(id); return !!(o.listened || o.heard); }
     function byline(id) { var b = []; var y = yearOf(id); if (y != null) b.push(y); var a = authorsOf(id); if (a) b.push(a); return b.join(" · "); }
     function isMe(u) { return ME.id != null && u != null && (typeof u === "object" ? same(u.id, ME.id) : same(u, ME.id)); }
     function makers(id) {
@@ -226,7 +237,8 @@
       var n = m.n != null ? m.n : m.count != null ? m.count : m.size != null ? m.size : Array.isArray(m.papers) ? m.papers.length : null;
       var o = { id: m.id, name: m.name, tags: Array.isArray(tags) ? tags : [], locked: m.locked == null ? null : !!m.locked, n: n,
         created_by: m.created_by && typeof m.created_by === "object" ? m.created_by.id : m.created_by,
-        can_delete: m.can_delete == null ? null : !!m.can_delete, rev: m.rev, changed: m.changed };
+        can_delete: m.can_delete == null ? null : !!m.can_delete, can_edit: m.can_edit == null ? null : !!m.can_edit,
+        can_link: m.can_link == null ? null : !!m.can_link, rev: m.rev, changed: m.changed, pseudo: m.pseudo ? true : null };
       Object.keys(o).forEach(function (k) { if (o[k] == null) delete o[k]; });
       if (m.tags == null && m.rule_tags == null) delete o.tags;
       return o;
@@ -650,9 +662,10 @@
       var k = clampK(Math.min(2, (W - sl - sr) / Math.max(1, x1 - x0), (H - tp - bt) / Math.max(1, y1 - y0)));
       moveTo(k, sl + (W - sl - sr) / 2 - (x0 + x1) / 2 * k, tp + (H - tp - bt) / 2 - (y0 + y1) / 2 * k, smooth);
     }
+    var RIGHT = 0;            // CSS px of the map's right side the page covers (a paper's window)
     function centerAt(x, y) {
       var k = Math.max(cur._s.view.k, 1.1);
-      var cx = phone() ? W / 2 : W / 2 + 60, cy = phone() ? H * 0.3 : H / 2;
+      var cx = phone() ? W / 2 : RIGHT ? (W - RIGHT) / 2 + 40 : W / 2 + 60, cy = phone() ? H * 0.3 : H / 2;
       userMoved = true;
       moveTo(k, cx - x * k, cy - y * k, true);
     }
@@ -719,7 +732,7 @@
     // eases on and off a paper in AIM_MS.
     var AIM_MS = 140, lastP = null, aimKey = null, aw = 0, ah = 0;
     function aimFrom() {
-      if (!cur || !cur._s || draft || !canEdit()) return null;
+      if (!cur || !cur._s || draft || !canLink()) return null;
       if (linkFrom != null) return cur._s.idx[linkFrom] != null ? linkFrom : null;
       if (shiftHeld && selId != null && cur._s.idx[selId] != null) return selId;
       return null;
@@ -872,11 +885,14 @@
     cv.addEventListener("wheel", function (e) { e.preventDefault(); if (!cur || !cur._s) return; tip.hidden = true; zoomAt(Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015)), local(e).x, local(e).y); }, { passive: false });
 
     /* ---------- picking: a paper, a link, or the second paper of a new link ---------- */
-    function canEdit(g) { g = g || cur; return EDIT && !!g && !g.tmp && (!g.meta.locked || ADMIN); }
+    // the graph's papers, name, tags, deletion (the hub says: its maker's and admins' when someone made it)
+    function canEdit(g) { g = g || cur; return EDIT && !!g && !g.tmp && (g.meta.can_edit != null ? !!g.meta.can_edit : (!g.meta.locked || ADMIN)); }
+    // links and labels: everyone's, but for a locked graph (the hub says; else the same rule here)
+    function canLink(g) { g = g || cur; return EDIT && !!g && !g.tmp && (g.meta.can_link != null ? !!g.meta.can_link : (!g.meta.locked || ADMIN)); }
     function pick(id, shift) {
       if (linkFrom != null) { if (id !== linkFrom) startDraft(linkFrom, id); return; }
       var from = draft ? draft.anchor : selId;
-      if (shift && canEdit() && from != null && from !== id) { startDraft(from, id); return; }
+      if (shift && canLink() && from != null && from !== id) { startDraft(from, id); return; }
       select(id, false);
     }
     function closePanelsOnPhone() { if (phone()) openPanel(null); }
@@ -912,7 +928,7 @@
       return null;
     }
     function startLinkMode(id) {
-      if (!canEdit()) return;
+      if (!canLink()) return;
       selId = null; selLink = null; selSugg = null; draft = null; linkFrom = id; editLabel = null;
       card.hidden = true; renderBanner(); kick();
     }
@@ -1577,7 +1593,7 @@
       if (cur.meta.locked) card.appendChild(h("p", "pm-note", "Locked"));
     }
     function paperCard() {
-      var id = selId, s = cur._s, n = s.nodes[s.idx[id]], can = canEdit();
+      var id = selId, s = cur._s, n = s.nodes[s.idx[id]], can = canLink(), mem = canEdit();
       card.setAttribute("data-kind", "paper");
       closeX();
       card.appendChild(h("h3", null, titleOf(id)));
@@ -1602,15 +1618,15 @@
       }
       var act = h("div", "pm-act");
       if (opts.onOpen && paper(id)) act.appendChild(btn(listened(id) ? "Open (listened)" : "Open", "pm-open", function () { opts.onOpen(id); }));
-      if (can) {
-        act.appendChild(btn("Link to…", "pm-btn pm-linkto", function () { startLinkMode(id); }));
-        act.appendChild(btn("Take out of this graph", "pm-btn pm-rm", function () { removePaper(cur, id); }));
-      }
+      if (can) act.appendChild(btn("Link to…", "pm-btn pm-linkto", function () { startLinkMode(id); }));
+      if (mem) act.appendChild(btn("Take out of this graph", "pm-btn pm-rm", function () { removePaper(cur, id); }));
       if (act.childNodes.length) card.appendChild(act);
       lockNote();
       section("Builds on", n.par.map(function (j) { return s.nodes[j].id; }));
       section("Built on by", n.ch.map(function (j) { return s.nodes[j].id; }));
-      var others = graphs.filter(function (g) { return g !== cur && g._s && g._s.idx[id] != null; });
+      // the graphs it is in, as the hub says (else those drawn so far)
+      var others = Array.isArray(n.o.in) ? n.o.in.map(function (x) { return byId[x]; }).filter(function (g) { return g && g !== cur; })
+        : graphs.filter(function (g) { return g !== cur && g._s && g._s.idx[id] != null; });
       if (others.length) {
         var al = h("div", "pm-also", "Also in");
         others.forEach(function (g) { al.appendChild(btn(g.meta.name, "pm-alsob", function () { want = { pid: id }; showGraph(g); })); });
@@ -1626,7 +1642,7 @@
     }
     function gradeHints(ul) { GRADES.forEach(function (g) { ul.appendChild(h("li", null, g[1] + ": " + g[2] + ".")); }); return ul; }
     function linkCard() {
-      var s = cur._s, l = s.lid[String(selLink)], e = l.e, A = s.nodes[l.s].id, B = s.nodes[l.t].id, can = canEdit() && !e.pending;
+      var s = cur._s, l = s.lid[String(selLink)], e = l.e, A = s.nodes[l.s].id, B = s.nodes[l.t].id, can = canLink() && !e.pending;
       card.setAttribute("data-kind", "link");
       closeX();
       card.appendChild(h("h3", null, label(A) + " → " + label(B)));
@@ -1647,7 +1663,7 @@
       var ul = h("ul", "pm-list"); ul.appendChild(item(A, null, "earlier")); ul.appendChild(item(B, null, "builds on it")); card.appendChild(ul);
     }
     function suggCard() {
-      var x = cur._s.sid[String(selSugg)], e = x.e, A = e.src, B = e.dst, can = canEdit() && !e.pending;
+      var x = cur._s.sid[String(selSugg)], e = x.e, A = e.src, B = e.dst, can = canLink() && !e.pending;
       card.setAttribute("data-kind", "suggestion");
       closeX();
       card.appendChild(h("h3", null, label(A) + " → " + label(B)));
@@ -1874,6 +1890,8 @@
     function onKey(e) {
       if (!visible) return;
       if (dlg.open) return;                           // the dialog's own: Escape closes it, nothing else here
+      // as the page's home, its keys are the map's only from the map (not from the paper's window or the list)
+      if (COL && e.target && e.target !== document.body && e.target !== document.documentElement && !root.contains(e.target)) return;
       if (e.key === "Shift" && !typing(e.target)) { shiftHeld = true; aimHere(); }
       // Ctrl/Cmd+Z: undo my last edit; Ctrl/Cmd+Shift+Z or Ctrl+Y: redo my last undo (not while typing)
       var k = String(e.key || "").toLowerCase();
@@ -1928,12 +1946,16 @@
     }
     function showGraph(g) {
       if (!g) {
+        var had = cur;
         cur = null; selId = null; selLink = null; selSugg = null; draft = null; linkFrom = null; editLabel = null; qset = null;
-        renderTabs(); renderBanner(); renderEmpty(); renderLive(); renderSuggBtn(); card.hidden = true; tip.hidden = true; ctxClear(); return;
+        renderTabs(); renderBanner(); renderEmpty(); renderLive(); renderSuggBtn(); card.hidden = true; tip.hidden = true; ctxClear();
+        if (had && opts.onShow) opts.onShow(null);
+        return;
       }
       if (cur === g) { applyWant(); return; }
       cur = g;
-      if (!g.tmp) save(TKEY, g.id);
+      if (!g.tmp && !COL) save(TKEY, g.id);
+      if (opts.onShow && !g.tmp) opts.onShow(g.id);
       hoverI = null; hoverL = null; hoverS = null; selId = null; selLink = null; selSugg = null; draft = null; linkFrom = null; editLabel = null; clearAim();
       card.hidden = true; tip.hidden = true; hl = 0; hlSet = null; hlFocus = null; hlLink = null; hlKey = null; anim = null; moves = null; allPath = false;
       renderBanner(); renderLive();
@@ -1979,6 +2001,11 @@
           next.push(g);
         });
         graphs.forEach(function (g) { if (g.tmp) next.push(g); });
+        if (COL && r && r.unfiled && r.unfiled.id) {           // "Not in any graph": the last one
+          var um = normMeta(r.unfiled), ug = byId[um.id] || { id: um.id, pseudo: true, meta: {}, data: null, _s: null, stale: true };
+          Object.assign(ug.meta, um);
+          seen[ug.id] = true; next.push(ug);
+        }
         var gone = cur && !cur.tmp && !seen[cur.id] ? cur : null;
         graphs = next; byId = {}; graphs.forEach(function (g) { byId[g.id] = g; });
         listLoaded = true; listErr = null;
@@ -1987,9 +2014,12 @@
         graphs.forEach(function (g) { if (g.data && g.rev != null && g.meta.rev != null && g.meta.rev > g.rev) g.stale = true; });
         if (gone) { cur = null; say(quote(gone.meta.name) + " was deleted."); }
         renderTabs();
-        if (!cur) showGraph(byId[want && want.gid] || byId[opts.graph] || byId[load(TKEY)] || graphs[0] || null);
-        else { renderSettings(); refreshCard(); if (cur.stale && !cur.busy) loadGraph(cur); }
+        // the page's graph list picks the graph (where it lands, what is open): only the one it asked for
+        if (COL) { if (want && want.gid && byId[want.gid] && cur !== byId[want.gid]) showGraph(byId[want.gid]); else if (gone && opts.onShow) opts.onShow(null); }
+        else if (!cur) showGraph(byId[want && want.gid] || byId[opts.graph] || byId[load(TKEY)] || graphs[0] || null);
+        if (cur) { renderSettings(); refreshCard(); if (cur.stale && !cur.busy) loadGraph(cur); }
         renderEmpty();
+        if (opts.onList) opts.onList(r);
       }, function (err) { listErr = errText(err); renderEmpty(); }).then(function () {
         listBusy = false;
         if (listAgain) { listAgain = false; loadList(); }
@@ -2018,6 +2048,7 @@
         if (g === cur) { afterChange(); applyWant(true); }
         else renderTabs();
         done(true);
+        if (opts.onData) opts.onData(g.id, g.data, g.meta);
       }, function (err) {
         g.loadErr = errText(err);
         if (err.status === 404) { g.stale = true; soon({ list: true }); }
@@ -2026,20 +2057,11 @@
       }).then(function () {
         g.busy = null;
         if (g.again) { g.again = false; loadGraph(g); }
-        else if (g === cur) prefetch();
       });
       return g.busy;
     }
-    // The other graphs, one at a time once the one shown is in: tabs switch at once, and a
-    // paper's card knows which other graphs it is in.
-    var prefetching = false;
-    function prefetch() {
-      if (prefetching) return;
-      var g = graphs.filter(function (x) { return !x.data && !x.busy && !x.tmp && !x.loadErr; })[0];
-      if (!g) return;
-      prefetching = true;
-      loadGraph(g).then(function () { prefetching = false; setTimeout(prefetch, 50); });
-    }
+    // Each graph is read when it is shown, never all of them (a long list): a paper's card knows
+    // the other graphs it is in from the hub's answer (each node's `in`).
 
     /* ---------- live: the page passes the hub's events; else a refetch on show() ---------- */
     var soonT = null, soonWhat = {};
@@ -2048,7 +2070,11 @@
       if (soonT) return;
       soonT = setTimeout(function () {
         soonT = null; var x = soonWhat; soonWhat = {};
-        if (!visible) { graphs.forEach(function (g) { g.stale = true; }); LOG.stale = true; SETS.loaded = SETS.loaded && !x.settings; return; }
+        if (!visible) {
+          graphs.forEach(function (g) { if (!(opts.live && g === cur && x.graph)) g.stale = true; }); LOG.stale = true; SETS.loaded = SETS.loaded && !x.settings;
+          if (opts.live) { if (x.list) loadList(); if (x.graph && cur) loadGraph(cur); }       // the page's list (and a phone's papers) stay current
+          return;
+        }
         if (x.list) loadList();
         if (x.graph && cur) loadGraph(cur);
         if (x.log) loadLog();
@@ -2146,7 +2172,21 @@
       // everything again from the hub (what show() does)
       refresh: function () { loadList(); if (cur && !cur.tmp) loadGraph(cur); graphs.forEach(function (g) { if (g !== cur) g.stale = true; }); loadLog(); loadSettings(); },
       // show a paper (and the graph it is in, when given)
-      select: function (paperId, graphId) { want = { pid: paperId, gid: graphId }; if (graphId && byId[graphId] && byId[graphId] !== cur) showGraph(byId[graphId]); else applyWant(); },
+      select: function (paperId, graphId) { want = { pid: paperId, gid: graphId }; if (graphId && byId[graphId] && byId[graphId] !== cur) showGraph(byId[graphId]); else if (graphId && !byId[graphId]) loadList(); else applyWant(); },
+      // the page's graph list: show this graph (when the list has it; else once it does)
+      graph: function (gid) {
+        if (!gid) { want = null; showGraph(null); return; }
+        want = { gid: gid };
+        if (byId[gid]) { if (byId[gid] !== cur) showGraph(byId[gid]); else if (!cur.data || cur.stale) loadGraph(cur); } else loadList();
+      },
+      current: function () { return cur ? cur.id : null; },
+      data: function (gid) { var g = byId[gid]; return g && g.data ? g.data : null; },
+      meta: function (gid) { var g = byId[gid]; return g ? g.meta : null; },
+      refreshList: function () { loadList(); },
+      // the page covers this much of the map's right side (CSS px): a paper is centred left of it
+      inset: function (px) { RIGHT = Math.max(0, Math.min(W * 0.8, Number(px) || 0)); },
+      // the selection's card and the panels closed (the page opens a paper's window over the map's side)
+      deselect: function () { select(null); },
       debug: { S: S, cur: function () { return cur; }, graphs: function () { return graphs; }, show: function (id) { showGraph(byId[id]); }, select: select, selectLink: selectLink,
         hover: function (i) { hoverI = i; kick(); }, draw: function () { draw(); }, tick: function () { tick(cur._s); }, webgl: function () { return !!gl; },
         state: function () {

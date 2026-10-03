@@ -216,7 +216,8 @@ uploader sees it in `papercast status`. The client version and base version are 
 
 ## 7. Browser API (A4; auth `viewer` unless noted)
 
-`GET /api/me`; `GET /api/library?q=` (as db.list_library); `GET /api/papers/<id>`;
+`GET /api/me`; `GET /api/library?q=` (as db.list_library; each paper also says `heard` and the
+`graphs` it is in; with q, the `graphs` whose name matches too); `GET /api/papers/<id>`;
 `PUT /api/papers/<id>/listened {"listened": bool}`; `PUT /api/episodes/<id>/position {"s": 12.3}`;
 `GET /audio/<episode_id>.mp3` (Range support); `GET /x/<episode_id>/explainer.html` with exactly
 Leo's current explainer CSP (copy from `stacks/papercast/web/app.py` EXPLAINER_CSP) and the page
@@ -249,7 +250,22 @@ Page CSP as Leo's (`PAGE_CSP` in stacks/papercast/web/app.py): no inline script 
 - **Graphs** are named sets of papers: `rule_tags` (papers with any of these tags) plus
   `added` minus `removed`. Seed graphs from Leo's five topics (reinforcement learning, diffusion
   and generative models, materials and molecules, language models, robotics and agents) by tag.
-  A graph shows the links among its members.
+  A graph shows the links among its members. A graph someone made is changed (its papers, name,
+  tags, deletion, and their undo) only by its maker and admins (403 `not_yours`); a graph nobody
+  made (the seeds) by anyone unless an admin locked it. Links and labels are everyone's, locks
+  as above.
+- **The graph list** (hub/graphlist.py; Leo's decisions of 2026-10-03, DESIGN.md in
+  ~/work/runs/papercast-graphlist): the page's home is the list of graphs and the map. Each
+  person subscribes by a toggle only (`PUT /api/graphs/<id>/subscription {"subscribed"}`); making
+  a graph subscribes its maker. `GET /api/graphs` gives each graph, for this person, `subscribed`,
+  `n`, `unheard` (heard: ticked as listened, or a version finished), `new` (papers that joined
+  since they last opened it, `POST /api/graphs/<id>/opened`), `updated_at`, `newest_at`,
+  `created_at`, `created_by`, `can_edit`, `can_delete`, `can_link`; `unfiled`, "Not in any graph"
+  (papers with a live version no graph shows; `GET /api/graphs/none` its view); and `ui`, the
+  account's graph open last and sort (`GET/PUT /api/ui-state`). A paper joins a graph by its tags
+  when its first live version came, by hand when it was added. Page routes: `#g=<id>`,
+  `#g=<id>&p=<paper>`, `#g=<id>&map` (a phone's drawing), `#p=<paper>` (a graph that has it, a
+  subscribed one first), `#settings`, `#listening`.
 - **Edit log**: every change is one row in `graph_log` (who, when, op, before, after). Ops:
   `link.add`, `link.remove`, `link.grade`, `graph.create`, `graph.rename`, `graph.delete`,
   `graph.add_paper`, `graph.remove_paper`, `graph.set_tags`, `graph.lock`. Agent link batches

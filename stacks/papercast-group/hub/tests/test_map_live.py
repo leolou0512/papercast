@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""The map on the real page (app.js mounting map.js) against the real hub (graph.py, the SSE
-stream), in two headless Chromes at once: Alice (admin) and Bob (contributor) on the same graph.
+"""The map on the real page (app.js mounting map.js beside the graph list: the page's home) against
+the real hub (graph.py, the SSE stream), in two headless Chromes at once: Alice (admin) and Bob
+(contributor) on the same graph.
 
 What is checked: an edit on one page shows on the other within a second (a link, its grade, its
 removal, a paper taken out, a rename, a label, an undo, a redo, a delete and its undo, a layout);
@@ -8,7 +9,7 @@ an edit made on a revision someone else moved past is refused and the page bring
 date at once, with nothing half-applied; redo after undo for "my last undo" and "the last undo by
 anyone", greyed out when there is nothing to redo; the delete dialog (Cancel, Escape, a click
 outside, Delete, then Undo), and no Delete for someone who neither made the graph nor is an
-admin; links from uploads switched to suggest only by an admin, the suggestions on both pages,
+admin (a graph someone made: its maker's and admins' to change); links from uploads switched to suggest only by an admin, the suggestions on both pages,
 accepted on one and seen on the other, Accept all, and automatic again; Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z and Ctrl+Y, not while typing; the phone's 44 px taps for the
 new buttons and the dialog; no console error or CSP violation on either page.
 
@@ -135,7 +136,8 @@ class LiveMap(unittest.TestCase):
 
     # ------------------------------------------------------------------ helpers
     def map(self, b, who, hide_events=False, phone=False):
-        """The page, then its Map button: the map on the Reinforcement learning graph."""
+        """The page at the Reinforcement learning graph: its map, beside the list of graphs (a
+        phone: the graph's drawing, #g=…&map)."""
         b.call("Page.navigate", url="about:blank")
         if phone:
             b.call("Emulation.setDeviceMetricsOverride", width=390, height=844, deviceScaleFactor=1, mobile=True)
@@ -146,9 +148,9 @@ class LiveMap(unittest.TestCase):
                           source="window.EventSource = function () { this.addEventListener = function () {}; this.close = function () {}; this.readyState = 1; };")["identifier"]
         b.goto(self.r.base + "/")
         b.js("localStorage.clear(); sessionStorage.clear()")
-        b.goto(self.r.base + "/")
-        b.wait_js("document.querySelectorAll('#rows .row').length > 0", 10, f"{who}'s page")
-        b.js("document.getElementById('map-btn').click()")
+        b.goto("about:blank")
+        b.goto(self.r.base + f"/#g={self.rl}" + ("&map" if phone else ""))
+        b.wait_js("document.querySelectorAll('#gl .gl-row').length > 0 && !document.getElementById('map').hidden", 10, f"{who}'s page")
         b.wait_js(f"!!(window.PaperMap && PaperMap.current && {M}.cur() && {M}.cur().id === {J(self.rl)} && {M}.cur()._s"
                   f" && {M}.cur()._s.nodes.length === 5 && {M}.state().rev != null)", 10, f"{who}'s map")
         b.wait_js("!document.querySelector('#map .pm-ib[aria-label=Undo]').disabled || true", 5)
@@ -160,6 +162,11 @@ class LiveMap(unittest.TestCase):
         t0 = time.time()
         b.wait_js(expr, secs, what)
         return time.time() - t0
+
+    def row(self, gid, name=None):
+        """Graph gid's row in the list of graphs (with this name)."""
+        r = f"document.querySelector('#gl .gl-row[data-id=\"{gid}\"]')"
+        return f"!!{r}" if name is None else f"(r => !!r && r.querySelector('.gl-name').textContent === {J(name)})({r})"
 
     def button(self, scope, text):
         return f"[...document.querySelectorAll('#map {scope} button')].find(x => x.textContent.trim() === {J(text)})"
@@ -226,11 +233,11 @@ class LiveMap(unittest.TestCase):
         self.api("DELETE", f"/api/graphs/{self.rl}/papers/{p[2]}")
         took["paper out"] = self.shows(a, f"{M}.cur()._s.idx[{J(p[2])}] == null", "Gamma taken out")
         self.api("PUT", f"/api/graphs/{self.rl}", {"name": "RL"}, who=A)
-        took["rename"] = self.shows(b, f"document.querySelector('#map .pm-tab[data-id=\"{self.rl}\"]').textContent.startsWith('RL')", "the new name on Bob's map")
+        took["rename"] = self.shows(b, f"{self.row(self.rl, 'RL')} && document.getElementById('gh-name').textContent === 'RL'", "the new name on Bob's page")
         self.undo_api(A)                                             # Alice's rename undone
-        took["undo"] = self.shows(b, f"document.querySelector('#map .pm-tab[data-id=\"{self.rl}\"]').textContent.startsWith('Reinforcement learning')", "the undo")
+        took["undo"] = self.shows(b, self.row(self.rl, "Reinforcement learning"), "the undo")
         self.undo_api(A, redo=True)
-        took["redo"] = self.shows(b, f"document.querySelector('#map .pm-tab[data-id=\"{self.rl}\"]').textContent.startsWith('RL')", "the redo")
+        took["redo"] = self.shows(b, self.row(self.rl, "RL"), "the redo")
         self.api("DELETE", f"/api/links/{lid}")
         took["link removed"] = self.shows(a, f"!({self.has_link(a, p[0], p[3])})", "the removal")
         # the hub's layout moved a paper: it eases there on both
@@ -242,11 +249,11 @@ class LiveMap(unittest.TestCase):
         a.wait_js(f"(n => n.x === 321 && n.y === -123)({M}.cur()._s.nodes[{M}.cur()._s.idx[{J(p[4])}]])", 2, "eased there")
         # a graph deleted on one page goes from the other; its undo brings it back
         gid = self.api("POST", "/api/graphs", {"name": "Bob's picks", "tags": ["reinforcement learning"]}, code=201)["graph"]["id"]
-        self.shows(a, f"!!document.querySelector('#map .pm-tab[data-id=\"{gid}\"]')", "Bob's new graph on Alice's map")
+        self.shows(a, self.row(gid), "Bob's new graph in Alice's list")
         self.api("DELETE", f"/api/graphs/{gid}")
-        took["delete"] = self.shows(a, f"!document.querySelector('#map .pm-tab[data-id=\"{gid}\"]')", "the deleted graph gone")
+        took["delete"] = self.shows(a, f"!{self.row(gid)}", "the deleted graph gone")
         self.undo_api(B)
-        took["undelete"] = self.shows(a, f"!!document.querySelector('#map .pm-tab[data-id=\"{gid}\"]')", "the graph back")
+        took["undelete"] = self.shows(a, self.row(gid), "the graph back")
         self.assertEqual(a.js(f"{M}.state().rev"), self.api("GET", f"/api/graphs/{self.rl}")["rev"], "Alice's map is not at the hub's revision")
         print("\n  shown on the other page after (s): " + ", ".join(f"{k} {v:.2f}" for k, v in took.items()), file=sys.stderr)
 
@@ -331,9 +338,9 @@ class LiveMap(unittest.TestCase):
         a.wait_js(f"!({self.has_link(a, p[1], p[2])}) && !{redo_off}", 3, "undone")
         self.key(a, "y", "KeyY", 89, 2)
         a.wait_js(self.has_link(a, p[1], p[2]), 3, "Ctrl+Y redid it")
-        # in a text field the keys are the field's
+        # in a text field the keys are the field's (the list's search box: the map has none of its own here)
         n = db.conn().execute("SELECT count(*) FROM graph_log").fetchone()[0]
-        a.js("document.querySelector('#map .pm-q').focus()")
+        a.js("document.getElementById('search').focus()")
         self.key(a, "z", "KeyZ", 90, 2)
         self.key(a, "y", "KeyY", 89, 2)
         time.sleep(0.4)
@@ -349,6 +356,8 @@ class LiveMap(unittest.TestCase):
     def test_4_delete_a_graph_after_the_dialog_and_undo_it(self):
         a, b = self.ba, self.bb
         mine = self.api("POST", "/api/graphs", {"name": "Bob's own"}, code=201)["graph"]["id"]
+        # deleted once the pages are gone (one may still be telling the hub it opened it)
+        self.addCleanup(lambda: db.conn().execute("UPDATE graphs SET deleted_at = ? WHERE id = ?", (db.now(), mine)))
         self.map(a, "Alice")
         self.map(b, "Bob")
         # Bob may delete his own graph, not the seeded one
@@ -377,14 +386,14 @@ class LiveMap(unittest.TestCase):
         self.press(a, "[data-panel=set]", "Delete this graph")
         a.wait_js(opened, 3, "the dialog")
         self.press(a, ".pm-dialog", "Delete")
-        a.wait_js(f"!{opened} && !document.querySelector('#map .pm-tab[data-id=\"{self.rl}\"]')", 3, "the tab gone")
+        a.wait_js(f"!{opened} && !{self.row(self.rl)}", 3, "its row gone")
         a.wait_js("(m => !m.hidden && m.textContent.startsWith('Deleted'))(document.querySelector('#map .pm-msg'))", 3, "said")
         self.assertIsNotNone(db.conn().execute("SELECT deleted_at FROM graphs WHERE id = ?", (self.rl,)).fetchone()[0])
-        self.shows(b, f"!document.querySelector('#map .pm-tab[data-id=\"{self.rl}\"]')", "gone from Bob's map too")
+        self.shows(b, f"!{self.row(self.rl)}", "gone from Bob's list too")
         # the message's Undo brings it back, on both
         a.js("document.querySelector('#map .pm-msg button').click()")
-        a.wait_js(f"!!document.querySelector('#map .pm-tab[data-id=\"{self.rl}\"]')", 3, "back")
-        self.shows(b, f"!!document.querySelector('#map .pm-tab[data-id=\"{self.rl}\"]')", "back on Bob's map")
+        a.wait_js(self.row(self.rl), 3, "back")
+        self.shows(b, self.row(self.rl), "back in Bob's list")
         self.assertIsNone(db.conn().execute("SELECT deleted_at FROM graphs WHERE id = ?", (self.rl,)).fetchone()[0])
         # Carol (a viewer who did not make it) sees no Delete
         b.call("Network.setExtraHTTPHeaders", headers={"X-Test-User": C})
@@ -397,7 +406,6 @@ class LiveMap(unittest.TestCase):
             self.assertFalse(b.js(f"!!{self.button('[data-panel=set]', 'Delete this graph')}"), "Carol may delete Bob's graph")
         finally:
             b.call("Network.setExtraHTTPHeaders", headers={"X-Test-User": B})
-        db.conn().execute("UPDATE graphs SET deleted_at = ? WHERE id = ?", (db.now(), mine))
 
     # ------------------------------------------------------------------ 5. the phone
     def test_5_phone_taps_for_undo_redo_and_the_dialog(self):

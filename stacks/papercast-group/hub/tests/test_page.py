@@ -3,14 +3,15 @@
 
     python3 -m unittest discover -s stacks/papercast-group/hub/tests -p 'test_page.py' -v
 
-Three people: Alice (admin), Bob (contributor), Carol (viewer). The list is Leo's: 50 rows at a
-time as it is scrolled; each row says who made the version that plays. A paper with two versions
-is one row, and the window lists both; playing picks your own version, else the first made.
-Listened and positions are each person's; positions reach the hub (one request for a burst of
-seeks) and a newer copy on the device wins. Settings: preferences, devices, and for admins users
-and the base prompt. The explainer is sandboxed: a hostile one reaches nothing (checked against a
-control run without the sandbox, where it does). On a phone every control is a 44 x 44 px tap.
-No test may leave an error in the console. Screenshots go to $PCG_TEST_SHOTS if set.
+Three people: Alice (admin), Bob (contributor), Carol (viewer). The home is the graph list and
+the map (test_graphlist_page.py has the list itself); a paper opens in its graph, its window over
+the map's side. A paper with two versions has one window listing both; playing picks your own
+version, else the first made. Listened and positions are each person's; positions reach the hub
+(one request for a burst of seeks) and a newer copy on the device wins. Settings: preferences,
+devices, and for admins users and the base prompt. The explainer is sandboxed: a hostile one
+reaches nothing (checked against a control run without the sandbox, where it does). On a phone
+every control is a 44 x 44 px tap. No test may leave an error in the console. Screenshots go to
+$PCG_TEST_SHOTS if set.
 
 Skips when no headless Chrome or no `websocket-client` is available."""
 from __future__ import annotations
@@ -41,9 +42,11 @@ except ImportError:
 
 SHOTS = os.environ.get("PCG_TEST_SHOTS")
 A, B, C = "alice@example.org", "bob@example.org", "carol@example.org"
-ROW = "#rows .row[data-id=\"{}\"]"
-ROWS = "[...document.querySelectorAll('#rows .row')].map(x => x.dataset.id)"
-PANE = "document.getElementById('list-pane')"
+# the graph list's rows (graphs.js), a phone's list of one graph's papers
+GROW = "#gl .gl-row[data-id=\"{}\"]"
+GROWS = "[...document.querySelectorAll('#gl .gl-row')].map(x => x.dataset.id)"
+GPLROWS = "[...document.querySelectorAll('#gpl-rows .gpl-row')].map(x => x.dataset.id)"
+COL = "document.getElementById('gcol')"
 
 
 def js_list(ids):
@@ -55,9 +58,11 @@ def js_list(ids):
 TAP_TARGETS = r"""(() => {
   const q = 'a[href], button, input:not([type=hidden]), select, textarea, summary, label, [role=button], [role=link],' +
             ' [role=slider], [role=menuitem], [tabindex]:not([tabindex="-1"])';
-  const top = !document.getElementById('overlay').hidden ? document.getElementById('overlay') : document.querySelector('.menu');
-  const open = document.body.classList.contains('open');
-  const panes = [document.getElementById('win'), document.getElementById('list-pane')];
+  const bell = document.getElementById('bell-panel');
+  const top = !document.getElementById('overlay').hidden ? document.getElementById('overlay') : document.querySelector('.menu') || (bell && !bell.hidden ? bell : null);
+  const open = document.body.classList.contains('open'), gp = document.body.classList.contains('gpl-open');
+  const phone = matchMedia('(max-width: 720px)').matches, map = !document.getElementById('map').hidden;
+  const panes = [document.getElementById('win'), document.getElementById('gcol'), document.getElementById('gpl')];
   const was = panes.map((p) => p.scrollTop);
   const settle = () => panes.forEach((p) => p.dispatchEvent(new Event('scroll')));   // the pinned bar follows
   const name = (e) => `${e.tagName.toLowerCase()}${e.id ? '#' + e.id : ''} "${(e.getAttribute('aria-label') || e.textContent || e.placeholder || '').trim().slice(0, 24)}"`;
@@ -65,7 +70,9 @@ TAP_TARGETS = r"""(() => {
   for (const e of document.querySelectorAll(q)) {
     const cs = getComputedStyle(e);
     if (e.closest('[hidden]') || cs.visibility !== 'visible' || cs.pointerEvents === 'none' || !e.getClientRects().length) continue;
-    if ((top && !top.contains(e)) || (open && e.closest('#list-pane'))) continue;
+    // under what covers it on a phone: the window over the rest, the drawing over the lists, a graph's papers over the column
+    if ((top && !top.contains(e)) || (open && e.closest('#gcol, #gpl, #map')) || (phone && map && e.closest('#gcol, #gpl'))
+        || (phone && gp && e.closest('#gcol'))) continue;
     const r = e.getBoundingClientRect();
     const inMd = e.tagName === 'A' && !!e.closest('.md');
     if (!inMd && (r.width < 43.5 || r.height < 43.5)) bad.push(`${name(e)} is ${r.width.toFixed(1)} x ${r.height.toFixed(1)}`);
@@ -77,7 +84,7 @@ TAP_TARGETS = r"""(() => {
     for (let a = e; a && !panes.includes(a); a = a.parentElement) {
       if (['fixed', 'sticky'].includes(getComputedStyle(a).position)) { fixed = true; break; }
     }
-    if (!fixed) { e.scrollIntoView({block: 'center', inline: 'nearest'}); settle(); }
+    if (!fixed || e.closest('#bell-panel')) { e.scrollIntoView({block: 'center', inline: 'nearest'}); settle(); }
     const rects = getComputedStyle(e).display === 'inline' ? [...e.getClientRects()] : [e.getBoundingClientRect()];
     for (const r of rects) {
       for (const [x, y] of [[r.left + 1, r.top + r.height / 2], [r.right - 1, r.top + r.height / 2],
@@ -213,15 +220,16 @@ class PageBase(unittest.TestCase):
             self.b.screenshot(Path(SHOTS) / f"{name}.png")
 
     def home(self, user=None):
-        """The page with nothing open: the wide screen reopens the last paper, so forget it."""
+        """The page as it lands, with no paper open: the graph with the most papers (the account's
+        graph open last is forgotten first, so every test lands the same)."""
         if user:
             self.as_user(user)
         b = self.b
+        self.r.q("DELETE FROM ui_state")
+        b.goto("about:blank")
         b.goto(self.base + "/")
-        b.js("localStorage.removeItem('pcg.last'); localStorage.removeItem('pcg.sort'); sessionStorage.removeItem('pcg.tag');"
-             " sessionStorage.removeItem('pcg.filters'); sessionStorage.removeItem('pcg.q')")
-        b.goto(self.base + "/")
-        b.wait_js("document.querySelectorAll('#rows .row').length > 0", 10, "page started")
+        b.wait_js("document.querySelectorAll('#gl .gl-row').length > 0 && /^#g=/.test(location.hash)"
+                  " && !!(window.PaperMap && PaperMap.current && PaperMap.current.debug.cur())", 10, "page started")
 
     def load(self, where=""):
         """A fresh load of the page at a hash (a hash alone would not reload it)."""
@@ -229,9 +237,10 @@ class PageBase(unittest.TestCase):
         self.b.goto(self.base + "/" + (f"#{where}" if where else ""))
 
     def open(self, pid, what="window open"):
+        """A paper by its address alone (#p=): it opens in a graph that has it."""
         self.b.js(f"location.hash = 'p={pid}'")
-        self.b.wait_js(f"!document.getElementById('paper').hidden && !!document.querySelector('{ROW.format(pid)}.sel')"
-                       " && document.getElementById('w-title').textContent !== ''", 10, what)
+        self.b.wait_js(f"!document.getElementById('paper').hidden && new URLSearchParams(location.hash.slice(1)).get('p') === '{pid}'"
+                       " && /(^#|&)g=/.test(location.hash) && document.getElementById('w-title').textContent !== ''", 10, what)
 
     def text(self, sel):
         return self.b.js(f"(document.querySelector({json.dumps(sel)}) || {{}}).textContent")
@@ -240,13 +249,13 @@ class PageBase(unittest.TestCase):
         self.b.call("Emulation.setDeviceMetricsOverride", width=390, height=844, deviceScaleFactor=1, mobile=True)
 
     def assertTargets(self, where):
-        # the phone's window at rest, not sliding in or out (a control mid-slide is at no place)
-        self.b.wait_js("(w => !w || !w.getAnimations().length)(document.getElementById('win'))", 3, "the window at rest")
+        # the phone's window and lists at rest, not sliding in or out (a control mid-slide is at no place)
+        self.b.wait_js("['win', 'gpl'].every(id => (w => !w || !w.getAnimations().length)(document.getElementById(id)))", 3, "the window at rest")
         bad = json.loads(self.b.js(TAP_TARGETS))
         self.assertEqual(bad, [], f"phone, {where}: {len(bad)} tap target(s) too small or covered:\n" + "\n".join(bad))
 
     def no_side_scroll(self, where):
-        for sel in ("document.documentElement", "document.getElementById('win')", "document.getElementById('list-pane')"):
+        for sel in ("document.documentElement", "document.getElementById('win')", COL, "document.getElementById('gpl')"):
             self.assertLessEqual(self.b.js(f"{sel}.scrollWidth - {sel}.clientWidth"), 0, f"{where}: {sel} scrolls sideways")
 
     def puts(self, since):
@@ -295,7 +304,9 @@ class Page(PageBase):
             bar = rect("#bar")
             self.assertEqual(b.js("getComputedStyle(document.getElementById('bar')).position"), "fixed")
             self.assertEqual([round(v) for v in (bar[0], bar[2], bar[3])], [0, vw, vh], "the bar is not along the bottom")
-            self.assertAlmostEqual(rect(".app")[3], bar[1], delta=1, msg="the list and the window do not end at the bar")
+            self.assertAlmostEqual(rect(".app")[3], bar[1], delta=1, msg="the column, the map and the window do not end at the bar")
+            self.assertAlmostEqual(rect("#win")[3], bar[1], delta=1, msg="the window does not end at the bar")
+            self.assertAlmostEqual(rect("#map")[3], bar[1], delta=1, msg="the map does not end at the bar")
             self.assertEqual(self.text("#bar-title"), "Two Versions Of One Fake Paper")
             self.assertEqual(self.text("#bar-sub"), "by Alice · derivations")
             self.assertTrue(b.js("document.getElementById('w-play').hidden"), "the bar has this paper: no second Play")
@@ -310,8 +321,8 @@ class Page(PageBase):
                 b.call("Input.dispatchMouseEvent", type=kind, x=x0 + w * 0.75, y=y0, button="left", clickCount=1)
             b.wait_js(f"Math.abs({audio}.currentTime - 0.75 * {audio}.duration) < 0.8"
                       f" && document.getElementById('p-el').textContent === '0:' + String(Math.floor({audio}.currentTime)).padStart(2, '0')", 5, "sought")
-            # the middle and the list scroll under it; it stays
-            b.js("document.getElementById('p-mid').scrollTop = 200; document.getElementById('list-pane').scrollTop = 400")
+            # the middle and the column scroll under it; it stays
+            b.js("document.getElementById('p-mid').scrollTop = 200; document.getElementById('gcol').scrollTop = 400")
             self.assertEqual(rect("#bar"), bar)
             # another paper open: the bar keeps the one playing, and the other paper has its own Play
             b.js(f"document.getElementById('p-play').click()")
@@ -322,7 +333,7 @@ class Page(PageBase):
             b.wait_js(f"!document.getElementById('w-play').hidden && !{audio}.paused", 3, "the open paper's own Play")
             # the bar's title opens the paper that plays
             b.js("document.getElementById('bar-open').click()")
-            b.wait_js(f"location.hash === '#p={self.two}' && document.getElementById('w-play').hidden", 5, "back to it from the bar")
+            b.wait_js(f"location.hash.endsWith('p={self.two}') && document.getElementById('w-play').hidden", 5, "back to it from the bar")
             self.open(self.many[0])
             b.js("document.getElementById('w-play').click()")
             b.wait_js("document.getElementById('bar-title').textContent === 'Fake paper n000'"
@@ -338,83 +349,71 @@ class Page(PageBase):
             b.js("localStorage.clear()")
             self.r.q("DELETE FROM positions")
 
-    def test_1_list_pages_of_50_with_makers(self):
-        """The first 50 rows, 50 more as the list is scrolled to its end, nothing on screen
-        moving; each row says who made the version that plays; search finds makers too."""
+    def test_1_a_paper_opens_in_its_graph_with_its_window(self):
+        """No list of papers: the home is the graph list and the map. A paper's address (#p=) opens
+        it in a graph that has it, else under Not in any graph; its window says who made the
+        version that plays and how far each version is; closing it returns to the map."""
         b = self.b
         self.home(A)
-        self.assertEqual(b.js(ROWS), self.order[:50])
-
-        def more(n, what):
-            last = b.js(f"{ROWS}.slice(-1)[0]")
-            b.js(f"{PANE}.scrollTop = {PANE}.scrollHeight")
-            top = b.js(f"{PANE}.scrollTop")
-            y = b.js(f"document.querySelector('{ROW.format(last)}').getBoundingClientRect().top")
-            b.wait_js(f"{ROWS}.length === {n}", 5, what)
-            self.assertEqual(b.js(f"{PANE}.scrollTop"), top)
-            self.assertEqual(b.js(f"document.querySelector('{ROW.format(last)}').getBoundingClientRect().top"), y)
-
-        more(100, "the second page")
-        more(len(self.order), "the rest")
-        self.assertEqual(b.js(ROWS), self.order)
-        by = lambda pid: self.text(ROW.format(pid) + " .row-by")
-        sub = lambda pid: self.text(ROW.format(pid) + " .row-sub .st")
-        self.assertEqual(by(self.two), "by Alice · derivations")      # Alice's own plays for her
-        self.assertEqual(sub(self.two), "1 min")
-        self.assertEqual(self.text(ROW.format(self.two) + " .row-sub .nv"), "· 2 versions")
-        self.assertIsNone(b.js(f"document.querySelector('{ROW.format(self.wait)} .nv')"))
-        self.assertEqual(by(self.wait), "by Bob")
-        self.assertEqual(sub(self.wait), "Waiting for GPU")
-        self.assertEqual(sub(self.speak), "Speaking 40%")
-        self.assertEqual(by(self.many[0]), "by Alice · derivations")
-        self.assertEqual(sub(self.many[0]), "30 min")
-        # no tick where there is nothing to listen to yet
-        self.assertIsNone(b.js(f"document.querySelector('{ROW.format(self.wait)} .tick')"))
-        # search: a maker's name
-        b.js("{ const s = document.getElementById('search'); s.value = 'bob'; s.dispatchEvent(new Event('input')); }")
-        b.wait_js(f"JSON.stringify({ROWS}) === {js_list([self.speak, self.wait, self.two])}", 5, "Bob's papers")
-        b.js("{ const s = document.getElementById('search'); s.value = 'n117'; s.dispatchEvent(new Event('input')); }")
-        b.wait_js(f"JSON.stringify({ROWS}) === {js_list([self.many[117]])}", 5, "by title")
-        # a tag filters the list
-        b.js("{ const s = document.getElementById('search'); s.value = ''; s.dispatchEvent(new Event('input')); }")
-        b.wait_js(f"{ROWS}.length === 50", 5, "search cleared")
-        b.js(f"[...document.querySelectorAll('{ROW.format(self.two)} .tag')].find(t => t.textContent === 'diffusion').click()")
-        b.wait_js(f"JSON.stringify({ROWS}) === {js_list([self.two])} && !document.getElementById('filter').hidden", 5, "tag filter")
-        b.js("document.getElementById('filter-clear').click()")
-        self.shot("desktop-list")
+        self.assertIsNone(b.js("document.getElementById('rows')"))
+        self.assertIsNone(b.js("document.getElementById('list-pane')"))
+        gen = db.conn().execute("SELECT id FROM graphs WHERE name = 'Diffusion and generative models'").fetchone()[0]
+        self.open(self.two)                                     # tagged "diffusion": the seed graph has it
+        self.assertEqual(b.js("new URLSearchParams(location.hash.slice(1)).get('g')"), gen)
+        b.wait_js(f"PaperMap.current.debug.cur().id === '{gen}' && PaperMap.current.debug.state().sel === '{self.two}'", 5, "its card on the map")
+        self.assertEqual(self.text("#w-maker"), "by Alice · derivations")      # Alice's own plays for her
+        self.assertEqual(b.js("[...document.querySelectorAll('#vlist .v-st')].map(x => x.textContent)"), ["1 min", "1 min"])
+        self.open(self.wait)                                    # tagged "robotics": in no graph
+        self.assertEqual(b.js("new URLSearchParams(location.hash.slice(1)).get('g')"), "none")
+        self.assertEqual(self.text("#w-maker"), "by Bob")
+        self.assertEqual(b.js("document.querySelector('#w-state .big').textContent"), "Waiting for GPU")
+        self.open(self.speak)
+        self.assertEqual(b.js("document.querySelector('#w-state .big').textContent"), "Speaking 40%")
+        self.open(self.many[0])
+        self.assertEqual(self.text("#w-maker"), "by Alice · derivations")
+        # closed: the map again, and the graph it was in
+        b.js("document.getElementById('w-close').click()")
+        b.wait_js("document.getElementById('paper').hidden && location.hash === '#g=none' && getComputedStyle(document.getElementById('win')).visibility === 'hidden'", 5, "closed")
+        self.shot("desktop-home")
 
     def test_2_listened_is_each_persons_own(self):
+        """The Listened tick, in the paper's window: each person's own, and from another device of
+        theirs at once."""
         b, r = self.b, self.r
         x, y, z = self.many[119], self.many[118], self.many[117]
-        tick = lambda pid: b.js(f"document.querySelector('{ROW.format(pid)} .tick').getAttribute('aria-checked')")
+        tick = "document.getElementById('w-listened').getAttribute('aria-checked')"
         try:
             self.home(A)
-            b.js(f"document.querySelector('{ROW.format(x)} .tick').click()")
-            b.wait_js(f"document.querySelector('{ROW.format(x)} .tick').getAttribute('aria-checked') === 'true'"
-                      f" && document.querySelector('{ROW.format(x)}').classList.contains('listened')", 5, "ticked")
+            self.open(x)
+            b.js("document.getElementById('w-listened').click()")
+            b.wait_js(f"{tick} === 'true'", 5, "ticked")
             r.wait(lambda: r.q("SELECT 1 FROM listened WHERE user_id = ? AND paper_id = ?", self.alice, x), 5, "stored for Alice")
             self.home(B)
-            self.assertEqual(tick(x), "false")                           # Alice's tick is hers
-            b.js(f"document.querySelector('{ROW.format(y)} .tick').click()")
+            self.open(x)
+            self.assertEqual(b.js(tick), "false")                           # Alice's tick is hers
+            self.open(y)
+            b.js("document.getElementById('w-listened').click()")
             r.wait(lambda: r.q("SELECT 1 FROM listened WHERE user_id = ? AND paper_id = ?", self.bob, y), 5, "stored for Bob")
             self.home(A)
-            self.assertEqual((tick(x), tick(y)), ("true", "false"))
-            # in the window too, and from another device of hers while the page is open
+            self.open(x)
+            self.assertEqual(b.js(tick), "true")
+            self.open(y)
+            self.assertEqual(b.js(tick), "false")
+            # from another device of hers while the page is open
             self.open(z)
-            self.assertEqual(b.js("document.getElementById('w-listened').getAttribute('aria-checked')"), "false")
+            self.assertEqual(b.js(tick), "false")
             r.req("PUT", f"/api/papers/{z}/listened", {"listened": True}, user=A)
-            b.wait_js("document.getElementById('w-listened').getAttribute('aria-checked') === 'true'"
-                      f" && document.querySelector('{ROW.format(z)} .tick').getAttribute('aria-checked') === 'true'", 5, "her other device")
-            r.req("PUT", f"/api/papers/{y}/listened", {"listened": False}, user=B)
-            r.req("PUT", f"/api/papers/{x}/listened", {"listened": True}, user=B)     # Bob's, not hers: no change here
+            b.wait_js(f"{tick} === 'true'", 5, "her other device")
+            r.req("PUT", f"/api/papers/{x}/listened", {"listened": False}, user=B)     # Bob's, not hers: no change here
             time.sleep(0.8)
-            self.assertEqual((tick(x), tick(y)), ("true", "false"))
+            self.open(x)
+            self.assertEqual(b.js(tick), "true")
             b.js("document.getElementById('w-listened').click()")
-            r.wait(lambda: not r.q("SELECT 1 FROM listened WHERE user_id = ? AND paper_id = ?", self.alice, z), 5, "unticked")
+            r.wait(lambda: not r.q("SELECT 1 FROM listened WHERE user_id = ? AND paper_id = ?", self.alice, x), 5, "unticked")
         finally:
             r.q("DELETE FROM listened")
 
-    def test_3_versions_under_one_row(self):
+    def test_3_versions_in_one_window(self):
         b, r = self.b, self.r
         src = "document.getElementById('audio').getAttribute('src')"
         checked = "[...document.querySelectorAll('#vlist .ver')].map(v => v.getAttribute('aria-checked') + ' ' + v.textContent)"
@@ -425,13 +424,11 @@ class Page(PageBase):
             b.wait_js(f"{src} === '/audio/{self.va}.mp3'", 5, "Alice's version loaded")
             self.assertEqual(self.text("#w-maker"), "by Alice · derivations")
             self.assertEqual(b.js(checked), ["true by Alicederivations1 min", "false by Bobpractical1 min"])
-            self.assertEqual(b.js("document.querySelectorAll('#rows .row').length"), 50)
-            self.assertEqual(b.js(f"document.querySelectorAll('{ROW.format(self.two)}').length"), 1)
-            # she picks Bob's: the player, the window and the row follow, and it is remembered
+            # she picks Bob's: the player and the window follow, and it is remembered
             b.js(f"document.querySelector('#vlist .ver[data-ep=\"{self.vb}\"]').click()")
             b.wait_js(f"{src} === '/audio/{self.vb}.mp3'", 5, "Bob's version loaded")
             self.assertEqual(self.text("#w-maker"), "by Bob · practical")
-            self.assertEqual(self.text(ROW.format(self.two) + " .row-by"), "by Bob · practical")
+            self.assertEqual(self.text("#bar-sub"), "by Bob · practical")
             self.load(f"p={self.two}")
             b.wait_js(f"{src} === '/audio/{self.vb}.mp3'", 5, "the pick kept")
             self.shot("desktop-versions")
@@ -464,8 +461,8 @@ class Page(PageBase):
             # the first save came as it started; the pause's is the one that stays
             r.wait(lambda: pos(self.carol, self.va) and abs(pos(self.carol, self.va)[0][0] - at) < 0.3, 5, "the position on the hub")
             self.assertEqual(pos(self.bob, self.va), [])                          # Carol's alone
-            # the row says how much is left
-            b.wait_js(f"document.querySelector('{ROW.format(self.two)} .row-sub .st').textContent === '1 min left'", 5, "row")
+            # its version says how much is left
+            b.wait_js(f"document.querySelector('#vlist .ver[data-ep=\"{self.va}\"] .v-st').textContent === '1 min left'", 5, "left")
             # a fresh load resumes where she paused
             self.load(f"p={self.two}")
             b.wait_js(f"{audio}.readyState >= 1 && Math.abs({audio}.currentTime - {at}) < 0.6", 10, "resumed from the hub")
@@ -584,9 +581,9 @@ class Page(PageBase):
             b.js("[...document.querySelectorAll('#set-body .btn-accent')].find(x => x.textContent === 'Make an invite link').click()")
             b.wait_js("!document.getElementById('invite-link').hidden", 5, "invite link")
             self.assertRegex(b.js("document.getElementById('invite-link').value"), r"/join/[\w-]+$")
-            # back to the list
+            # back to the graph
             b.js("document.getElementById('set-btn').click()")
-            b.wait_js("document.getElementById('settings').hidden && location.hash === ''", 5, "closed")
+            b.wait_js("document.getElementById('settings').hidden && /^#g=/.test(location.hash)", 5, "closed")
         finally:
             r.cfg.auth = "header"
             r.q("DELETE FROM prefs")
@@ -670,38 +667,37 @@ class Page(PageBase):
     def test_7_delete_a_version_with_undo(self):
         b, r = self.b, self.r
         deleted = lambda eid: r.q("SELECT deleted_at FROM episodes WHERE id = ?", eid)[0][0]
+        items = "[...document.querySelectorAll('.menu [role=menuitem]')].map(x => x.textContent)"
         try:
-            # Carol made nothing: no ⋯ on a row with nothing to play, no Delete in the window's menu
+            # Carol made nothing: no Delete in the window's menu
             self.home(C)
-            self.assertIsNone(b.js(f"document.querySelector('{ROW.format(self.wait)} .more')"))
             self.open(self.two)
             b.js("document.getElementById('w-more').click()")
             b.wait_js("!!document.querySelector('.menu')", 3, "menu")
-            self.assertEqual(b.js("[...document.querySelectorAll('.menu [role=menuitem]')].map(x => x.textContent)"),
-                             ["Play next", "Add to Up next", "Details", "Open paper link"])
+            self.assertEqual(b.js(items), ["Play next", "Add to Up next", "Details", "Open paper link"])
             b.js("document.getElementById('w-more').click()")
-            # Bob deletes his only version of a paper: the row goes; Undo brings it back
+            # Bob deletes his only version of a paper: it leaves the library, its window closes; Undo brings it back
             self.home(B)
-            b.js(f"document.querySelector('{ROW.format(self.wait)} .more').click()")
-            b.wait_js("!!document.querySelector('.menu')", 3, "row menu")
-            self.assertEqual(b.js("[...document.querySelectorAll('.menu button')].map(x => x.textContent)"), ["Delete my version"])
-            b.js("document.querySelector('.menu button').click()")
-            b.wait_js(f"!document.querySelector('{ROW.format(self.wait)}') && !document.getElementById('toast').hidden", 5, "deleted")
+            self.open(self.wait)
+            b.js("document.getElementById('w-more').click()")
+            b.wait_js("!!document.querySelector('.menu')", 3, "menu")
+            self.assertEqual(b.js(items), ["Details", "Delete my version"])
+            b.js("[...document.querySelectorAll('.menu button')].find(x => x.textContent === 'Delete my version').click()")
+            b.wait_js("document.getElementById('paper').hidden && !document.getElementById('toast').hidden", 5, "deleted")
             self.assertEqual(self.text("#toast-msg"), "Deleted “A Fake Paper Waiting For…”")
             r.wait(lambda: deleted(self.ew), 5, "deleted on the hub")
             b.js("document.getElementById('toast-act').click()")
-            b.wait_js(f"!!document.querySelector('{ROW.format(self.wait)}')", 5, "back")
             r.wait(lambda: deleted(self.ew) is None, 5, "undone on the hub")
+            self.open(self.wait, "back in the library")
             # his version of the two: the paper stays, with Alice's alone
             self.open(self.two)
             b.js("document.getElementById('w-more').click()")
             b.js("[...document.querySelectorAll('.menu button')].find(x => x.textContent === 'Delete my version').click()")
             b.wait_js("document.getElementById('versions').hidden && document.getElementById('w-maker').textContent === 'by Alice · derivations'"
                       " && !document.getElementById('toast').hidden && document.getElementById('toast-msg').textContent === 'Deleted your version'", 5, "one version left")
-            self.assertEqual(self.text(ROW.format(self.two) + " .row-by"), "by Alice · derivations")
             b.js("document.getElementById('toast-act').click()")
             b.wait_js("!document.getElementById('versions').hidden && document.querySelectorAll('#vlist .ver').length === 2", 5, "undone")
-            # an admin may delete Bob's; Carol, looking on, sees it go
+            # an admin may delete Bob's
             self.home(A)
             self.open(self.two)
             b.js(f"document.querySelector('#vlist .ver[data-ep=\"{self.vb}\"]').click()")
@@ -713,31 +709,33 @@ class Page(PageBase):
             r.q("UPDATE episodes SET deleted_at = NULL")
 
     def test_8_live_events(self):
-        """A version voiced on the hub, a new paper, a resync: the list follows without a reload,
-        and only the rows that changed are filled again."""
+        """A version voiced on the hub, a new paper, a resync: the window and the graph list
+        follow without a reload."""
         b, r = self.b, self.r
         new = None
+        none_n = f"Number(document.querySelector('{GROW.format('none')} .gl-n').textContent)"
         try:
             self.home(C)
-            b.js("window.__nodes = new Map([...document.querySelectorAll('#rows .row')].map(li => [li.dataset.id, li.querySelector('.row-title')]))")
+            self.open(self.wait)
+            b.wait_js("!document.getElementById('w-state').hidden", 5, "waiting")
             (r.cfg.episodes / self.ew / "audio.mp3").write_bytes((r.cfg.episodes / self.va / "audio.mp3").read_bytes())
             r.q("UPDATE episodes SET state = 'ready', duration_s = 600 WHERE id = ?", self.ew)
             publish("episode", {"id": self.ew, "state": "ready"})           # no paper id: the page knows it
-            b.wait_js(f"document.querySelector('{ROW.format(self.wait)} .row-sub .st').textContent === '10 min'"
-                      f" && !!document.querySelector('{ROW.format(self.wait)} .tick')", 5, "voiced")
-            same = ("[...window.__nodes].filter(([id, t]) => { const li = document.querySelector(`#rows .row[data-id=\"${id}\"]`);"
-                    " return li && li.querySelector('.row-title') === t; }).map(([id]) => id)")
-            self.assertEqual(b.js(same), [x for x in self.order[:50] if x != self.wait])
-            # a new paper someone just uploaded
+            b.wait_js("document.getElementById('w-state').hidden && !document.getElementById('w-listened').hidden", 5, "voiced")
+            # a new paper someone just uploaded, in no graph: Not in any graph has one more
+            n0 = b.js(none_n)
             new = r.paper("A Brand New Fake Paper", self.bob)
             r.episode(new, self.bob, state="checking")
             publish("episode", {"id": "e_unknown00000", "paper_id": new, "state": "checking"})
-            b.wait_js(f"{ROWS}[0] === '{new}'", 5, "new row on top")
-            self.assertEqual(self.text(ROW.format(new) + " .row-sub .st"), "Checking…")
-            # resync: the whole list again
+            publish("paper", {"id": new, "new": True})
+            b.wait_js(f"{none_n} === {n0 + 1}", 5, "one more paper in no graph")
+            self.open(new)
+            self.assertEqual(b.js("document.querySelector('#w-state .big').textContent"), "Checking…")
+            # resync: the library again
+            self.open(self.speak)
             r.q("UPDATE papers SET title = 'Renamed Fake Paper' WHERE id = ?", self.speak)
             publish("resync", {})
-            b.wait_js(f"document.querySelector('{ROW.format(self.speak)} .row-title').textContent === 'Renamed Fake Paper'", 5, "resynced")
+            b.wait_js("document.getElementById('w-title').textContent === 'Renamed Fake Paper'", 5, "resynced")
         finally:
             r.q("UPDATE episodes SET state = 'waiting-for-gpu', duration_s = NULL WHERE id = ?", self.ew)
             (r.cfg.episodes / self.ew / "audio.mp3").unlink(missing_ok=True)
@@ -745,13 +743,16 @@ class Page(PageBase):
             if new:
                 r.q("UPDATE episodes SET deleted_at = '2026-09-01T00:00:00Z' WHERE paper_id = ?", new)
 
-    def test_9_map_button_opens_the_map(self):
-        """The Map button loads map.js (A6's) on first use and mounts it over the page."""
+    def test_9_the_map_is_the_home(self):
+        """map.js is mounted at the start, beside the column, with the graph the page landed on;
+        no Map button."""
         b = self.b
         self.home(A)
-        b.js("document.getElementById('map-btn').click()")
-        b.wait_js("!document.getElementById('map').hidden && !!(window.PaperMap && document.querySelector('#map canvas'))",
-                  10, "map mounted")
+        self.assertIsNone(b.js("document.getElementById('map-btn')"))
+        b.wait_js("!document.getElementById('map').hidden && !!document.querySelector('#map canvas')", 10, "map mounted")
+        col, m = b.js("[document.getElementById('gcol'), document.getElementById('map')].map(e => (r => [r.left, r.right])(e.getBoundingClientRect()))")
+        self.assertAlmostEqual(col[1], m[0], delta=1.5, msg="the map is not beside the column")
+        self.assertEqual(b.js("PaperMap.current.debug.cur().id"), b.js("new URLSearchParams(location.hash.slice(1)).get('g')"))
 
     def test_y_the_page_at_each_size(self):
         """100%, 125% (the default) and 150% (theme.js's CSS zoom): the page fills the window and
@@ -764,13 +765,13 @@ class Page(PageBase):
             with self.subTest(size=size):
                 b.pin_size(size)
                 self.load()
-                b.wait_js("document.querySelectorAll('#rows .row').length > 0", 10, "page started")
+                b.wait_js("document.querySelectorAll('#gl .gl-row').length > 0", 10, "page started")
                 z = size and int(size) / 100
                 self.assertEqual(b.js("document.documentElement.currentCSSZoom"), z)
                 self.no_side_scroll(f"{size}%")
                 self.open(self.two)
                 b.wait_js("!document.getElementById('bar').hidden", 5, "the bar")
-                # the list and the window, then the player bar under them: the window, and no more
+                # the column, the map and the window, then the player bar under them: the window, and no more
                 a = b.js("[document.querySelector('.app'), document.getElementById('bar')].map(e => (r => [r.left, r.top, r.right, r.bottom])(e.getBoundingClientRect()))")
                 self.assertEqual([round(v) for v in a[0][:3] + a[1][2:]], [0, 0, 1440, 1440, 900], "the page does not fill the window")
                 self.assertAlmostEqual(a[0][3], a[1][1], delta=1, msg="the window does not end at the bar")
@@ -792,26 +793,20 @@ class Page(PageBase):
                 b.wait_js("Math.abs(Number(document.getElementById('scrub').getAttribute('aria-valuenow')) - 7.5) <= 0.6", 5, f"{size}%: a quarter of 30 s")
                 b.js("(a => a && a.pause())(document.querySelector('audio'))")
         # the phone at 125% (390 / 340 = 1.147 at most, so the page keeps 340 CSS px): nothing
-        # scrolls sideways, and a row swiped follows the finger, then opens its Delete
-        self.addCleanup(lambda: (b.call("Emulation.setTouchEmulationEnabled", enabled=False), b.viewport(1440, 900)))
+        # scrolls sideways, on the list of graphs, a graph's papers, or a paper
+        self.addCleanup(lambda: b.viewport(1440, 900))
         self.phone()
-        b.call("Emulation.setTouchEmulationEnabled", enabled=True, maxTouchPoints=1)
         b.pin_size("125")
         self.load()
-        b.wait_js("document.querySelectorAll('#rows .row').length > 0", 10, "page started")
+        b.wait_js("document.querySelectorAll('#gl .gl-row').length > 0 && document.body.classList.contains('gpl-open')", 10, "page started")
         z = b.js("document.documentElement.currentCSSZoom")
         self.assertAlmostEqual(z, 1.147, places=3)
-        self.no_side_scroll("the phone at 125%")
-        inner = f"document.querySelector('{ROW.format(self.many[-1])} .row-in')"
-        b.js(f"{inner}.scrollIntoView({{block: 'center'}})")
-        x, y, left0 = b.js(f"(r => [r.left + r.width / 2, r.top + r.height / 2, r.left])({inner}.getBoundingClientRect())")
-        b.call("Input.dispatchTouchEvent", type="touchStart", touchPoints=[{"x": x, "y": y}])
-        for dx in range(10, 70, 10):
-            b.call("Input.dispatchTouchEvent", type="touchMove", touchPoints=[{"x": x - dx, "y": y}])
-        b.wait_js(f"Math.abs({inner}.getBoundingClientRect().left - ({left0} - 60)) < 2", 3, "the row under the finger")
-        b.call("Input.dispatchTouchEvent", type="touchEnd", touchPoints=[])
-        b.wait_js(f"{inner}.style.transform === 'translateX(-88px)'", 3, "the row's Delete open")
-        b.wait_js(f"Math.abs({inner}.getBoundingClientRect().left - ({left0} - 88 * {z})) < 2", 3, "88 CSS px open, after the slide")
+        self.no_side_scroll("a graph's papers, the phone at 125%")
+        b.js("document.getElementById('gpl-back').click()")
+        b.wait_js("!document.body.classList.contains('gpl-open')", 5, "the list of graphs")
+        self.no_side_scroll("the list of graphs, the phone at 125%")
+        self.open(self.two)
+        self.no_side_scroll("a paper, the phone at 125%")
 
     def test_z_phone_tap_targets(self):
         """On a phone every control, in every state, takes a 44 x 44 px tap that reaches it."""
@@ -819,12 +814,22 @@ class Page(PageBase):
         try:
             self.phone()
             self.home(A)
-            self.assertTargets("the list")
-            self.no_side_scroll("the list")
-            b.js(f"{PANE}.scrollTop = {PANE}.scrollHeight")
-            b.wait_js(f"{ROWS}.length === 100", 5, "the second page")
-            self.assertTargets("the list, two pages")
-            b.js(f"{PANE}.scrollTop = 0")
+            # where it lands: a graph's papers, over the list of graphs
+            b.wait_js("document.body.classList.contains('gpl-open') && document.querySelectorAll('#gpl-rows .gpl-row').length > 0", 5, "a graph's papers")
+            self.assertTargets("a graph's papers")
+            self.no_side_scroll("a graph's papers")
+            b.js("document.getElementById('gpl-back').click()")
+            b.wait_js("!document.body.classList.contains('gpl-open')", 5, "the list of graphs")
+            self.assertTargets("the list of graphs")
+            self.no_side_scroll("the list of graphs")
+            b.js(f"document.querySelector('{GROW.format('none')} .gl-open').click()")
+            b.wait_js("document.body.classList.contains('gpl-open') && document.querySelectorAll('#gpl-rows .gpl-row').length > 100", 5, "Not in any graph")
+            self.assertTargets("Not in any graph's papers")
+            b.js("document.getElementById('gpl-map').click()")
+            b.wait_js("!document.getElementById('map').hidden && !!PaperMap.current.debug.cur()._s", 5, "the drawing")
+            self.assertTargets("the drawing")
+            b.js("history.back()")
+            b.wait_js("document.getElementById('map').hidden", 5, "back to the papers")
             self.open(self.two)
             b.wait_js("getComputedStyle(document.getElementById('win')).visibility === 'visible' && document.getElementById('audio').duration > 20", 10, "window")
             self.assertTargets("a paper with two versions")
@@ -878,7 +883,7 @@ class Page(PageBase):
             b.wait_js("!document.getElementById('toast').hidden && getComputedStyle(document.getElementById('win')).visibility === 'hidden'", 5, "toast")
             self.assertTargets("the Undo toast")
             b.js("document.getElementById('toast-act').click()")
-            b.wait_js(f"!!document.querySelector('{ROW.format(self.many[119])}')", 5, "undone")
+            r.wait(lambda: r.q("SELECT deleted_at FROM episodes WHERE paper_id = ?", self.many[119])[0][0] is None, 5, "undone")
         finally:
             b.viewport(1440, 900)
             b.js("localStorage.clear()")
@@ -887,22 +892,30 @@ class Page(PageBase):
             r.q("DELETE FROM tokens")
 
 
-FAKE_MAP = """// a stand-in for map.js (A6's): records how it was mounted
+FAKE_MAP = """// a stand-in for map.js (A6's): records how it was mounted, and plays the page's part of it
 window.PaperMap = { mount: function (host, opts) {
-  window.__map = { opts: opts, events: [], changed: 0 };
+  var cur = null;
+  window.__map = { opts: opts, events: [], changed: 0, graphs: [] };
   host.textContent = "";
   var b = document.createElement("button");
   b.type = "button"; b.id = "fake-open"; b.textContent = "Open"; host.appendChild(b);
   b.addEventListener("click", function () { opts.onOpen(Array.from(opts.papers.keys())[0]); });
+  function list() {
+    fetch("/api/graphs", { credentials: "same-origin" }).then(function (r) { return r.json(); }).then(function (r) { opts.onList(r); });
+  }
+  list();
   return { show: function () {}, hide: function () {}, changed: function () { window.__map.changed++; },
-           event: function (k, d) { window.__map.events.push(k); } };
+           event: function (k, d) { window.__map.events.push(k); },
+           graph: function (gid) { cur = gid; window.__map.graphs.push(gid); if (opts.onShow) opts.onShow(gid); },
+           current: function () { return cur; }, select: function () {}, refreshList: list, data: function () { return null; },
+           inset: function () {} };
 } };
 """
 
 
 @unittest.skipIf(SKIP, SKIP or "")
 class Map(PageBase):
-    """With map.js there: mounted with the group's options, opens papers, hears the events."""
+    """With map.js there: mounted with the group's options at the start, opens papers, hears the events."""
 
     @classmethod
     def setUpClass(cls):
@@ -910,7 +923,7 @@ class Map(PageBase):
         cls.static = Path(cls.tmp.name) / "static"
         shutil.copytree(STATIC, cls.static)
         (cls.static / "map.js").write_text(FAKE_MAP)
-        (cls.static / "map.css").write_text("#map { position: fixed; inset: 0; z-index: 30; background: #fff; }\n")
+        (cls.static / "map.css").write_text("#map { position: fixed; inset: 0 0 0 340px; background: #fff; }\n")
         super().setUpClass()
 
     @classmethod
@@ -929,21 +942,25 @@ class Map(PageBase):
 
     def test_map_mounts_with_the_group_options(self):
         b = self.b
-        self.home(A)
-        b.js("document.getElementById('map-btn').click()")
-        b.wait_js("!document.getElementById('map').hidden && !!window.__map", 5, "mounted")
-        o = json.loads(b.js("JSON.stringify({api: __map.opts.api, graphs: __map.opts.graphs, editable: __map.opts.editable, me: __map.opts.me,"
-                            " papers: __map.opts.papers instanceof Map ? __map.opts.papers.size : -1,"
-                            " fns: [typeof __map.opts.onOpen, typeof __map.opts.onClose]})"))
-        self.assertEqual(o, {"api": "", "graphs": True, "editable": True, "papers": 3, "fns": ["function", "function"],
+        self.as_user(A)
+        self.r.q("DELETE FROM ui_state")
+        b.goto("about:blank")
+        b.goto(self.base + "/")
+        b.wait_js("!!window.__map && /^#g=/.test(location.hash)", 5, "mounted, and landed")
+        o = json.loads(b.js("JSON.stringify({api: __map.opts.api, column: __map.opts.column, live: __map.opts.live, editable: __map.opts.editable, me: __map.opts.me,"
+                            " papers: __map.opts.papers instanceof Map ? __map.opts.papers.size : -1, head: __map.opts.head && __map.opts.head.id,"
+                            " fns: ['onOpen', 'onClose', 'onList', 'onShow', 'onData'].map(k => typeof __map.opts[k])})"))
+        self.assertEqual(o, {"api": "", "column": True, "live": True, "editable": True, "papers": 3, "head": "gh", "fns": ["function"] * 5,
                              "me": {"id": self.alice, "name": "Alice", "email": A, "role": "admin", "avatar": None}})
+        # no graph has a paper: it lands where the most papers are (all five have none: the first by name), never prefetching
+        self.assertEqual(b.js("__map.graphs.length"), 1)
         publish("graph", {"id": "g_test"})
         publish("log", {"id": 1})
         b.wait_js("__map.events.includes('graph') && __map.events.includes('log')", 5, "graph events to the map")
         self.r.req("PUT", f"/api/papers/{self.papers[0]}/listened", {"listened": True}, user=A)
         b.wait_js("__map.changed > 0 && __map.opts.papers.get(" + json.dumps(self.papers[0]) + ").listened === true", 5, "a tick reaches the map")
         b.js("document.getElementById('fake-open').click()")
-        b.wait_js(f"document.getElementById('map').hidden && location.hash === '#p={self.papers[2]}' && !document.getElementById('paper').hidden", 5, "opened from the map")
+        b.wait_js(f"location.hash.endsWith('&p={self.papers[2]}') && !document.getElementById('paper').hidden", 5, "opened from the map")
         self.r.q("DELETE FROM listened")
 
 
